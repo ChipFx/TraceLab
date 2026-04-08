@@ -7,10 +7,10 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QComboBox, QCheckBox, QPushButton, QScrollArea,
     QWidget, QGroupBox, QDoubleSpinBox, QTabWidget,
-    QMessageBox, QRadioButton, QButtonGroup, QFrame, QValidator
+    QMessageBox, QRadioButton, QButtonGroup, QFrame
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont, QDoubleValidator, QValidator
+from PyQt6.QtGui import QColor, QFont
 import numpy as np
 from typing import Dict, List, Optional
 from core.data_loader import LoadResult, is_numeric_column, CsvMetadata, parse_value

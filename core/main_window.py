@@ -20,6 +20,7 @@ from core.import_dialog import ImportDialog
 from core.scope_plot_widget import ScopePlotWidget
 from core.channel_panel import ChannelPanel
 from core.cursor_panel import CursorPanel
+from core.trigger_panel import TriggerPanel
 from core.plugin_manager import PluginManager
 
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
@@ -112,9 +113,23 @@ class MainWindow(QMainWindow):
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._splitter.addWidget(self._plot)
 
+        # Right panel: cursor readout + trigger, stacked vertically
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+
         self._cursor_panel = CursorPanel()
         self._cursor_panel.place_cursor.connect(self._start_cursor_placement)
-        self._splitter.addWidget(self._cursor_panel)
+        right_splitter.addWidget(self._cursor_panel)
+
+        self._trigger_panel = TriggerPanel()
+        self._trigger_panel.trigger_found.connect(self._on_trigger_found)
+        self._trigger_panel.set_time_zero.connect(self._on_trigger_set_t0)
+        self._trigger_panel.place_cursor.connect(self._plot.set_cursor)
+        right_splitter.addWidget(self._trigger_panel)
+
+        right_splitter.setStretchFactor(0, 2)
+        right_splitter.setStretchFactor(1, 1)
+        right_splitter.setSizes([420, 280])
+        self._splitter.addWidget(right_splitter)
 
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
@@ -332,11 +347,13 @@ class MainWindow(QMainWindow):
         self._traces.append(trace)
         self._channel_panel.add_trace(trace)
         self._plot.add_trace(trace)
+        self._refresh_trigger_channels()
 
     def _remove_trace(self, trace_name: str):
         self._traces = [t for t in self._traces if t.name != trace_name]
         self._channel_panel.remove_trace(trace_name)
         self._plot.remove_trace(trace_name)
+        self._refresh_trigger_channels()
         self._update_status()
 
     def _clear_all(self, confirm: bool = True):
@@ -352,6 +369,7 @@ class MainWindow(QMainWindow):
             self._channel_panel.remove_trace(t.name)
         self._traces.clear()
         self._plot.clear_all()
+        self._refresh_trigger_channels()
         self._update_status()
 
     def _export_csv(self):
@@ -584,6 +602,33 @@ class MainWindow(QMainWindow):
             "<code>#gain=2.5/4096</code>, <code>#offset=-1.25</code></p>"
             "<p>Plugins: drop <code>.py</code> files in the "
             "<code>plugins/</code> folder.</p>")
+
+    # ── Trigger handlers ──────────────────────────────────────────────
+
+    def _on_trigger_found(self, t_pos: float):
+        """Trigger located — optionally zoom context window around it."""
+        if self._trigger_panel.chk_zoom.isChecked():
+            x0, x1 = self._plot.get_current_view_range()
+            half_win = (x1 - x0) / 2
+            self._plot.zoom_x_range(t_pos - half_win, t_pos + half_win)
+
+    def _on_trigger_set_t0(self, t_pos: float):
+        """Shift all trace time axes so t_pos becomes 0."""
+        for trace in self._traces:
+            # Shift the stored time data
+            if trace.time_data is not None:
+                trace.time_data = trace.time_data - t_pos
+            else:
+                # Convert to explicit time array shifted by t_pos
+                import numpy as np
+                trace.time_data = trace.time_axis - t_pos
+            trace._computed_time = None  # invalidate cache
+        self._plot.refresh_all()
+        self._plot.zoom_full()
+        self._status_lbl.setText(f"t=0 set to trigger at {t_pos:.6g} s")
+
+    def _refresh_trigger_channels(self):
+        self._trigger_panel.update_traces(self._traces)
 
     # ── Channel order ─────────────────────────────────────────────────
 

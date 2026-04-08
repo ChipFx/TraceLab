@@ -127,9 +127,13 @@ class TraceLane(pg.PlotWidget):
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.setMenuEnabled(False)
         disp_color = _effective_color(self.trace.color, self.theme_name)
-        pi.setLabel("left",
-                     f"<span style='color:{disp_color}'>{self.trace.label}</span>",
-                     color=self.theme["text"])
+        unit = getattr(self.trace, 'unit', '') or ''
+        if unit and unit != 'raw':
+            ylabel = (f"<span style='color:{disp_color}'>"
+                      f"{self.trace.label}</span> [{unit}]")
+        else:
+            ylabel = f"<span style='color:{disp_color}'>{self.trace.label}</span>"
+        pi.setLabel("left", ylabel, color=self.theme["text"])
         pi.getAxis("left").setWidth(60)
         for ax_name in ("left", "bottom", "top", "right"):
             ax = pi.getAxis(ax_name)
@@ -335,6 +339,12 @@ class ScopePlotWidget(QWidget):
                     break
         else:
             self.traces.append(trace)
+        self._rebuild()
+
+    def reorder_traces(self, name_order: list):
+        """Reorder traces list to match channel panel order."""
+        name_idx = {n: i for i, n in enumerate(name_order)}
+        self.traces.sort(key=lambda t: name_idx.get(t.name, 999))
         self._rebuild()
 
     def clear_all(self):

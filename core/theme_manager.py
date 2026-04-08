@@ -97,12 +97,13 @@ class ThemeManager:
 
     def get_stylesheet(self) -> str:
         c = self._colors
+        _fs = max(8, int(11 * font_scale))
         return f"""
         QMainWindow, QWidget {{
             background-color: {c['bg']};
             color: {c['text']};
             font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-            font-size: 11px;
+            font-size: {_fs}px;
         }}
         QMenuBar {{
             background-color: {c['toolbar_bg']};

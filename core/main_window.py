@@ -7,10 +7,10 @@ import os, sys, json, copy
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QToolBar, QFileDialog, QMessageBox, QLabel, QPushButton,
-    QCheckBox, QMenu, QInputDialog, QDialog
+    QCheckBox, QMenu, QInputDialog, QDialog, QAction
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QKeySequence, QIcon, QPixmap, QColor, QAction
+from PyQt6.QtGui import QKeySequence, QIcon, QPixmap, QColor
 from typing import List, Optional
 
 from core.trace_model import TraceModel, DEFAULT_TRACE_COLORS, DEFAULT_TRACE_COLORS_LIGHT
@@ -79,6 +79,9 @@ class MainWindow(QMainWindow):
         # Apply saved theme
         if "theme" in self._settings:
             self._set_theme(self._settings["theme"], save=False)
+        # Apply saved font scale
+        if "font_scale" in self._settings:
+            self._apply_font_scale(self._settings["font_scale"])
 
     # ── UI Construction ────────────────────────────────────────────────
 
@@ -100,6 +103,7 @@ class MainWindow(QMainWindow):
         self._channel_panel.visibility_changed.connect(self._on_trace_visibility)
         self._channel_panel.color_changed.connect(self._on_trace_color)
         self._channel_panel.trace_removed.connect(self._remove_trace)
+        self._channel_panel.order_changed.connect(self._on_channel_order_changed)
         self._splitter.addWidget(self._channel_panel)
 
         plot_colors = self.theme.plot_colors()
@@ -115,7 +119,7 @@ class MainWindow(QMainWindow):
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setStretchFactor(2, 0)
-        self._splitter.setSizes([180, 900, 220])
+        self._splitter.setSizes([180, 820, 310])
         main_layout.addWidget(self._splitter)
 
     def _build_menus(self):
@@ -194,7 +198,14 @@ class MainWindow(QMainWindow):
         a = analysis_menu.addAction("Clear All Filters")
         a.triggered.connect(self._clear_all_filters)
 
-        # ── Plugins ───────────────────────────────────────────────────
+        # ── Settings ──────────────────────────────────────────────────
+        settings_menu = mb.addMenu("Settings")
+        settings_menu.addAction("Font Scale...").triggered.connect(
+            self._show_font_scale_dialog)
+        settings_menu.addAction("Decimal Separator...").triggered.connect(
+            self._show_decimal_sep_dialog)
+
+        # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Reload Plugins").triggered.connect(
             self._reload_plugins)
@@ -289,7 +300,12 @@ class MainWindow(QMainWindow):
             self._add_trace(trace)
 
         if dlg.reset_view:
-            QTimer.singleShot(50, self._plot.zoom_full)
+            meta = result.metadata
+            if (meta.view_time_start is not None or
+                    meta.view_sample_start is not None):
+                QTimer.singleShot(80, lambda: self._apply_viewport_from_metadata(meta))
+            else:
+                QTimer.singleShot(50, self._plot.zoom_full)
 
         self._update_status()
 
@@ -568,6 +584,139 @@ class MainWindow(QMainWindow):
             "<code>#gain=2.5/4096</code>, <code>#offset=-1.25</code></p>"
             "<p>Plugins: drop <code>.py</code> files in the "
             "<code>plugins/</code> folder.</p>")
+
+    # ── Channel order ─────────────────────────────────────────────────
+
+    def _on_channel_order_changed(self, name_order: list):
+        """Channel panel drag-reorder → update plot and cursor table."""
+        self._plot.reorder_traces(name_order)
+        self._cursor_panel.set_trace_order(name_order)
+
+    # ── Settings dialogs ───────────────────────────────────────────────
+
+    def _show_font_scale_dialog(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QDoubleSpinBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Font Scale")
+        dlg.setFixedWidth(340)
+        layout = QVBoxLayout(dlg)
+
+        current = self._settings.get("font_scale", 1.0)
+        layout.addWidget(QLabel(
+            "Scale all UI text. Affects menus, labels, panels.\n"
+            "Restart not required — applied immediately."))
+
+        hl = QHBoxLayout()
+        hl.addWidget(QLabel("Scale:"))
+        spin = QDoubleSpinBox()
+        spin.setRange(0.6, 3.0)
+        spin.setSingleStep(0.05)
+        spin.setDecimals(2)
+        spin.setValue(current)
+        hl.addWidget(spin)
+        hl.addWidget(QLabel("  (1.0 = normal, 1.25 = 125%)"))
+        layout.addLayout(hl)
+
+        def apply():
+            scale = spin.value()
+            self._settings["font_scale"] = scale
+            self._apply_font_scale(scale)
+
+        bh = QHBoxLayout()
+        btn_apply = QPushButton("Apply")
+        btn_apply.clicked.connect(apply)
+        btn_ok = QPushButton("OK")
+        btn_ok.clicked.connect(lambda: (apply(), dlg.accept()))
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(dlg.reject)
+        bh.addWidget(btn_apply); bh.addStretch()
+        bh.addWidget(btn_cancel); bh.addWidget(btn_ok)
+        layout.addLayout(bh)
+        dlg.exec()
+
+    def _apply_font_scale(self, scale: float):
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QFont
+        app = QApplication.instance()
+        base_size = 10  # pt
+        f = QFont()
+        f.setPointSize(max(7, int(base_size * scale)))
+        app.setFont(f)
+        # Re-apply stylesheet with scaled font-size
+        app.setStyleSheet(self.theme.get_stylesheet(font_scale=scale))
+
+    def _show_decimal_sep_dialog(self):
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+            QLabel, QComboBox, QPushButton, QGroupBox, QGridLayout)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Number Input Settings")
+        dlg.setFixedWidth(380)
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel(
+            "Configure how numbers are entered in input fields.\n"
+            "Applies to all Gain/Offset/frequency fields."))
+
+        grp = QGroupBox("Decimal Separator")
+        gl = QGridLayout(grp)
+        gl.addWidget(QLabel("Decimal point:"), 0, 0)
+        self._combo_decimal = QComboBox()
+        self._combo_decimal.addItems(["Both '.' and ',' accepted (default)",
+                                       "Dot '.' only",
+                                       "Comma ',' only"])
+        cur = self._settings.get("decimal_sep", "both")
+        idx = {"both": 0, "dot": 1, "comma": 2}.get(cur, 0)
+        self._combo_decimal.setCurrentIndex(idx)
+        gl.addWidget(self._combo_decimal, 0, 1)
+
+        gl.addWidget(QLabel("Thousands separator:"), 1, 0)
+        self._combo_thousands = QComboBox()
+        self._combo_thousands.addItems(["None (default)", "Dot '.'", "Comma ','"])
+        cur_t = self._settings.get("thousands_sep", "none")
+        idx_t = {"none": 0, "dot": 1, "comma": 2}.get(cur_t, 0)
+        self._combo_thousands.setCurrentIndex(idx_t)
+        gl.addWidget(self._combo_thousands, 1, 1)
+        layout.addWidget(grp)
+
+        layout.addWidget(QLabel(
+            "<i>Note: PyScope input fields always accept both '.' and ','\n"
+            "as decimal when 'Both' is selected, regardless of system locale.\n"
+            "The numpad dot will always work.</i>"))
+
+        bh = QHBoxLayout()
+        btn_ok = QPushButton("OK")
+        btn_ok.setStyleSheet("background:#2060c0;color:white;padding:4px 16px;")
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_ok.clicked.connect(lambda: (self._save_decimal_settings(), dlg.accept()))
+        bh.addStretch(); bh.addWidget(btn_cancel); bh.addWidget(btn_ok)
+        layout.addLayout(bh)
+        dlg.exec()
+
+    def _save_decimal_settings(self):
+        dec_map = {0: "both", 1: "dot", 2: "comma"}
+        tho_map = {0: "none", 1: "dot", 2: "comma"}
+        self._settings["decimal_sep"] = dec_map[self._combo_decimal.currentIndex()]
+        self._settings["thousands_sep"] = tho_map[self._combo_thousands.currentIndex()]
+
+    # ── Viewport auto-zoom from CSV metadata ──────────────────────────
+
+    def _apply_viewport_from_metadata(self, meta):
+        """After import, zoom to viewport hints if present in CSV headers."""
+        from PyQt6.QtCore import QTimer as _QTimer
+        if meta.view_time_start is not None and meta.view_time_stop is not None:
+            t0, t1 = meta.view_time_start, meta.view_time_stop
+            _QTimer.singleShot(80, lambda: self._plot.zoom_x_range(t0, t1))
+        elif (meta.view_sample_start is not None
+              and meta.view_sample_stop is not None
+              and self._traces):
+            trace = self._traces[0]
+            ta = trace.time_axis
+            n = len(ta)
+            i0 = max(0, min(meta.view_sample_start, n-1))
+            i1 = max(0, min(meta.view_sample_stop, n-1))
+            t0, t1 = float(ta[i0]), float(ta[i1])
+            _QTimer.singleShot(80, lambda: self._plot.zoom_x_range(t0, t1))
 
     def closeEvent(self, event):
         self._save_settings()

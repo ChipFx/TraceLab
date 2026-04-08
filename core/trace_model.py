@@ -137,7 +137,8 @@ class TraceModel:
                 self._computed_time = self.time_data
             else:
                 n = len(self.raw_data)
-                self._computed_time = np.arange(n) * self.dt
+                t0_off = getattr(self, '_t0_sample_offset', 0)
+                self._computed_time = (np.arange(n) - t0_off) * self.dt
         return self._computed_time
 
     def set_sample_rate(self, sps: float):

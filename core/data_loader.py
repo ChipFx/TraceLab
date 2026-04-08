@@ -71,6 +71,11 @@ class CsvMetadata:
         self.coupling: Optional[str] = None
         self.impedance: Optional[str] = None
         self.bwlimit: Optional[str] = None
+        self.zerotime: Optional[int] = None
+        self.view_time_start: Optional[float] = None
+        self.view_time_stop: Optional[float] = None
+        self.view_sample_start: Optional[int] = None
+        self.view_sample_stop: Optional[int] = None
         self.raw_lines: List[str] = []
 
     def __repr__(self):
@@ -112,6 +117,16 @@ def parse_metadata_lines(lines: List[str]) -> CsvMetadata:
                 meta.impedance = val
             elif key in ("bwlimit", "bw", "bandwidth"):
                 meta.bwlimit = val
+            elif key in ("zerotime", "zero_time", "t0", "triggersample"):
+                meta.zerotime = int(float(val))
+            elif key in ("viewtimestart", "view_time_start"):
+                meta.view_time_start = float(val)
+            elif key in ("viewtimestop", "view_time_stop", "viewtimeend"):
+                meta.view_time_stop = float(val)
+            elif key in ("viewsamplestart", "view_sample_start"):
+                meta.view_sample_start = int(float(val))
+            elif key in ("viewsamplestop", "view_sample_stop", "viewsampleend"):
+                meta.view_sample_stop = int(float(val))
         except (ValueError, ZeroDivisionError):
             pass
     return meta

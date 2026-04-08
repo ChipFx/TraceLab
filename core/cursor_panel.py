@@ -47,6 +47,7 @@ class CursorPanel(QWidget):
         self.setMinimumWidth(200)
         self._cursor_times = {0: None, 1: None}
         self._trace_values: Dict[int, Dict] = {}  # cursor_id -> {name: value}
+        self._trace_display_order: List[str] = []  # set by main window
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -147,7 +148,13 @@ class CursorPanel(QWidget):
         # Update per-trace table
         vals_a = self._trace_values.get(0, {})
         vals_b = self._trace_values.get(1, {})
-        trace_names = sorted(set(vals_a.keys()) | set(vals_b.keys()))
+        all_names = set(vals_a.keys()) | set(vals_b.keys())
+        # Use provided display order if available, else sort
+        if self._trace_display_order:
+            trace_names = [n for n in self._trace_display_order if n in all_names]
+            trace_names += sorted(all_names - set(trace_names))
+        else:
+            trace_names = sorted(all_names)
 
         self.table.setRowCount(len(trace_names))
         for i, name in enumerate(trace_names):
@@ -158,6 +165,10 @@ class CursorPanel(QWidget):
                 _fmt_val(va) if va is not None else "---"))
             self.table.setItem(i, 2, QTableWidgetItem(
                 _fmt_val(vb) if vb is not None else "---"))
+
+    def set_trace_order(self, names: List[str]):
+        """Update the display order for cursor value table."""
+        self._trace_display_order = list(names)
 
     def _export_csv(self):
         path, _ = QFileDialog.getSaveFileName(

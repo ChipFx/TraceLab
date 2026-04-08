@@ -1,6 +1,7 @@
 """
 core/filter_dialog.py
-Signal filtering: lowpass, highpass, bandpass using scipy.
+Non-destructive filters: raw_data is never modified.
+Filtered result is stored in trace._filter_data; clearing restores original.
 """
 
 import numpy as np
@@ -8,7 +9,7 @@ from scipy import signal as sp_signal
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QDoubleSpinBox, QPushButton, QListWidget, QListWidgetItem,
-    QGroupBox, QGridLayout, QMessageBox
+    QGroupBox, QGridLayout, QMessageBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from typing import List
@@ -16,34 +17,44 @@ from core.trace_model import TraceModel
 
 
 class FilterDialog(QDialog):
-    """Apply filters to selected traces."""
-    filters_applied = pyqtSignal(list)  # list of modified TraceModel names
+    filters_applied = pyqtSignal(list)
 
     def __init__(self, traces: List[TraceModel], parent=None):
         super().__init__(parent)
         self.traces = [t for t in traces if t.visible]
         self.setWindowTitle("Signal Filters")
-        self.resize(500, 400)
+        self.resize(520, 420)
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        # Trace selector
+        # Filter status overview
+        active = [t for t in self.traces if t.has_filter]
+        if active:
+            info = QLabel(
+                f"Active filters: {', '.join(t.label + ' (' + t.filter_description + ')' for t in active)}")
+            info.setStyleSheet(
+                "color: #80e0a0; padding: 4px; background: #102010; border-radius:3px;")
+            info.setWordWrap(True)
+            layout.addWidget(info)
+
         grp_trace = QGroupBox("Select Traces")
         tl = QVBoxLayout(grp_trace)
         self.trace_list = QListWidget()
         self.trace_list.setSelectionMode(
             QListWidget.SelectionMode.MultiSelection)
         for t in self.traces:
-            item = QListWidgetItem(t.label)
+            label = t.label
+            if t.has_filter:
+                label += f"  [filtered: {t.filter_description}]"
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, t.name)
             self.trace_list.addItem(item)
             item.setSelected(True)
         tl.addWidget(self.trace_list)
         layout.addWidget(grp_trace)
 
-        # Filter config
         grp_filt = QGroupBox("Filter Settings")
         fl = QGridLayout(grp_filt)
 
@@ -79,8 +90,10 @@ class FilterDialog(QDialog):
         layout.addWidget(grp_filt)
         self._update_ui()
 
-        # Buttons
         btn_layout = QHBoxLayout()
+        btn_clear = QPushButton("Clear Filters on Selected")
+        btn_clear.clicked.connect(self._clear_filters)
+        btn_layout.addWidget(btn_clear)
         btn_layout.addStretch()
         btn_apply = QPushButton("Apply Filter")
         btn_apply.setStyleSheet(
@@ -97,11 +110,23 @@ class FilterDialog(QDialog):
         self.lbl_fc2.setVisible(is_band)
         self.spin_fc2.setVisible(is_band)
 
-    def _apply(self):
-        selected_names = set()
-        for item in self.trace_list.selectedItems():
-            selected_names.add(item.data(Qt.ItemDataRole.UserRole))
+    def _selected_names(self):
+        return {item.data(Qt.ItemDataRole.UserRole)
+                for item in self.trace_list.selectedItems()}
 
+    def _clear_filters(self):
+        names = self._selected_names()
+        cleared = []
+        for trace in self.traces:
+            if trace.name in names and trace.has_filter:
+                trace.clear_filter()
+                cleared.append(trace.name)
+        if cleared:
+            self.filters_applied.emit(cleared)
+            self.accept()
+
+    def _apply(self):
+        names = self._selected_names()
         ftype = self.combo_type.currentText().lower()
         order = int(self.spin_order.value())
         fc1 = self.spin_fc1.value()
@@ -109,29 +134,27 @@ class FilterDialog(QDialog):
 
         modified = []
         for trace in self.traces:
-            if trace.name not in selected_names:
+            if trace.name not in names:
                 continue
-
             sps = trace.sample_rate
             nyq = sps / 2.0
-
             try:
                 if ftype == "lowpass":
-                    wn = fc1 / nyq
+                    wn = min(fc1 / nyq, 0.9999)
                     b, a = sp_signal.butter(order, wn, btype="low")
+                    desc = f"LP {fc1:.4g}Hz"
                 elif ftype == "highpass":
-                    wn = fc1 / nyq
+                    wn = min(fc1 / nyq, 0.9999)
                     b, a = sp_signal.butter(order, wn, btype="high")
-                else:  # bandpass
-                    wn = [fc1 / nyq, fc2 / nyq]
+                    desc = f"HP {fc1:.4g}Hz"
+                else:
+                    wn = [min(fc1/nyq, 0.499), min(fc2/nyq, 0.9999)]
                     b, a = sp_signal.butter(order, wn, btype="band")
+                    desc = f"BP {fc1:.4g}-{fc2:.4g}Hz"
 
-                # Apply filter to processed data
+                # Filter the SCALED data (after gain/offset), non-destructively
                 filtered = sp_signal.filtfilt(b, a, trace.processed_data)
-                # Store as a new "raw" data with scaling disabled
-                trace.raw_data = filtered
-                trace.scaling.enabled = False
-                trace._invalidate_cache()
+                trace.set_filter(filtered, desc)
                 modified.append(trace.name)
 
             except Exception as e:

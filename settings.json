@@ -1,0 +1,18 @@
+{
+  "theme": "dark",
+  "trace_colors": [
+    "#F0C040",
+    "#40C0F0",
+    "#F04080",
+    "#40F080",
+    "#F08040",
+    "#A040F0",
+    "#40F0F0",
+    "#F0F040",
+    "#F04040",
+    "#4080F0"
+  ],
+  "color_overrides": {},
+  "max_display_points": 50000,
+  "default_sample_rate": 1000.0
+}

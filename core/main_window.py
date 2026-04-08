@@ -7,10 +7,10 @@ import os, sys, json, copy
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QToolBar, QFileDialog, QMessageBox, QLabel, QPushButton,
-    QCheckBox, QMenu, QInputDialog, QDialog, QAction
+    QCheckBox, QMenu, QInputDialog, QDialog
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QKeySequence, QIcon, QPixmap, QColor
+from PyQt6.QtGui import QKeySequence, QIcon, QPixmap, QColor, QAction
 from typing import List, Optional
 
 from core.trace_model import TraceModel, DEFAULT_TRACE_COLORS, DEFAULT_TRACE_COLORS_LIGHT

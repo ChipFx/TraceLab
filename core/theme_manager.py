@@ -95,7 +95,7 @@ class ThemeManager:
     def available_themes(self):
         return list(THEMES.keys())
 
-    def get_stylesheet(self) -> str:
+    def get_stylesheet(self, font_scale: float = 1.0) -> str:
         c = self._colors
         _fs = max(8, int(11 * font_scale))
         return f"""

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QMenu, QInputDialog, QDialog
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QKeySequence, QIcon, QPixmap, QColor, QAction
+from PyQt6.QtGui import QAction, QKeySequence, QIcon, QPixmap, QColor
 from typing import List, Optional
 
 from core.trace_model import TraceModel, DEFAULT_TRACE_COLORS, DEFAULT_TRACE_COLORS_LIGHT
@@ -423,7 +423,9 @@ class MainWindow(QMainWindow):
     def _set_theme(self, name: str, save: bool = True):
         from PyQt6.QtWidgets import QApplication
         self.theme.set_theme(name)
-        QApplication.instance().setStyleSheet(self.theme.get_stylesheet())
+        scale = self._settings.get("font_scale", 1.0)
+        QApplication.instance().setStyleSheet(
+            self.theme.get_stylesheet(font_scale=scale))
         new_colors = self.theme.plot_colors()
         self._plot.theme = new_colors
         self._plot.theme_name = name

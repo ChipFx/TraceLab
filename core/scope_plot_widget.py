@@ -38,6 +38,55 @@ def downsample_for_display(t, y, max_pts=MAX_DISPLAY_POINTS):
     return t_out, y_out
 
 
+def _eng_format(value: float, unit: str) -> str:
+    """
+    Format a float with engineering-style SI prefix and unit.
+    Examples:  0.001 V  ->  '1 mV'
+               0.000099 V -> '99 µV'
+               1500 Hz    -> '1.5 kHz'
+               0.1 V      -> '100 mV'   (100 mV shorter than 0.1 V)
+    """
+    if value == 0:
+        return f"0 {unit}"
+    abs_v = abs(value)
+    prefixes = [
+        (1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'k'),
+        (1,    ''),  (1e-3, 'm'), (1e-6, 'µ'), (1e-9, 'n'), (1e-12, 'p'),
+    ]
+    for scale, prefix in prefixes:
+        if abs_v >= scale * 0.9999:
+            scaled = value / scale
+            # Choose decimal places to keep it short
+            if abs(scaled) >= 100:
+                s = f"{scaled:.0f}"
+            elif abs(scaled) >= 10:
+                s = f"{scaled:.1f}".rstrip('0').rstrip('.')
+            else:
+                s = f"{scaled:.2f}".rstrip('0').rstrip('.')
+            return f"{s} {prefix}{unit}"
+    # Fallback for very small values
+    return f"{value:.3e} {unit}"
+
+
+class EngineeringAxisItem(pg.AxisItem):
+    """
+    Y-axis that labels ticks as  '1 mV', '-500 µV', '1.5 V' etc.
+    Set unit via .set_unit(str). Empty/None unit falls back to plain numbers.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._unit = ""
+
+    def set_unit(self, unit: str):
+        self._unit = unit or ""
+
+    def tickStrings(self, values, scale, spacing):
+        if not self._unit or self._unit in ("raw", ""):
+            return super().tickStrings(values, scale, spacing)
+        return [_eng_format(v * scale, self._unit) for v in values]
+
+
+
 def _effective_color(color: str, theme_name: str) -> str:
     """Override trace color for special themes."""
     if theme_name == "rs_green":
@@ -107,7 +156,11 @@ class TraceLane(pg.PlotWidget):
     def __init__(self, trace: TraceModel, theme_colors: dict,
                  theme_name: str = "dark", y_lock_auto: bool = True,
                  parent=None):
-        super().__init__(parent=parent, background=theme_colors["background"])
+        self._y_axis = EngineeringAxisItem(orientation="left")
+        unit = getattr(trace, 'unit', '') or ''
+        self._y_axis.set_unit(unit)
+        super().__init__(parent=parent, background=theme_colors["background"],
+                         axisItems={"left": self._y_axis})
         self.trace = trace
         self.theme = theme_colors
         self.theme_name = theme_name
@@ -127,12 +180,8 @@ class TraceLane(pg.PlotWidget):
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.setMenuEnabled(False)
         disp_color = _effective_color(self.trace.color, self.theme_name)
-        unit = getattr(self.trace, 'unit', '') or ''
-        if unit and unit != 'raw':
-            ylabel = (f"<span style='color:{disp_color}'>"
-                      f"{self.trace.label}</span> [{unit}]")
-        else:
-            ylabel = f"<span style='color:{disp_color}'>{self.trace.label}</span>"
+        # Label shows trace name coloured; unit appears in tick strings
+        ylabel = f"<span style='color:{disp_color}'>{self.trace.label}</span>"
         pi.setLabel("left", ylabel, color=self.theme["text"])
         pi.getAxis("left").setWidth(60)
         for ax_name in ("left", "bottom", "top", "right"):
@@ -160,6 +209,10 @@ class TraceLane(pg.PlotWidget):
 
     def refresh_curve(self):
         self._add_trace_curve()
+        # Refresh unit on axis in case it changed (e.g. after filter applied)
+        unit = getattr(self.trace, 'unit', '') or ''
+        if hasattr(self, '_y_axis'):
+            self._y_axis.set_unit(unit)
 
     def set_y_lock_auto(self, locked: bool):
         self.y_lock_auto = locked

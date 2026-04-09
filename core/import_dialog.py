@@ -37,7 +37,26 @@ class SciLineEdit(QLineEdit):
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
-        self.selectAll()
+        # Delay selectAll so it fires AFTER the click fully resolves on Windows.
+        # Without the timer the click position caret overwrites the selection.
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self.selectAll)
+
+    def keyReleaseEvent(self, event):
+        super().keyReleaseEvent(event)
+        self._update_parse_style()
+
+    def _update_parse_style(self):
+        """Tint field red when the current text cannot be parsed."""
+        text = _normalise_decimal(self.text().strip())
+        try:
+            if text:
+                parse_value(text)
+            self.setStyleSheet("")
+        except Exception:
+            if text:
+                self.setStyleSheet("background: #3a1010;")
+
 
     def get_value(self, default: float = 1.0) -> float:
         """Parse with locale tolerance: comma → dot."""

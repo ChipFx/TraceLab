@@ -222,7 +222,7 @@ class ColumnConfigRow(QWidget):
         gain = self.edit_gain.get_value(1.0)
         offset = self.edit_offset.get_value(0.0)
         enabled = self.chk_scale.isChecked()
-        unit = self.edit_unit.edit.text().strip() or "V"
+        unit = self.edit_unit.text().strip() or "V"
         return ScalingConfig(
             enabled=enabled,
             use_gain_offset=True,
@@ -235,7 +235,7 @@ class ColumnConfigRow(QWidget):
         self.chk_scale.setChecked(source.chk_scale.isChecked())
         self.edit_gain.setText(source.edit_gain.text())
         self.edit_offset.setText(source.edit_offset.text())
-        self.edit_unit.setText(source.edit_unit.edit.text())
+        self.edit_unit.setText(source.edit_unit.text())
 
 
 # ── Import dialog ─────────────────────────────────────────────────────────────

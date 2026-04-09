@@ -4,5 +4,6 @@
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 1.0,
-  "y_lock_auto": true
+  "y_lock_auto": true,
+  "font_scale": 1.0
 }

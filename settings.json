@@ -5,5 +5,23 @@
   "import_reset_view": true,
   "fft_min_freq": 1.0,
   "y_lock_auto": true,
-  "font_scale": 1.0
+  "font_scale": 1.0,
+  "trace_colors": [
+    "#F0C040",
+    "#40C0F0",
+    "#F04080",
+    "#40F080",
+    "#F08040",
+    "#A040F0",
+    "#40F0F0",
+    "#F0F040",
+    "#F04040",
+    "#4080F0"
+  ],
+  "color_overrides": {},
+  "max_display_points": 50000,
+  "default_sample_rate": 1000,
+  "last_open_folder": "./",
+  "last_save_folder": "./",
+  "remember_folder": true
 }

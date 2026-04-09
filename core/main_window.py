@@ -219,6 +219,14 @@ class MainWindow(QMainWindow):
             self._show_font_scale_dialog)
         settings_menu.addAction("Decimal Separator...").triggered.connect(
             self._show_decimal_sep_dialog)
+        settings_menu.addSeparator()
+        self._act_remember_folder = settings_menu.addAction("Remember Last Folder")
+        self._act_remember_folder.setCheckable(True)
+        self._act_remember_folder.setChecked(
+            self._settings.get("remember_folder", True))
+        self._act_remember_folder.setToolTip(
+            "When enabled, open/save dialogs start in the last used folder.")
+        self._act_remember_folder.triggered.connect(self._toggle_remember_folder)
 
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
@@ -284,9 +292,35 @@ class MainWindow(QMainWindow):
 
     # ── File Operations ────────────────────────────────────────────────
 
+    def _get_open_dir(self) -> str:
+        """Return the starting directory for open dialogs."""
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if self._settings.get("remember_folder", True):
+            d = self._settings.get("last_open_folder", base)
+            if os.path.isdir(d):
+                return d
+        return base
+
+    def _get_save_dir(self, filename: str = "") -> str:
+        """Return the starting directory (+ optional filename) for save dialogs."""
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if self._settings.get("remember_folder", True):
+            d = self._settings.get("last_save_folder", base)
+            if os.path.isdir(d):
+                return os.path.join(d, filename) if filename else d
+        return os.path.join(base, filename) if filename else base
+
+    def _remember_open(self, path: str):
+        if self._settings.get("remember_folder", True):
+            self._settings["last_open_folder"] = os.path.dirname(os.path.abspath(path))
+
+    def _remember_save(self, path: str):
+        if self._settings.get("remember_folder", True):
+            self._settings["last_save_folder"] = os.path.dirname(os.path.abspath(path))
+
     def _open_csv(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Data File", "",
+            self, "Open Data File", self._get_open_dir(),
             "CSV Files (*.csv *.tsv *.txt);;All Files (*)")
         if not path:
             return
@@ -295,6 +329,8 @@ class MainWindow(QMainWindow):
         if result.error:
             QMessageBox.critical(self, "Load Error", result.error)
             return
+
+        self._remember_open(path)
 
         # Pass persistent settings to dialog
         dlg = ImportDialog(result, persistent_settings=self._settings,
@@ -377,9 +413,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export", "No data loaded.")
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Visible Data", "", "CSV Files (*.csv)")
+            self, "Export Visible Data", self._get_save_dir(),
+            "CSV Files (*.csv)")
         if not path:
             return
+        self._remember_save(path)
 
         x0, x1 = self._plot.get_current_view_range()
         visible = [t for t in self._traces if t.visible]
@@ -408,10 +446,12 @@ class MainWindow(QMainWindow):
 
     def _save_screenshot(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Screenshot", "pyscope_capture.png",
+            self, "Save Screenshot",
+            self._get_save_dir("pyscope_capture.png"),
             "PNG Images (*.png);;All Files (*)")
         if not path:
             return
+        self._remember_save(path)
         self._plot.take_screenshot(path, scale=2)
         self._status_lbl.setText(f"Screenshot: {os.path.basename(path)}")
 
@@ -764,6 +804,9 @@ class MainWindow(QMainWindow):
             i1 = max(0, min(meta.view_sample_stop, n-1))
             t0, t1 = float(ta[i0]), float(ta[i1])
             _QTimer.singleShot(80, lambda: self._plot.zoom_x_range(t0, t1))
+
+    def _toggle_remember_folder(self, checked: bool):
+        self._settings["remember_folder"] = checked
 
     def closeEvent(self, event):
         self._save_settings()

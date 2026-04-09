@@ -238,7 +238,7 @@ class ColumnConfigRow(QWidget):
                 f"background-color: {self.color}; border: 1px solid #555;")
 
     def get_scaling(self) -> ScalingConfig:
-        gain = self.edit_gain.get_value(1.0)
+        gain   = self.edit_gain.get_value(1.0)
         offset = self.edit_offset.get_value(0.0)
         enabled = self.chk_scale.isChecked()
         unit = self.edit_unit.text().strip() or "V"

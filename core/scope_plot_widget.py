@@ -83,7 +83,9 @@ class EngineeringAxisItem(pg.AxisItem):
     def tickStrings(self, values, scale, spacing):
         if not self._unit or self._unit in ("raw", ""):
             return super().tickStrings(values, scale, spacing)
-        return [_eng_format(v * scale, self._unit) for v in values]
+        # pyqtgraph passes scale for its own unit conversion; we handle SI
+        # prefixes ourselves in _eng_format, so use values directly (scale=1.0)
+        return [_eng_format(float(v), self._unit) for v in values]
 
 
 

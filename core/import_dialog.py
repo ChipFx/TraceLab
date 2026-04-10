@@ -6,7 +6,7 @@ Import dialog with locale-safe number inputs and working gain/offset scaling.
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QComboBox, QCheckBox, QPushButton, QScrollArea,
-    QWidget, QGroupBox, QDoubleSpinBox, QTabWidget,
+    QWidget, QGroupBox, QTabWidget,
     QMessageBox, QRadioButton, QButtonGroup, QFrame
 )
 from PyQt6.QtCore import Qt
@@ -85,36 +85,6 @@ def _normalise_decimal(s: str) -> str:
     if len(parts) == 2:
         return parts[0] + '.' + parts[1]
     return s
-
-
-class SciSpinBox(QWidget):
-    """Label + SciLineEdit combo that mimics a spinbox but locale-tolerant."""
-    def __init__(self, default: float = 0.0, parent=None):
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self._edit = SciLineEdit(str(default))
-        layout.addWidget(self._edit)
-
-    def value(self) -> float:
-        return self._edit.get_value(0.0)
-
-    def setValue(self, v: float):
-        # Format sensibly
-        if v == 0.0:
-            self._edit.setText("0")
-        elif abs(v) >= 1e4 or (abs(v) < 1e-3 and v != 0):
-            self._edit.setText(f"{v:.6e}")
-        else:
-            self._edit.setText(f"{v:.8g}")
-
-    def setFixedWidth(self, w):
-        self._edit.setFixedWidth(w)
-        super().setFixedWidth(w)
-
-    @property
-    def edit(self):
-        return self._edit
 
 
 # ── Column config row ─────────────────────────────────────────────────────────

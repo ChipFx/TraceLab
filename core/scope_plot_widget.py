@@ -38,6 +38,29 @@ def downsample_for_display(t, y, max_pts=MAX_DISPLAY_POINTS):
     return t_out, y_out
 
 
+def sinc_interpolate(t: np.ndarray, y: np.ndarray,
+                     upsample: int = 8) -> tuple:
+    """
+    Bandlimited sinc (sin(x)/x) interpolation — upsample by integer factor.
+    Implemented via zero-padding in the frequency domain (ideal lowpass).
+    Only applied when the visible window has fewer than ~2000 raw samples
+    (otherwise it's invisible and just costs CPU).
+    Returns upsampled (t_new, y_new).
+    """
+    n = len(y)
+    if n < 4 or upsample <= 1:
+        return t, y
+    # FFT zero-pad upsample
+    Y = np.fft.rfft(y)
+    n_new = n * upsample
+    Y_pad = np.zeros(n_new // 2 + 1, dtype=complex)
+    copy_len = min(len(Y), len(Y_pad))
+    Y_pad[:copy_len] = Y[:copy_len] * upsample
+    y_new = np.fft.irfft(Y_pad, n_new)
+    t_new = np.linspace(t[0], t[-1], n_new, endpoint=False)
+    return t_new, y_new
+
+
 def _eng_format(value: float, unit: str) -> str:
     """
     Format a float with engineering-style SI prefix and unit.
@@ -157,7 +180,7 @@ class TraceLane(pg.PlotWidget):
 
     def __init__(self, trace: TraceModel, theme_colors: dict,
                  theme_name: str = "dark", y_lock_auto: bool = True,
-                 parent=None):
+                 interp_mode: str = "linear", parent=None):
         self._y_axis = EngineeringAxisItem(orientation="left")
         unit = getattr(trace, 'unit', '') or ''
         self._y_axis.set_unit(unit)
@@ -167,8 +190,10 @@ class TraceLane(pg.PlotWidget):
         self.theme = theme_colors
         self.theme_name = theme_name
         self.y_lock_auto = y_lock_auto
+        self.interp_mode = interp_mode   # "linear" or "sinc"
         self._curve = None
         self._cursors: Dict[int, InfiniteLine] = {}
+        self._labels: list = []          # TextItem labels anchored to time positions
 
         self._setup_plot()
         self._add_trace_curve()
@@ -199,8 +224,16 @@ class TraceLane(pg.PlotWidget):
     def _add_trace_curve(self):
         if self._curve is not None:
             self.removeItem(self._curve)
-        t, y = downsample_for_display(
-            self.trace.time_axis, self.trace.processed_data)
+        t_raw = self.trace.time_axis
+        y_raw = self.trace.processed_data
+
+        if self.interp_mode == "sinc":
+            # Only upsample if the dataset is small enough to benefit
+            n = len(t_raw)
+            if n <= 2000:
+                t_raw, y_raw = sinc_interpolate(t_raw, y_raw, upsample=8)
+
+        t, y = downsample_for_display(t_raw, y_raw)
         color = _effective_color(self.trace.color, self.theme_name)
         pen = pg.mkPen(color=color, width=1.5)
         self._curve = self.plot(t, y, pen=pen, antialias=False)
@@ -208,6 +241,23 @@ class TraceLane(pg.PlotWidget):
         self._curve.setClipToView(True)
         if self.y_lock_auto:
             self.getPlotItem().enableAutoRange(axis="y")
+        self._redraw_labels()
+
+    def _redraw_labels(self):
+        """Draw per-trace text labels anchored to time positions."""
+        for item in self._labels:
+            self.removeItem(item)
+        self._labels.clear()
+        labels = getattr(self.trace, 'trace_labels', [])
+        for t_pos, text in labels:
+            y_pos = self.get_value_at(t_pos)
+            if y_pos is None:
+                continue
+            color = _effective_color(self.trace.color, self.theme_name)
+            item = pg.TextItem(text=text, color=color, anchor=(0.5, 1.0))
+            item.setPos(t_pos, y_pos)
+            self.addItem(item)
+            self._labels.append(item)
 
     def refresh_curve(self):
         self._add_trace_curve()
@@ -294,15 +344,64 @@ class TraceLane(pg.PlotWidget):
                 f"<span style='color:{color}'>{self.trace.label}</span>")
 
 
+def _composite_branding(img: "QImage", svg_path: str) -> "QImage":
+    """
+    Render an SVG logo into the bottom-left corner of img.
+    The logo is constrained to a max of 120px wide / 60px tall (before scale
+    is applied at caller side) with 6px padding from the corner.
+    Returns the composited QImage (may be a copy).
+    """
+    try:
+        from PyQt6.QtSvg import QSvgRenderer
+        from PyQt6.QtGui import QPainter, QImage
+        from PyQt6.QtCore import QRectF, Qt
+
+        renderer = QSvgRenderer(svg_path)
+        if not renderer.isValid():
+            return img
+
+        # Target logo size: up to 160×80 px on the output image
+        w_img, h_img = img.width(), img.height()
+        logo_w = min(160, w_img // 6)
+        logo_h = min(80,  h_img // 8)
+        # Maintain SVG aspect ratio
+        vp = renderer.viewBox()
+        if vp.width() > 0 and vp.height() > 0:
+            aspect = vp.width() / vp.height()
+            if logo_w / aspect > logo_h:
+                logo_w = int(logo_h * aspect)
+            else:
+                logo_h = int(logo_w / aspect)
+
+        pad = 8
+        x = pad
+        y = h_img - logo_h - pad
+
+        # Convert to ARGB for compositing if needed
+        if img.format() != QImage.Format.Format_ARGB32_Premultiplied:
+            img = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        renderer.render(painter, QRectF(x, y, logo_w, logo_h))
+        painter.end()
+    except Exception:
+        pass  # branding failure must never crash a screenshot
+    return img
+
+
 class ScopePlotWidget(QWidget):
     cursor_values_changed = pyqtSignal(dict)
 
     def __init__(self, theme_colors: dict, theme_name: str = "dark",
-                 y_lock_auto: bool = True, parent=None):
+                 y_lock_auto: bool = True, interp_mode: str = "linear",
+                 parent=None):
         super().__init__(parent)
         self.theme = theme_colors
         self.theme_name = theme_name
         self.y_lock_auto = y_lock_auto
+        self.interp_mode = interp_mode   # "linear" or "sinc"
         self.traces: List[TraceModel] = []
         self._lanes: Dict[str, TraceLane] = {}
         self._mode = "split"
@@ -385,6 +484,11 @@ class ScopePlotWidget(QWidget):
         if locked:
             pi.enableAutoRange(axis="y")
 
+    def set_interp_mode(self, mode: str):
+        """Switch interpolation: 'linear' or 'sinc'."""
+        self.interp_mode = mode
+        self._rebuild()
+
     def add_trace(self, trace: TraceModel):
         # Allow overwrite if name already exists
         if trace.name in [t.name for t in self.traces]:
@@ -444,7 +548,7 @@ class ScopePlotWidget(QWidget):
         first_lane = None
         for trace in visible:
             lane = TraceLane(trace, self.theme, self.theme_name,
-                              self.y_lock_auto)
+                              self.y_lock_auto, self.interp_mode)
             lane.setMinimumHeight(80)
             if first_lane is None:
                 first_lane = lane
@@ -675,8 +779,9 @@ class ScopePlotWidget(QWidget):
         dx = (x1 - x0) * fraction
         self.zoom_x_range(x0 + dx, x1 + dx)
 
-    def take_screenshot(self, filepath, scale=2):
+    def take_screenshot(self, filepath, scale=2, branding_path=""):
         from PyQt6.QtCore import Qt as _Qt
+        from PyQt6.QtGui import QPainter, QImage
         pixmap = self.grab()
         if scale > 1:
             img = pixmap.toImage()
@@ -684,7 +789,12 @@ class ScopePlotWidget(QWidget):
                 img.width() * scale, img.height() * scale,
                 _Qt.AspectRatioMode.KeepAspectRatio,
                 _Qt.TransformationMode.SmoothTransformation)
-            img.save(filepath)
         else:
-            pixmap.save(filepath)
+            img = pixmap.toImage()
+
+        # Composite branding SVG into bottom-left corner
+        if branding_path:
+            img = _composite_branding(img, branding_path)
+
+        img.save(filepath)
         return True

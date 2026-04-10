@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QMenu, QInputDialog, QDialog
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QKeySequence, QIcon, QPixmap, QColor
+from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QIcon, QPixmap, QColor
 from typing import List, Optional
 
 from core.trace_model import TraceModel, DEFAULT_TRACE_COLORS, DEFAULT_TRACE_COLORS_LIGHT
@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         s["theme"] = self.theme.theme_name
         s["geometry"] = self.saveGeometry().toHex().data().decode()
         s["y_lock_auto"] = self._plot.y_lock_auto
+        s["interp_mode"] = self._interp_mode
         s["import_replace"] = self._import_replace
         s["import_reset_view"] = self._import_reset_view
         s["fft_min_freq"] = self._fft_min_freq
@@ -108,8 +109,10 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(self._channel_panel)
 
         plot_colors = self.theme.plot_colors()
+        self._interp_mode = self._settings.get("interp_mode", "linear")
         self._plot = ScopePlotWidget(
-            plot_colors, self.theme.theme_name, self._y_lock_auto)
+            plot_colors, self.theme.theme_name, self._y_lock_auto,
+            self._interp_mode)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._splitter.addWidget(self._plot)
 
@@ -196,6 +199,24 @@ class MainWindow(QMainWindow):
         self._act_y_lock.triggered.connect(self._toggle_y_lock)
 
         view_menu.addSeparator()
+        # Interpolation mode submenu
+        interp_menu = view_menu.addMenu("Interpolation")
+        self._act_interp_linear = interp_menu.addAction("Linear (default)")
+        self._act_interp_linear.setCheckable(True)
+        self._act_interp_sinc   = interp_menu.addAction("Sinc (sin(x)/x)")
+        self._act_interp_sinc.setCheckable(True)
+        ag = QActionGroup(self)
+        ag.setExclusive(True)
+        ag.addAction(self._act_interp_linear)
+        ag.addAction(self._act_interp_sinc)
+        (self._act_interp_sinc if self._interp_mode == "sinc"
+         else self._act_interp_linear).setChecked(True)
+        self._act_interp_linear.triggered.connect(
+            lambda: self._set_interp_mode("linear"))
+        self._act_interp_sinc.triggered.connect(
+            lambda: self._set_interp_mode("sinc"))
+
+        view_menu.addSeparator()
         a = view_menu.addAction("Theme: Dark")
         a.triggered.connect(lambda: self._set_theme("dark"))
         a = view_menu.addAction("Theme: Light")
@@ -212,6 +233,11 @@ class MainWindow(QMainWindow):
         a.triggered.connect(self._show_filter)
         a = analysis_menu.addAction("Clear All Filters")
         a.triggered.connect(self._clear_all_filters)
+        analysis_menu.addSeparator()
+        a = analysis_menu.addAction("Add Label at Cursor A...")
+        a.triggered.connect(self._add_label_at_cursor)
+        a = analysis_menu.addAction("Clear All Labels")
+        a.triggered.connect(self._clear_all_labels)
 
         # ── Settings ──────────────────────────────────────────────────
         settings_menu = mb.addMenu("Settings")
@@ -452,8 +478,20 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self._remember_save(path)
-        self._plot.take_screenshot(path, scale=2)
+        self._plot.take_screenshot(path, scale=2,
+                                    branding_path=self._get_branding_path())
         self._status_lbl.setText(f"Screenshot: {os.path.basename(path)}")
+
+    def _get_branding_path(self) -> str:
+        """Return path to branding SVG if it exists, else empty string."""
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Try theme-specific first, then generic
+        theme = self.theme.theme_name
+        for name in [f"branding_{theme}.svg", "branding.svg"]:
+            p = os.path.join(base, "assets", name)
+            if os.path.exists(p):
+                return p
+        return ""
 
     # ── Display / Theme ────────────────────────────────────────────────
 
@@ -807,6 +845,52 @@ class MainWindow(QMainWindow):
 
     def _toggle_remember_folder(self, checked: bool):
         self._settings["remember_folder"] = checked
+
+    # ── Interpolation ──────────────────────────────────────────────────
+
+    def _set_interp_mode(self, mode: str):
+        self._interp_mode = mode
+        self._plot.set_interp_mode(mode)
+        self._settings["interp_mode"] = mode
+
+    # ── Trace labels ───────────────────────────────────────────────────
+
+    def _add_label_at_cursor(self):
+        """Add a text label to one trace at the current Cursor A position."""
+        if not self._traces:
+            return
+        t_pos = self._plot._cursors.get(0)
+        if t_pos is None:
+            QMessageBox.information(self, "Add Label",
+                "Place Cursor A first, then add a label.")
+            return
+
+        # Pick trace
+        from PyQt6.QtWidgets import QInputDialog
+        names = [t.label for t in self._traces if t.visible]
+        if not names:
+            return
+        trace_label, ok = QInputDialog.getItem(
+            self, "Add Label", "Trace:", names, 0, False)
+        if not ok:
+            return
+        text, ok2 = QInputDialog.getText(
+            self, "Add Label", f"Label text at t={t_pos:.6g} s:")
+        if not ok2 or not text.strip():
+            return
+
+        # Find trace and add label
+        for trace in self._traces:
+            if trace.label == trace_label:
+                trace.trace_labels.append((t_pos, text.strip()))
+                break
+        self._plot.refresh_all()
+
+    def _clear_all_labels(self):
+        for trace in self._traces:
+            trace.trace_labels.clear()
+        self._plot.refresh_all()
+        self._status_lbl.setText("All trace labels cleared.")
 
     def closeEvent(self, event):
         self._save_settings()

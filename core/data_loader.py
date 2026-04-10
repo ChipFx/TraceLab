@@ -182,10 +182,22 @@ def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
             result.error = "No column headers found."
             return result
 
-        raw: Dict[str, List[str]] = {name: [] for name in reader.fieldnames}
+        # Strip leading/trailing whitespace AND non-printable characters from
+        # column names. CSVs from some loggers/tools add spaces after commas
+        # in the header row, producing " ADC2" instead of "ADC2".
+        def _clean_name(s: str) -> str:
+            import unicodedata
+            cleaned = "".join(c for c in s if unicodedata.category(c) != "Cc")
+            return cleaned.strip()
+
+        fieldnames_clean = [_clean_name(n) for n in reader.fieldnames]
+        # Build mapping old->new so we can still read the DictReader rows
+        name_map = dict(zip(reader.fieldnames, fieldnames_clean))
+
+        raw: Dict[str, List[str]] = {clean: [] for clean in fieldnames_clean}
         for row in reader:
-            for name in reader.fieldnames:
-                raw[name].append(row.get(name, "").strip())
+            for orig, clean in name_map.items():
+                raw[clean].append(row.get(orig, "").strip())
 
         for col_name, values in raw.items():
             result.columns[col_name] = _try_parse_numeric(values)
@@ -194,13 +206,15 @@ def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
 
         meta_time = result.metadata.time_col
         if meta_time is not None:
+            # Also clean the metadata time column name for matching
             col_names = list(result.columns.keys())
-            if meta_time.isdigit():
-                idx = int(meta_time) - 1
+            meta_time_clean = _clean_name(meta_time) if meta_time else meta_time
+            if meta_time_clean.isdigit():
+                idx = int(meta_time_clean) - 1
                 if 0 <= idx < len(col_names):
                     result.suggested_time_col = col_names[idx]
-            elif meta_time in result.columns:
-                result.suggested_time_col = meta_time
+            elif meta_time_clean in result.columns:
+                result.suggested_time_col = meta_time_clean
         else:
             result.suggested_time_col = _detect_time_column(result.columns)
 

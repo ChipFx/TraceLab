@@ -103,6 +103,10 @@ class TraceModel:
     impedance: str = ""
     bwlimit: str = ""
 
+    # Per-trace labels: list of (time_position, label_text) tuples
+    # Each label is drawn as a text annotation anchored to that time point.
+    trace_labels: list = field(default_factory=list)
+
     # Non-destructive filter result (None = no filter active)
     _filter_data: Optional[np.ndarray] = field(default=None, repr=False)
     _filter_desc: str = field(default="", repr=False)  # e.g. "LP 1kHz"

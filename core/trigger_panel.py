@@ -82,11 +82,12 @@ class TriggerPanel(QWidget):
 
         # Search start
         gl.addWidget(QLabel("Search from:"), 3, 0)
-        self.combo_search = QComboBox()
-        self.combo_search.addItems(["Start of data", "Current view start",
-                                     "After last trigger"])
-        self.combo_search.setToolTip("Where to begin searching for the trigger")
-        gl.addWidget(self.combo_search, 3, 1)
+        # "Find Trigger" always starts from the beginning of data.
+        # "Next ->" continues from after the last trigger.
+        # No combo needed — kept as label for clarity.
+        lbl_search = QLabel("Find: always from start\nNext →: from last")
+        lbl_search.setStyleSheet("color: #888; font-size: 9px;")
+        gl.addWidget(lbl_search, 3, 1)
 
         layout.addWidget(grp)
 
@@ -157,19 +158,14 @@ class TriggerPanel(QWidget):
 
         level = self.edit_level.get_value(0.0)
         edge_idx = self.combo_edge.currentIndex()  # 0=rise, 1=fall, 2=either
-        search_mode = self.combo_search.currentIndex()
 
         t = trace.time_axis
         y = trace.processed_data
 
-        # Determine search start index
+        # "Find Trigger" always starts from the beginning of data (i_start=0).
+        # "Next ->" (search_after set) starts from just after the last trigger.
         if search_after is not None:
             i_start = int(np.searchsorted(t, search_after)) + 1
-        elif search_mode == 1:
-            # Current view start — emitted back via signal; use t[0] as fallback
-            i_start = 0
-        elif search_mode == 2 and self._last_trigger_t is not None:
-            i_start = int(np.searchsorted(t, self._last_trigger_t)) + 1
         else:
             i_start = 0
 
@@ -206,15 +202,24 @@ class TriggerPanel(QWidget):
     def _find_crossing(t: np.ndarray, y: np.ndarray,
                         level: float, edge_idx: int,
                         i_start: int) -> Optional[float]:
-        """Find first threshold crossing and interpolate exact time."""
-        y_shifted = y[i_start:] - level
-        if len(y_shifted) < 2:
+        """
+        Find first threshold crossing with linear interpolation.
+
+        Rising  edge: previous sample STRICTLY below level,
+                      current sample STRICTLY above (or equal) level.
+        Falling edge: previous sample STRICTLY above level,
+                      current sample STRICTLY below (or equal) level.
+
+        This means a flat run AT the level is not itself a crossing —
+        only an actual transition through the level counts.
+        """
+        if len(t) < 2:
             return None
 
-        for i in range(len(y_shifted) - 1):
-            a, b = float(y_shifted[i]), float(y_shifted[i + 1])
-            is_rising  = a < 0 <= b
-            is_falling = a > 0 >= b
+        for i in range(i_start, len(y) - 1):
+            a, b = float(y[i]), float(y[i + 1])
+            is_rising  = (a < level) and (b >= level)
+            is_falling = (a > level) and (b <= level)
 
             if edge_idx == 0 and not is_rising:
                 continue
@@ -224,15 +229,13 @@ class TriggerPanel(QWidget):
                 continue
 
             # Linear interpolation for sub-sample accuracy
-            abs_a, abs_b = abs(a), abs(b)
-            denom = abs_a + abs_b
+            denom = b - a
             if denom == 0:
                 frac = 0.0
             else:
-                frac = abs_a / denom
+                frac = (level - a) / denom
 
-            gi = i_start + i
-            t0, t1 = float(t[gi]), float(t[gi + 1])
+            t0, t1 = float(t[i]), float(t[i + 1])
             return t0 + frac * (t1 - t0)
 
         return None

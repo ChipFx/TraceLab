@@ -38,27 +38,31 @@ def downsample_for_display(t, y, max_pts=MAX_DISPLAY_POINTS):
     return t_out, y_out
 
 
-def sinc_interpolate(t: np.ndarray, y: np.ndarray,
-                     upsample: int = 8) -> tuple:
+def sinc_interpolate_to_n(t: np.ndarray, y: np.ndarray,
+                           target_n: int) -> tuple:
     """
-    Bandlimited sinc (sin(x)/x) interpolation — upsample by integer factor.
-    Implemented via zero-padding in the frequency domain (ideal lowpass).
-    Only applied when the visible window has fewer than ~2000 raw samples
-    (otherwise it's invisible and just costs CPU).
-    Returns upsampled (t_new, y_new).
+    Bandlimited sinc interpolation via FFT zero-padding.
+    Upsamples y to exactly target_n points spread evenly over [t[0], t[-1]].
+    Only upsamples (target_n > len(y)); pass-through if not needed.
     """
     n = len(y)
-    if n < 4 or upsample <= 1:
+    if n < 4 or target_n <= n:
         return t, y
-    # FFT zero-pad upsample
-    Y = np.fft.rfft(y)
+    # Ceiling division so n_new >= target_n
+    upsample = max(2, (target_n + n - 1) // n)
     n_new = n * upsample
+    Y = np.fft.rfft(y)
     Y_pad = np.zeros(n_new // 2 + 1, dtype=complex)
     copy_len = min(len(Y), len(Y_pad))
     Y_pad[:copy_len] = Y[:copy_len] * upsample
     y_new = np.fft.irfft(Y_pad, n_new)
     t_new = np.linspace(t[0], t[-1], n_new, endpoint=False)
     return t_new, y_new
+
+
+# Keep old name for backward compat (used in tests)
+def sinc_interpolate(t, y, upsample=8):
+    return sinc_interpolate_to_n(t, y, len(y) * upsample)
 
 
 def _eng_format(value: float, unit: str) -> str:
@@ -89,6 +93,30 @@ def _eng_format(value: float, unit: str) -> str:
             return f"{s} {prefix}{unit}"
     # Fallback for very small values
     return f"{value:.3e} {unit}"
+
+
+class EngineeringTimeAxisItem(pg.AxisItem):
+    """X-axis that labels ticks with SI time prefixes: ns, µs, ms, s, ks."""
+    def tickStrings(self, values, scale, spacing):
+        results = []
+        for v in values:
+            t = float(v)
+            a = abs(t)
+            if a == 0:
+                results.append("0 s")
+            elif a < 1e-9:
+                results.append(f"{t*1e12:.4g} ps")
+            elif a < 1e-6:
+                results.append(f"{t*1e9:.4g} ns")
+            elif a < 1e-3:
+                results.append(f"{t*1e6:.4g} µs")
+            elif a < 1.0:
+                results.append(f"{t*1e3:.4g} ms")
+            elif a < 1e3:
+                results.append(f"{t:.4g} s")
+            else:
+                results.append(f"{t/1e3:.4g} ks")
+        return results
 
 
 class EngineeringAxisItem(pg.AxisItem):
@@ -182,25 +210,35 @@ class TraceLane(pg.PlotWidget):
                  theme_name: str = "dark", y_lock_auto: bool = True,
                  interp_mode: str = "linear", parent=None):
         self._y_axis = EngineeringAxisItem(orientation="left")
+        self._x_axis = EngineeringTimeAxisItem(orientation="bottom")
         unit = getattr(trace, 'unit', '') or ''
         self._y_axis.set_unit(unit)
         super().__init__(parent=parent, background=theme_colors["background"],
-                         axisItems={"left": self._y_axis})
+                         axisItems={"left": self._y_axis,
+                                    "bottom": self._x_axis})
         self.trace = trace
         self.theme = theme_colors
         self.theme_name = theme_name
         self.y_lock_auto = y_lock_auto
         self.interp_mode = interp_mode   # "linear" or "sinc"
+        self.viewport_min_pts = 1024      # minimum display points; set from settings
         self._curve = None
         self._cursors: Dict[int, InfiniteLine] = {}
         self._labels: list = []          # TextItem labels anchored to time positions
+        self._sinc_active = False         # True when sinc was actually used this draw
 
         self._setup_plot()
         self._add_trace_curve()
 
-        # Emit view range changes for range bar updates
+        # Re-render when view range changes (viewport-aware interp)
+        self.getPlotItem().sigRangeChanged.connect(self._on_view_changed)
         self.getPlotItem().sigRangeChanged.connect(
             lambda: self.view_range_changed.emit(self))
+
+    def _on_view_changed(self):
+        """Re-draw curve when zoomed in enough that sinc would kick in."""
+        if self.interp_mode == "sinc":
+            self._add_trace_curve()
 
     def _setup_plot(self):
         pi = self.getPlotItem()
@@ -224,16 +262,32 @@ class TraceLane(pg.PlotWidget):
     def _add_trace_curve(self):
         if self._curve is not None:
             self.removeItem(self._curve)
-        t_raw = self.trace.time_axis
-        y_raw = self.trace.processed_data
+        t_full = self.trace.time_axis
+        y_full = self.trace.processed_data
+        self._sinc_active = False
 
         if self.interp_mode == "sinc":
-            # Only upsample if the dataset is small enough to benefit
-            n = len(t_raw)
-            if n <= 2000:
-                t_raw, y_raw = sinc_interpolate(t_raw, y_raw, upsample=8)
+            # Get current view window to know how many raw samples are visible
+            vr = self.getPlotItem().viewRange()
+            x0, x1 = vr[0]
+            mask = (t_full >= x0) & (t_full <= x1)
+            n_visible = int(mask.sum())
+            if n_visible < 2:
+                n_visible = len(t_full)   # not yet zoomed, use full length
 
-        t, y = downsample_for_display(t_raw, y_raw)
+            if n_visible < self.viewport_min_pts:
+                # Interpolate just the visible slice to viewport_min_pts
+                t_vis = t_full[mask] if n_visible < len(t_full) else t_full
+                y_vis = y_full[mask] if n_visible < len(y_full) else y_full
+                if len(t_vis) >= 4:
+                    t_vis, y_vis = sinc_interpolate_to_n(
+                        t_vis, y_vis, self.viewport_min_pts)
+                    self._sinc_active = True
+                # Merge back: replace visible window portion
+                t_full = t_vis
+                y_full = y_vis
+
+        t, y = downsample_for_display(t_full, y_full)
         color = _effective_color(self.trace.color, self.theme_name)
         pen = pg.mkPen(color=color, width=1.5)
         self._curve = self.plot(t, y, pen=pen, antialias=False)
@@ -394,14 +448,18 @@ def _composite_branding(img: "QImage", svg_path: str) -> "QImage":
 class ScopePlotWidget(QWidget):
     cursor_values_changed = pyqtSignal(dict)
 
+    sinc_active_changed = pyqtSignal(bool)  # emitted when sinc kicks in/out
+
     def __init__(self, theme_colors: dict, theme_name: str = "dark",
                  y_lock_auto: bool = True, interp_mode: str = "linear",
-                 parent=None):
+                 viewport_min_pts: int = 1024, parent=None):
         super().__init__(parent)
         self.theme = theme_colors
         self.theme_name = theme_name
         self.y_lock_auto = y_lock_auto
-        self.interp_mode = interp_mode   # "linear" or "sinc"
+        self.interp_mode = interp_mode
+        self.viewport_min_pts = viewport_min_pts
+        self._last_sinc_active = False
         self.traces: List[TraceModel] = []
         self._lanes: Dict[str, TraceLane] = {}
         self._mode = "split"
@@ -448,7 +506,12 @@ class ScopePlotWidget(QWidget):
         self._range_timer.timeout.connect(self._update_range_bar)
 
     def _setup_overlay(self):
+        # Replace default axes with engineering-unit axes
         pi = self._overlay_widget.getPlotItem()
+        self._ov_y_axis = EngineeringAxisItem(orientation="left")
+        self._ov_x_axis = EngineeringTimeAxisItem(orientation="bottom")
+        pi.setAxisItems({"left": self._ov_y_axis, "bottom": self._ov_x_axis})
+
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.setMenuEnabled(False)
         for ax_name in ("left", "bottom"):
@@ -457,12 +520,20 @@ class ScopePlotWidget(QWidget):
             ax.setTextPen(pg.mkPen(color=self.theme["text"]))
         pi.addLegend(offset=(10, 10))
         pi.sigRangeChanged.connect(lambda: self._range_timer.start())
+        pi.sigRangeChanged.connect(self._on_overlay_range_changed)
         self._overlay_widget.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._overlay_widget.customContextMenuRequested.connect(
             self._overlay_context_menu)
         if self.y_lock_auto:
             pi.setMouseEnabled(x=True, y=False)
+
+    def _on_overlay_range_changed(self):
+        """Re-render overlay curves when zoomed in (viewport sinc)."""
+        if self.interp_mode == "sinc" or any(
+                getattr(t, '_interp_mode_override', '') == 'sinc'
+                for t in self.traces):
+            self._rebuild_overlay()
 
     def set_mode(self, mode: str):
         self._mode = mode
@@ -520,12 +591,32 @@ class ScopePlotWidget(QWidget):
                 t.visible = visible
         self._rebuild()
 
+    def set_interp_mode_for_trace(self, trace_name: str, mode: str):
+        """Set per-trace interpolation override."""
+        for t in self.traces:
+            if t.name == trace_name:
+                t._interp_mode_override = mode
+        lane = self._lanes.get(trace_name)
+        if lane:
+            lane.interp_mode = mode
+            lane.refresh_curve()
+
+    def get_sinc_active(self) -> bool:
+        """True if any visible lane is currently sinc-interpolating."""
+        return any(getattr(l, '_sinc_active', False)
+                   for l in self._lanes.values())
+
     def refresh_all(self):
         if self._mode == "split":
             for lane in self._lanes.values():
                 lane.refresh_curve()
                 if self.y_lock_auto:
                     lane.getPlotItem().enableAutoRange(axis="y")
+            # Signal sinc status change
+            sinc_now = self.get_sinc_active()
+            if sinc_now != self._last_sinc_active:
+                self._last_sinc_active = sinc_now
+                self.sinc_active_changed.emit(sinc_now)
         else:
             self._rebuild_overlay()
 
@@ -548,7 +639,10 @@ class ScopePlotWidget(QWidget):
         first_lane = None
         for trace in visible:
             lane = TraceLane(trace, self.theme, self.theme_name,
-                              self.y_lock_auto, self.interp_mode)
+                              self.y_lock_auto,
+                              getattr(trace, '_interp_mode_override',
+                                      self.interp_mode))
+            lane.viewport_min_pts = self.viewport_min_pts
             lane.setMinimumHeight(80)
             if first_lane is None:
                 first_lane = lane
@@ -575,9 +669,31 @@ class ScopePlotWidget(QWidget):
         visible = [t for t in self.traces if t.visible]
         self._overlay_z_order = [t.name for t in visible]
 
+        vr = pi.viewRange()
+        x0, x1 = vr[0]
+
+        # Update Y-axis unit from first visible trace with a real unit
+        unit = next((t.unit for t in visible
+                     if t.unit and t.unit != 'raw'), '')
+        self._ov_y_axis.set_unit(unit)
+
         for trace in visible:
-            t_data, y_data = downsample_for_display(
-                trace.time_axis, trace.processed_data)
+            t_full = trace.time_axis
+            y_full = trace.processed_data
+            mode = getattr(trace, '_interp_mode_override',
+                           self.interp_mode)
+
+            if mode == "sinc":
+                mask = (t_full >= x0) & (t_full <= x1)
+                n_vis = int(mask.sum()) or len(t_full)
+                if n_vis < self.viewport_min_pts and n_vis >= 4:
+                    t_s = t_full[mask] if n_vis < len(t_full) else t_full
+                    y_s = y_full[mask] if n_vis < len(y_full) else y_full
+                    t_s, y_s = sinc_interpolate_to_n(
+                        t_s, y_s, self.viewport_min_pts)
+                    t_full, y_full = t_s, y_s
+
+            t_data, y_data = downsample_for_display(t_full, y_full)
             color = _effective_color(trace.color, self.theme_name)
             pen = pg.mkPen(color=color, width=1.5)
             curve = pi.plot(t_data, y_data, pen=pen,
@@ -780,9 +896,21 @@ class ScopePlotWidget(QWidget):
         self.zoom_x_range(x0 + dx, x1 + dx)
 
     def take_screenshot(self, filepath, scale=2, branding_path=""):
+        """
+        Grab plot + status bar together (no range-edit bar in screenshot).
+        The scope status bar is expected to be a sibling widget managed
+        by the parent; we grab only the plot scroll/overlay area.
+        """
         from PyQt6.QtCore import Qt as _Qt
         from PyQt6.QtGui import QPainter, QImage
-        pixmap = self.grab()
+
+        # Only grab the plot area (scroll or overlay), not the range bar
+        if self._mode == "split":
+            grab_widget = self._scroll
+        else:
+            grab_widget = self._overlay_widget
+        pixmap = grab_widget.grab()
+
         if scale > 1:
             img = pixmap.toImage()
             img = img.scaled(

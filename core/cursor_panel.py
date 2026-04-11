@@ -31,16 +31,44 @@ def _fmt_time(t: float) -> str:
     return f"{t:.6g} s"
 
 
-def _fmt_val(v: float) -> str:
+def _fmt_val(v: float, unit: str = "") -> str:
+    """Format a measurement value with SI prefix if a unit is known."""
     if v is None:
         return "---"
-    return f"{v:.6g}"
+    if not unit or unit == "raw":
+        # No unit — use plain engineering notation
+        a = abs(v)
+        if a == 0:
+            return "0"
+        if a < 1e-9:
+            return f"{v*1e12:.4g} p"
+        if a < 1e-6:
+            return f"{v*1e9:.4g} n"
+        if a < 1e-3:
+            return f"{v*1e6:.4g} µ"
+        if a >= 1e6:
+            return f"{v/1e6:.4g} M"
+        if a >= 1e3:
+            return f"{v/1e3:.4g} k"
+        return f"{v:.5g}"
+    # With unit — full SI prefix
+    abs_v = abs(v)
+    for scale, prefix in [(1e12,'T'),(1e9,'G'),(1e6,'M'),(1e3,'k'),
+                           (1,''),(1e-3,'m'),(1e-6,'µ'),(1e-9,'n'),(1e-12,'p')]:
+        if abs_v >= scale * 0.9999:
+            s = v / scale
+            if abs(s) >= 100:   txt = f"{s:.0f}"
+            elif abs(s) >= 10:  txt = f"{s:.1f}".rstrip('0').rstrip('.')
+            else:               txt = f"{s:.3f}".rstrip('0').rstrip('.')
+            return f"{txt} {prefix}{unit}"
+    return f"{v:.4e} {unit}"
 
 
 class CursorPanel(QWidget):
     """Cursor readout panel."""
 
-    place_cursor = pyqtSignal(int)  # emits cursor_id to request placement mode
+    place_cursor   = pyqtSignal(int)   # emits cursor_id
+    set_t0_at_a    = pyqtSignal()      # request: set time-zero at cursor A
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,6 +76,7 @@ class CursorPanel(QWidget):
         self._cursor_times = {0: None, 1: None}
         self._trace_values: Dict[int, Dict] = {}  # cursor_id -> {name: value}
         self._trace_display_order: List[str] = []  # set by main window
+        self._trace_units: Dict[str, str] = {}     # name -> unit string
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -63,7 +92,14 @@ class CursorPanel(QWidget):
         ga.addWidget(self.lbl_a_time, 0, 1)
         btn_place_a = QPushButton("Place A")
         btn_place_a.clicked.connect(lambda: self.place_cursor.emit(0))
-        ga.addWidget(btn_place_a, 1, 0, 1, 2)
+        ga.addWidget(btn_place_a, 1, 0)
+        btn_t0 = QPushButton("Set t=0 here")
+        btn_t0.setToolTip(
+            "Shift all traces so Cursor A position becomes t=0.\n"
+            "Points before it get negative time.")
+        btn_t0.setStyleSheet("font-size: 9px;")
+        btn_t0.clicked.connect(self.set_t0_at_a)
+        ga.addWidget(btn_t0, 1, 1)
         layout.addWidget(grp_a)
 
         # Cursor B
@@ -158,17 +194,22 @@ class CursorPanel(QWidget):
 
         self.table.setRowCount(len(trace_names))
         for i, name in enumerate(trace_names):
+            unit = self._trace_units.get(name, "")
             self.table.setItem(i, 0, QTableWidgetItem(name))
             va = vals_a.get(name)
             vb = vals_b.get(name)
             self.table.setItem(i, 1, QTableWidgetItem(
-                _fmt_val(va) if va is not None else "---"))
+                _fmt_val(va, unit) if va is not None else "---"))
             self.table.setItem(i, 2, QTableWidgetItem(
-                _fmt_val(vb) if vb is not None else "---"))
+                _fmt_val(vb, unit) if vb is not None else "---"))
 
     def set_trace_order(self, names: List[str]):
         """Update the display order for cursor value table."""
         self._trace_display_order = list(names)
+
+    def set_trace_units(self, unit_map: Dict[str, str]):
+        """Update unit strings per trace name for smart formatting."""
+        self._trace_units = dict(unit_map)
 
     def _export_csv(self):
         path, _ = QFileDialog.getSaveFileName(

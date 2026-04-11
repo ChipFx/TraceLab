@@ -1,6 +1,6 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb00030000000004bf0000020100000a0400000597000004bf0000022000000a040000059700000000000000000f00000004bf0000022000000a0400000597",
+  "geometry": "01d9d0cb00030000000003ef00000126000009f5000005f2000003ef00000145000009f5000005f200000000000000000f00000003ef00000145000009f5000005f2",
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 1.0,
@@ -23,5 +23,7 @@
   "default_sample_rate": 1000,
   "last_open_folder": "./",
   "last_save_folder": "./",
-  "remember_folder": true
+  "remember_folder": true,
+  "interp_mode": "linear",
+  "viewport_min_pts": 2048
 }

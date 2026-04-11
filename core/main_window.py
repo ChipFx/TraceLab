@@ -22,6 +22,7 @@ from core.channel_panel import ChannelPanel
 from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
 from core.plugin_manager import PluginManager
+from core.scope_status_bar import ScopeStatusBar
 
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
 
@@ -29,7 +30,7 @@ SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settin
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyScope")
+        self.setWindowTitle("ChipFX TraceLab")
         self.resize(1400, 800)
 
         self.theme = ThemeManager()
@@ -62,6 +63,7 @@ class MainWindow(QMainWindow):
         s["geometry"] = self.saveGeometry().toHex().data().decode()
         s["y_lock_auto"] = self._plot.y_lock_auto
         s["interp_mode"] = self._interp_mode
+        s["viewport_min_pts"] = self._viewport_min_pts
         s["import_replace"] = self._import_replace
         s["import_reset_view"] = self._import_reset_view
         s["fft_min_freq"] = self._fft_min_freq
@@ -84,6 +86,8 @@ class MainWindow(QMainWindow):
         # Apply saved font scale
         if "font_scale" in self._settings:
             self._apply_font_scale(self._settings["font_scale"])
+        # Set branding on status bar
+        self._scope_status.set_branding(self._get_branding_path())
 
     # ── UI Construction ────────────────────────────────────────────────
 
@@ -92,6 +96,8 @@ class MainWindow(QMainWindow):
         self._import_reset_view = self._settings.get("import_reset_view", True)
         self._y_lock_auto = self._settings.get("y_lock_auto", True)
         self._fft_min_freq = self._settings.get("fft_min_freq", 1.0)
+        self._viewport_min_pts = self._settings.get("viewport_min_pts", 1024)
+        self._last_trigger_info = ""
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -106,21 +112,49 @@ class MainWindow(QMainWindow):
         self._channel_panel.color_changed.connect(self._on_trace_color)
         self._channel_panel.trace_removed.connect(self._remove_trace)
         self._channel_panel.order_changed.connect(self._on_channel_order_changed)
+        self._channel_panel.interp_changed.connect(self._on_channel_interp_changed)
         self._splitter.addWidget(self._channel_panel)
 
         plot_colors = self.theme.plot_colors()
         self._interp_mode = self._settings.get("interp_mode", "linear")
         self._plot = ScopePlotWidget(
             plot_colors, self.theme.theme_name, self._y_lock_auto,
-            self._interp_mode)
+            self._interp_mode, self._viewport_min_pts)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
-        self._splitter.addWidget(self._plot)
+        self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
+
+        # Wrap plot + status bar in a vertical container
+        plot_container = QWidget()
+        pcl = QVBoxLayout(plot_container)
+        pcl.setContentsMargins(0, 0, 0, 0)
+        pcl.setSpacing(0)
+
+        # Move range bar OUT of scope_plot_widget into here, so the
+        # status bar sits between plot and range bar (like a real scope).
+        # The plot widget's internal layout: scroll/overlay is first, range
+        # bar last. We grab the plot (which includes range bar internally).
+        pcl.addWidget(self._plot)
+
+        self._scope_status = ScopeStatusBar()
+        self._scope_status.toggle_trace_interp.connect(
+            self._on_status_bar_toggle_interp)
+        # Insert status bar BEFORE the range bar — achieved by the fact
+        # that _plot already has its range_bar at its bottom. We just add
+        # the status bar after _plot in the outer container so visually:
+        # [plot+range_bar] [status_bar] -- but range_bar is inside _plot.
+        # Better: hide range_bar from _plot and add it here after status bar.
+        self._plot._range_bar.setParent(None)  # detach from plot's layout
+        pcl.addWidget(self._scope_status)
+        pcl.addWidget(self._plot._range_bar)
+
+        self._splitter.addWidget(plot_container)
 
         # Right panel: cursor readout + trigger, stacked vertically
         right_splitter = QSplitter(Qt.Orientation.Vertical)
 
         self._cursor_panel = CursorPanel()
         self._cursor_panel.place_cursor.connect(self._start_cursor_placement)
+        self._cursor_panel.set_t0_at_a.connect(self._cursor_set_t0_at_a)
         right_splitter.addWidget(self._cursor_panel)
 
         self._trigger_panel = TriggerPanel()
@@ -233,6 +267,11 @@ class MainWindow(QMainWindow):
         a.triggered.connect(self._show_filter)
         a = analysis_menu.addAction("Clear All Filters")
         a.triggered.connect(self._clear_all_filters)
+        analysis_menu.addSeparator()
+        interp_trace_menu = analysis_menu.addMenu("Interpolation per Channel")
+        self._per_trace_interp_menu = interp_trace_menu
+        # Populated dynamically in _update_per_trace_interp_menu()
+
         analysis_menu.addSeparator()
         a = analysis_menu.addAction("Add Label at Cursor A...")
         a.triggered.connect(self._add_label_at_cursor)
@@ -410,6 +449,7 @@ class MainWindow(QMainWindow):
         self._channel_panel.add_trace(trace)
         self._plot.add_trace(trace)
         self._refresh_trigger_channels()
+        self._refresh_status_bar()
 
     def _remove_trace(self, trace_name: str):
         self._traces = [t for t in self._traces if t.name != trace_name]
@@ -540,6 +580,32 @@ class MainWindow(QMainWindow):
         t_b = data.get(1, {}).get("time")
         if t_a is not None and t_b is not None:
             self._cursor_status.setText(f"ΔT = {t_b - t_a:.6g} s")
+        self._refresh_status_bar()
+
+    def _refresh_status_bar(self):
+        if not hasattr(self, '_scope_status'):
+            return
+        x0, x1 = self._plot.get_current_view_range()
+        y_ranges = {}
+        for trace in self._traces:
+            if trace.visible:
+                lane = self._plot._lanes.get(trace.name)
+                if lane:
+                    vr = lane.getPlotItem().viewRange()
+                    y_ranges[trace.name] = (vr[1][0], vr[1][1])
+        trig_info = getattr(self, '_last_trigger_info', "")
+        sinc_active = self._plot.get_sinc_active()
+        unit_map = {t.name: getattr(t, 'unit', '') for t in self._traces}
+        self._cursor_panel.set_trace_units(unit_map)
+        interp_map = {t.name: getattr(t, '_interp_mode_override',
+                                       self._interp_mode)
+                      for t in self._traces}
+        self._scope_status.set_trace_interp_modes(interp_map)
+        self._scope_status.update(
+            self._traces, x1 - x0, trig_info, y_ranges, sinc_active)
+
+    def _on_sinc_active_changed(self, active: bool):
+        self._refresh_status_bar()
 
     # ── Trace Events ──────────────────────────────────────────────────
 
@@ -667,30 +733,69 @@ class MainWindow(QMainWindow):
     # ── About ─────────────────────────────────────────────────────────
 
     def _show_about(self):
-        QMessageBox.about(self, "About PyScope",
-            "<h2>PyScope</h2>"
-            "<p>Modular oscilloscope data viewer.</p>"
-            "<p><b>Keyboard shortcuts:</b><br>"
-            "F — Zoom to fit &nbsp; T — Fit X &nbsp; A — Fit Y<br>"
-            "L — Toggle Y auto-lock<br>"
-            "+ / − — Zoom in/out<br>"
-            "Ctrl+O — Open &nbsp; Ctrl+F — FFT<br>"
-            "Ctrl+P — Screenshot &nbsp; Ctrl+Q — Quit</p>"
-            "<p>CSV metadata: lines starting with <code>#</code> before the "
-            "header are parsed.<br>"
-            "Example: <code>#samplerate=10k</code>, "
-            "<code>#gain=2.5/4096</code>, <code>#offset=-1.25</code></p>"
-            "<p>Plugins: drop <code>.py</code> files in the "
-            "<code>plugins/</code> folder.</p>")
+        import os
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        notice = ""
+        for fname in ("NOTICE.md", "LICENSE.md"):
+            p = os.path.join(base, fname)
+            if os.path.exists(p):
+                try:
+                    notice += f"<hr><pre style='font-size:9px;'>{open(p).read()[:2000]}</pre>"
+                except Exception:
+                    pass
 
-    # ── Trigger handlers ──────────────────────────────────────────────
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QPushButton
+        dlg = QDialog(self)
+        dlg.setWindowTitle("About ChipFX TraceLab")
+        dlg.resize(600, 500)
+        lay = QVBoxLayout(dlg)
+        tb = QTextBrowser()
+        tb.setOpenExternalLinks(True)
+        tb.setHtml(
+            "<h2>ChipFX TraceLab</h2>"
+            "<p>Modular oscilloscope &amp; signal data viewer.</p>"
+            "<p>A <b>ChipFX</b> instrument software project.</p>"
+            "<p><b>Keyboard shortcuts:</b><br>"
+            "F — Zoom to fit &nbsp; T — Fit X &nbsp; A — Fit Y &nbsp; "
+            "L — Y auto-lock<br>"
+            "+ / − — Zoom &nbsp; Ctrl+O — Open &nbsp; "
+            "Ctrl+F — FFT &nbsp; Ctrl+P — Screenshot</p>"
+            "<p>CSV metadata: <code>#samplerate=10k</code>, "
+            "<code>#gain=2.5/4096</code>, <code>#offset=-1.25</code></p>"
+            "<p>Plugins: drop <code>.py</code> files in "
+            "<code>plugins/</code> folder.</p>"
+            + notice)
+        lay.addWidget(tb)
+        btn = QPushButton("Close")
+        btn.clicked.connect(dlg.accept)
+        lay.addWidget(btn)
+        dlg.exec()
+
+    def _cursor_set_t0_at_a(self):
+        """Called from cursor panel Set t=0 button — shift to cursor A."""
+        t_pos = self._plot._cursors.get(0)
+        if t_pos is None:
+            return
+        self._on_trigger_set_t0(t_pos)
 
     def _on_trigger_found(self, t_pos: float):
         """Trigger located — optionally zoom context window around it."""
+        trace = None
+        for t in self._traces:
+            if t.visible:
+                trace = t
+                break
+        level = ""
+        if hasattr(self, '_trigger_panel'):
+            level = self._trigger_panel.edit_level.text()
+            ch = self._trigger_panel.combo_ch.currentText()
+            edge = self._trigger_panel.combo_edge.currentText()[0]
+            self._last_trigger_info = f"{edge} {ch} {level}"
         if self._trigger_panel.chk_zoom.isChecked():
             x0, x1 = self._plot.get_current_view_range()
             half_win = (x1 - x0) / 2
             self._plot.zoom_x_range(t_pos - half_win, t_pos + half_win)
+        self._refresh_status_bar()
 
     def _on_trigger_set_t0(self, t_pos: float):
         """Shift all trace time axes so t_pos becomes 0."""
@@ -709,6 +814,34 @@ class MainWindow(QMainWindow):
 
     def _refresh_trigger_channels(self):
         self._trigger_panel.update_traces(self._traces)
+        self._update_per_trace_interp_menu()
+
+    def _update_per_trace_interp_menu(self):
+        """Rebuild the per-channel interpolation submenu."""
+        if not hasattr(self, '_per_trace_interp_menu'):
+            return
+        self._per_trace_interp_menu.clear()
+        if not self._traces:
+            self._per_trace_interp_menu.addAction("(no traces)").setEnabled(False)
+            return
+        for trace in self._traces:
+            ch_menu = self._per_trace_interp_menu.addMenu(trace.label)
+            current = getattr(trace, '_interp_mode_override', self._interp_mode)
+            a_lin = ch_menu.addAction("Linear")
+            a_lin.setCheckable(True)
+            a_lin.setChecked(current == "linear")
+            a_sin = ch_menu.addAction("Sinc (sin(x)/x)")
+            a_sin.setCheckable(True)
+            a_sin.setChecked(current == "sinc")
+            from PyQt6.QtGui import QActionGroup
+            ag = QActionGroup(ch_menu)
+            ag.setExclusive(True)
+            ag.addAction(a_lin); ag.addAction(a_sin)
+            name = trace.name
+            a_lin.triggered.connect(
+                lambda _, n=name: self._plot.set_interp_mode_for_trace(n, "linear"))
+            a_sin.triggered.connect(
+                lambda _, n=name: self._plot.set_interp_mode_for_trace(n, "sinc"))
 
     # ── Channel order ─────────────────────────────────────────────────
 
@@ -852,6 +985,22 @@ class MainWindow(QMainWindow):
         self._interp_mode = mode
         self._plot.set_interp_mode(mode)
         self._settings["interp_mode"] = mode
+
+    def _on_channel_interp_changed(self, name: str, mode: str):
+        """Channel panel context menu or All Lin/Sinc triggered."""
+        self._plot.set_interp_mode_for_trace(name, mode)
+        self._refresh_status_bar()
+
+    def _on_status_bar_toggle_interp(self, name: str):
+        """Clicking the interp badge on a channel block in the status bar."""
+        for trace in self._traces:
+            if trace.name == name:
+                cur = getattr(trace, '_interp_mode_override', self._interp_mode)
+                new_mode = 'linear' if cur == 'sinc' else 'sinc'
+                trace._interp_mode_override = new_mode
+                self._plot.set_interp_mode_for_trace(name, new_mode)
+                break
+        self._refresh_status_bar()
 
     # ── Trace labels ───────────────────────────────────────────────────
 

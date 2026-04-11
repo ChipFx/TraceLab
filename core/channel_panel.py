@@ -19,6 +19,7 @@ class ChannelRow(QWidget):
     visibility_changed = pyqtSignal(str, bool)
     color_changed      = pyqtSignal(str, str)
     remove_requested   = pyqtSignal(str)
+    interp_changed     = pyqtSignal(str, str)   # name, mode
 
     def __init__(self, trace: TraceModel, parent=None):
         super().__init__(parent)
@@ -83,9 +84,24 @@ class ChannelRow(QWidget):
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
+        # Interpolation toggle
+        mode = getattr(self.trace, '_interp_mode_override', 'linear')
+        if mode == 'sinc':
+            interp_lbl = "Interpolation: Sinc  →  Switch to Linear"
+        else:
+            interp_lbl = "Interpolation: Linear  →  Switch to Sinc"
+        act_interp = menu.addAction(interp_lbl)
+        act_interp.triggered.connect(self._toggle_interp)
+        menu.addSeparator()
         menu.addAction("Remove Trace").triggered.connect(
             lambda: self.remove_requested.emit(self.trace.name))
         menu.exec(event.globalPos())
+
+    def _toggle_interp(self):
+        mode = getattr(self.trace, '_interp_mode_override', 'linear')
+        new_mode = 'linear' if mode == 'sinc' else 'sinc'
+        self.trace._interp_mode_override = new_mode
+        self.interp_changed.emit(self.trace.name, new_mode)
 
 
 class ChannelPanel(QWidget):
@@ -98,7 +114,8 @@ class ChannelPanel(QWidget):
     visibility_changed = pyqtSignal(str, bool)
     color_changed      = pyqtSignal(str, str)
     trace_removed      = pyqtSignal(str)
-    order_changed      = pyqtSignal(list)   # emits list of trace names in new order
+    order_changed      = pyqtSignal(list)
+    interp_changed     = pyqtSignal(str, str)   # name, mode
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -135,6 +152,7 @@ class ChannelPanel(QWidget):
 
         ctrl = QHBoxLayout()
         ctrl.setContentsMargins(4, 4, 4, 4)
+        ctrl.setSpacing(3)
         btn_all  = QPushButton("All")
         btn_none = QPushButton("None")
         btn_all.setFixedHeight(22)
@@ -145,6 +163,23 @@ class ChannelPanel(QWidget):
         ctrl.addWidget(btn_none)
         layout.addLayout(ctrl)
 
+        ctrl2 = QHBoxLayout()
+        ctrl2.setContentsMargins(4, 0, 4, 4)
+        ctrl2.setSpacing(3)
+        btn_lin = QPushButton("All Lin")
+        btn_sinc = QPushButton("All Sinc")
+        btn_lin.setFixedHeight(20)
+        btn_sinc.setFixedHeight(20)
+        btn_lin.setToolTip("Set all channels to Linear interpolation")
+        btn_sinc.setToolTip("Set all channels to Sinc (sin(x)/x) interpolation")
+        btn_lin.setStyleSheet("font-size: 9px;")
+        btn_sinc.setStyleSheet("font-size: 9px; color: #ff8888;")
+        btn_lin.clicked.connect(lambda: self._set_all_interp("linear"))
+        btn_sinc.clicked.connect(lambda: self._set_all_interp("sinc"))
+        ctrl2.addWidget(btn_lin)
+        ctrl2.addWidget(btn_sinc)
+        layout.addLayout(ctrl2)
+
     def add_trace(self, trace: TraceModel):
         if trace.name in self._rows:
             # Refresh existing
@@ -154,6 +189,7 @@ class ChannelPanel(QWidget):
         row.visibility_changed.connect(self.visibility_changed)
         row.color_changed.connect(self.color_changed)
         row.remove_requested.connect(self._on_remove)
+        row.interp_changed.connect(self.interp_changed)
 
         item = QListWidgetItem(self._list)
         item.setData(Qt.ItemDataRole.UserRole, trace.name)
@@ -200,3 +236,8 @@ class ChannelPanel(QWidget):
     def _set_all_visible(self, visible: bool):
         for row in self._rows.values():
             row.chk_vis.setChecked(visible)
+
+    def _set_all_interp(self, mode: str):
+        for row in self._rows.values():
+            row.trace._interp_mode_override = mode
+            self.interp_changed.emit(row.trace.name, mode)

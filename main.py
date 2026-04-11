@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PyScope - A modular oscilloscope data viewer
+ChipFX TraceLab - Modular oscilloscope data viewer
 Entry point
 """
 
@@ -20,9 +20,9 @@ def main():
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
     app = QApplication(sys.argv)
-    app.setApplicationName("PyScope")
+    app.setApplicationName("ChipFX TraceLab")
     app.setApplicationVersion("1.0.0")
-    app.setOrganizationName("PyScope")
+    app.setOrganizationName("ChipFX")
 
     # Load application stylesheet
     from core.theme_manager import ThemeManager

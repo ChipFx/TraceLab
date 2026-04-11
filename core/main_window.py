@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
         # bar last. We grab the plot (which includes range bar internally).
         pcl.addWidget(self._plot)
 
-        self._scope_status = ScopeStatusBar()
+        self._scope_status = ScopeStatusBar(self.theme.theme_name)
         self._scope_status.toggle_trace_interp.connect(
             self._on_status_bar_toggle_interp)
         # Insert status bar BEFORE the range bar — achieved by the fact
@@ -147,6 +147,7 @@ class MainWindow(QMainWindow):
         pcl.addWidget(self._scope_status)
         pcl.addWidget(self._plot._range_bar)
 
+        self._plot_container = plot_container
         self._splitter.addWidget(plot_container)
 
         # Right panel: cursor readout + trigger, stacked vertically
@@ -304,7 +305,7 @@ class MainWindow(QMainWindow):
 
         # ── Help ──────────────────────────────────────────────────────
         help_menu = mb.addMenu("Help")
-        help_menu.addAction("About PyScope").triggered.connect(self._show_about)
+        help_menu.addAction("About TraceLab").triggered.connect(self._show_about)
 
     def _build_toolbar(self):
         tb = self.addToolBar("Main")
@@ -513,14 +514,56 @@ class MainWindow(QMainWindow):
     def _save_screenshot(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Screenshot",
-            self._get_save_dir("pyscope_capture.png"),
+            self._get_save_dir("tracelab_capture.png"),
             "PNG Images (*.png);;All Files (*)")
         if not path:
             return
         self._remember_save(path)
-        self._plot.take_screenshot(path, scale=2,
-                                    branding_path=self._get_branding_path())
+        self._grab_screenshot(path, scale=2)
         self._status_lbl.setText(f"Screenshot: {os.path.basename(path)}")
+
+    def _grab_screenshot(self, filepath: str, scale: int = 2):
+        """
+        Grab plot area + scope status bar together (excludes range-input bar).
+        Composites branding directly from the status bar logo — no separate
+        corner overlay needed.
+        """
+        from PyQt6.QtGui import QPixmap, QImage
+        from PyQt6.QtCore import Qt as _Qt
+
+        # Grab the plot widget (scroll/overlay + range bar excluded since
+        # range_bar was re-parented out of _plot)
+        if self._plot._mode == "split":
+            plot_px = self._plot._scroll.grab()
+        else:
+            plot_px = self._plot._overlay_widget.grab()
+
+        # Grab the scope status bar
+        status_px = self._scope_status.grab()
+
+        # Stack vertically: plot on top, status bar on bottom
+        pw, ph = plot_px.width(), plot_px.height()
+        sw, sh = status_px.width(), status_px.height()
+        total_w = max(pw, sw)
+        total_h = ph + sh
+
+        combined = QPixmap(total_w, total_h)
+        combined.fill(_Qt.GlobalColor.black)
+        from PyQt6.QtGui import QPainter
+        p = QPainter(combined)
+        p.drawPixmap(0, 0, plot_px)
+        p.drawPixmap(0, ph, status_px)
+        p.end()
+
+        if scale > 1:
+            img = combined.toImage()
+            img = img.scaled(
+                img.width() * scale, img.height() * scale,
+                _Qt.AspectRatioMode.KeepAspectRatio,
+                _Qt.TransformationMode.SmoothTransformation)
+            img.save(filepath)
+        else:
+            combined.save(filepath)
 
     def _get_branding_path(self) -> str:
         """Return path to branding SVG if it exists, else empty string."""
@@ -548,6 +591,9 @@ class MainWindow(QMainWindow):
         self._plot.theme = new_colors
         self._plot.theme_name = name
         self._plot._rebuild()
+        if hasattr(self, '_scope_status'):
+            self._scope_status.set_theme(name)
+            self._scope_status.set_branding(self._get_branding_path())
         if save:
             self._settings["theme"] = name
 

@@ -289,12 +289,65 @@ class ImportDialog(QDialog):
         col_tab = QWidget()
         cl = QVBoxLayout(col_tab)
 
+        # ── Global scale panel ────────────────────────────────────────
+        # Last-used gain/offset loaded from settings; two apply buttons.
+        last_gain   = self._settings.get("last_gain",   "1")
+        last_offset = self._settings.get("last_offset", "0")
+        last_unit   = self._settings.get("last_unit",   "V")
+
+        scale_box = QGroupBox("Global Scaling (last used)")
+        scale_box.setStyleSheet(
+            "QGroupBox { border: 1px solid #3a3a5a; border-radius: 4px; "
+            "margin-top: 14px; padding-top: 6px; } "
+            "QGroupBox::title { color: #8080c0; subcontrol-origin: margin; "
+            "left: 8px; }")
+        sbl = QHBoxLayout(scale_box)
+        sbl.setSpacing(8)
+
+        sbl.addWidget(QLabel("Gain:"))
+        self.edit_global_gain = SciLineEdit(str(last_gain))
+        self.edit_global_gain.setFixedWidth(90)
+        self.edit_global_gain.setToolTip(
+            "Gain for bulk apply. Fractions OK: 2.048/4096")
+        sbl.addWidget(self.edit_global_gain)
+
+        sbl.addWidget(QLabel("Offset:"))
+        self.edit_global_offset = SciLineEdit(str(last_offset))
+        self.edit_global_offset.setFixedWidth(80)
+        self.edit_global_offset.setToolTip("Offset added after gain")
+        sbl.addWidget(self.edit_global_offset)
+
+        sbl.addWidget(QLabel("Unit:"))
+        self.edit_global_unit = SciLineEdit(str(last_unit))
+        self.edit_global_unit.setFixedWidth(40)
+        sbl.addWidget(self.edit_global_unit)
+
+        sbl.addSpacing(12)
+        btn_apply_all = QPushButton("Apply to ALL  (enable all)")
+        btn_apply_all.setToolTip(
+            "Enable ALL numeric columns and apply this gain/offset/unit to them")
+        btn_apply_all.setStyleSheet(
+            "background: #1a3a1a; color: #80e080; border: 1px solid #3a6a3a;")
+        btn_apply_all.clicked.connect(self._global_apply_all)
+        sbl.addWidget(btn_apply_all)
+
+        btn_apply_sel = QPushButton("Apply to selected")
+        btn_apply_sel.setToolTip(
+            "Apply this gain/offset/unit only to already-enabled columns")
+        btn_apply_sel.setStyleSheet(
+            "background: #1a1a3a; color: #8080e0; border: 1px solid #3a3a6a;")
+        btn_apply_sel.clicked.connect(self._global_apply_selected)
+        sbl.addWidget(btn_apply_sel)
+
+        sbl.addStretch()
+        cl.addWidget(scale_box)
+
+        # ── Selection toolbar ─────────────────────────────────────────
         tb = QHBoxLayout()
         for label, fn in [
-            ("Select All",  lambda: self._select_all(True)),
-            ("Select None", lambda: self._select_all(False)),
+            ("Select All",    lambda: self._select_all(True)),
+            ("Select None",   lambda: self._select_all(False)),
             ("Select Numeric", self._select_numeric),
-            ("Apply Scale to All Selected", self._apply_scale_to_all),
         ]:
             b = QPushButton(label)
             b.clicked.connect(fn)
@@ -499,6 +552,33 @@ class ImportDialog(QDialog):
             if row.chk_enable.isChecked() and row is not source:
                 row.apply_scale_from(source)
 
+    def _global_apply_all(self):
+        """Enable all numeric columns and apply global gain/offset/unit."""
+        gain   = self.edit_global_gain.text().strip()
+        offset = self.edit_global_offset.text().strip()
+        unit   = self.edit_global_unit.text().strip() or "V"
+        for row in self._col_rows.values():
+            if not row._is_numeric:
+                continue
+            row.chk_enable.setChecked(True)
+            row.chk_scale.setChecked(True)
+            row.edit_gain.setText(gain)
+            row.edit_offset.setText(offset)
+            row.edit_unit.setText(unit)
+
+    def _global_apply_selected(self):
+        """Apply global gain/offset/unit only to already-enabled columns."""
+        gain   = self.edit_global_gain.text().strip()
+        offset = self.edit_global_offset.text().strip()
+        unit   = self.edit_global_unit.text().strip() or "V"
+        for row in self._col_rows.values():
+            if not row.chk_enable.isChecked():
+                continue
+            row.chk_scale.setChecked(True)
+            row.edit_gain.setText(gain)
+            row.edit_offset.setText(offset)
+            row.edit_unit.setText(unit)
+
     def _do_import(self):
         use_time_col = self.radio_time_col.isChecked()
         time_col_name = self.combo_time_col.currentText() if use_time_col else None
@@ -566,6 +646,10 @@ class ImportDialog(QDialog):
         self.result_traces = traces
         self.replace_existing = self.chk_replace.isChecked()
         self.reset_view = self.chk_reset_view.isChecked()
+        # Persist last-used global scale values
+        self._settings["last_gain"]   = self.edit_global_gain.text().strip()
+        self._settings["last_offset"] = self.edit_global_offset.text().strip()
+        self._settings["last_unit"]   = self.edit_global_unit.text().strip() or "V"
         self.accept()
 
 

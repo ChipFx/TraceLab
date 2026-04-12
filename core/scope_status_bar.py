@@ -296,39 +296,36 @@ class ScopeStatusBar(QWidget):
     def update(self, traces: List[TraceModel],
                x_span: float,
                trigger_info: str = "",
-               y_ranges: dict = None,
-               interp_active: bool = False):
+               y_major_divs: dict = None,  # {name: major_tick_spacing_in_data_units}
+               interp_active: bool = False,
+               settings: dict = None):
         """Rebuild the status bar. Call whenever view or traces change."""
         self._timetrig.set_tdiv(_tdiv(x_span))
         self._timetrig.set_trig(trigger_info)
 
         # ── Rebuild channel blocks ─────────────────────────────────────────
-        # IMPORTANT: remove widgets from layout FIRST, then clear strong-ref
-        # list, then allow Qt to clean up. Using takeAt avoids the deleteLater
-        # race that caused blocks to never appear.
         while self._ch_layout.count():
             item = self._ch_layout.takeAt(0)
             if item:
                 w = item.widget()
                 if w:
-                    w.setParent(None)   # synchronous removal, no deleteLater race
+                    w.setParent(None)
         self._ch_blocks.clear()
 
-        y_ranges = y_ranges or {}
+        y_major_divs = y_major_divs or {}
         visible = [t for t in traces if t.visible]
 
         for trace in visible:
-            y_min, y_max = y_ranges.get(trace.name, (0.0, 0.0))
-            y_span = abs(y_max - y_min)
+            y_div = y_major_divs.get(trace.name, 0.0)
             mode = self._trace_interp_modes.get(trace.name, "linear")
             block = ChannelStatusBlock(
-                trace, y_span, mode, self._theme_name, parent=self._ch_container)
+                trace, y_div, mode, self._theme_name,
+                settings=settings, parent=self._ch_container)
             block.toggle_interp.connect(self.toggle_trace_interp)
-            self._ch_blocks.append(block)   # strong ref
+            self._ch_blocks.append(block)
             self._ch_layout.addWidget(block)
             block.show()
 
-        # Set container width so scroll works correctly
         n = len(visible)
         total_w = n * (BLOCK_W + SEP_W) + 4
         self._ch_container.setFixedWidth(max(total_w, BLOCK_W))

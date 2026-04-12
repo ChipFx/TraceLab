@@ -19,7 +19,8 @@ class ChannelRow(QWidget):
     visibility_changed = pyqtSignal(str, bool)
     color_changed      = pyqtSignal(str, str)
     remove_requested   = pyqtSignal(str)
-    interp_changed     = pyqtSignal(str, str)   # name, mode
+    interp_changed     = pyqtSignal(str, str)
+    reset_color        = pyqtSignal(str)         # name
 
     def __init__(self, trace: TraceModel, parent=None):
         super().__init__(parent)
@@ -93,6 +94,10 @@ class ChannelRow(QWidget):
         act_interp = menu.addAction(interp_lbl)
         act_interp.triggered.connect(self._toggle_interp)
         menu.addSeparator()
+        act_reset_c = menu.addAction("Reset Color to Default")
+        act_reset_c.triggered.connect(
+            lambda: self.reset_color.emit(self.trace.name))
+        menu.addSeparator()
         menu.addAction("Remove Trace").triggered.connect(
             lambda: self.remove_requested.emit(self.trace.name))
         menu.exec(event.globalPos())
@@ -111,11 +116,12 @@ class ChannelPanel(QWidget):
     The actual ChannelRow widgets sit inside each QListWidgetItem.
     """
 
-    visibility_changed = pyqtSignal(str, bool)
-    color_changed      = pyqtSignal(str, str)
-    trace_removed      = pyqtSignal(str)
-    order_changed      = pyqtSignal(list)
-    interp_changed     = pyqtSignal(str, str)   # name, mode
+    visibility_changed     = pyqtSignal(str, bool)
+    color_changed          = pyqtSignal(str, str)
+    trace_removed          = pyqtSignal(str)
+    order_changed          = pyqtSignal(list)
+    interp_changed         = pyqtSignal(str, str)
+    reset_color_requested  = pyqtSignal(str)     # trace name
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -190,6 +196,7 @@ class ChannelPanel(QWidget):
         row.color_changed.connect(self.color_changed)
         row.remove_requested.connect(self._on_remove)
         row.interp_changed.connect(self.interp_changed)
+        row.reset_color.connect(self.reset_color_requested)
 
         item = QListWidgetItem(self._list)
         item.setData(Qt.ItemDataRole.UserRole, trace.name)

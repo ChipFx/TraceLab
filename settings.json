@@ -4,7 +4,7 @@
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 1.0,
-  "y_lock_auto": false,
+  "y_lock_auto": true,
   "font_scale": 1.0,
   "trace_colors": [
     "#F0C040",
@@ -28,5 +28,7 @@
   "viewport_min_pts": 2048,
   "last_gain": "2.048/4096",
   "last_offset": "-1.024",
-  "last_unit": "V"
+  "last_unit": "V",
+  "phosphor_fg": "#00ee55",
+  "phosphor_bg": "#001700"
 }

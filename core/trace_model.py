@@ -42,8 +42,29 @@ DEFAULT_TRACE_COLORS_LIGHT = [
     "#0040C0",  # C10 - Dark Blue
 ]
 DEFAULT_TRACE_COLORS_LIGHT = [
-    "#B08000", "#0068A0", "#A00040", "#006030", "#A04800",
-    "#5800A0", "#007060", "#707000", "#980000", "#003CB0",
+    "#C07000",  # C1 - Dark Gold (readable on white)
+    "#0055CC",  # C2 - Royal Blue
+    "#AA0044",  # C3 - Crimson
+    "#006633",  # C4 - Forest Green
+    "#AA4400",  # C5 - Burnt Orange
+    "#660099",  # C6 - Purple
+    "#007777",  # C7 - Teal
+    "#667700",  # C8 - Olive
+    "#990000",  # C9 - Dark Red
+    "#0033AA",  # C10 - Navy Blue
+]
+
+DEFAULT_TRACE_COLORS_PRINT = [
+    "#000077",  # C1 - Dark Navy
+    "#004400",  # C2 - Dark Green
+    "#770000",  # C3 - Dark Red
+    "#440066",  # C4 - Dark Purple
+    "#006666",  # C5 - Dark Teal
+    "#555500",  # C6 - Dark Olive
+    "#003355",  # C7 - Dark Blue
+    "#660033",  # C8 - Dark Maroon
+    "#004422",  # C9 - Dark Forest
+    "#331100",  # C10 - Dark Brown
 ]
 
 

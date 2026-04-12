@@ -65,6 +65,25 @@ def sinc_interpolate(t, y, upsample=8):
     return sinc_interpolate_to_n(t, y, len(y) * upsample)
 
 
+def cubic_interpolate_to_n(t: np.ndarray, y: np.ndarray,
+                            target_n: int) -> tuple:
+    """
+    Cubic spline interpolation via scipy CubicSpline (not-a-knot boundary).
+    Pass-through if target_n <= len(y) or len(y) < 4.
+    Falls back to sinc if scipy fails.
+    """
+    n = len(y)
+    if n < 4 or target_n <= n:
+        return t, y
+    try:
+        from scipy.interpolate import CubicSpline
+        cs = CubicSpline(t, y, bc_type='not-a-knot')
+        t_new = np.linspace(t[0], t[-1], target_n)
+        return t_new, cs(t_new)
+    except Exception:
+        return sinc_interpolate_to_n(t, y, target_n)
+
+
 def _eng_format(value: float, unit: str) -> str:
     """
     Format a float with engineering-style SI prefix and unit.
@@ -236,8 +255,8 @@ class TraceLane(pg.PlotWidget):
             lambda: self.view_range_changed.emit(self))
 
     def _on_view_changed(self):
-        """Re-draw curve when zoomed in enough that sinc would kick in."""
-        if self.interp_mode == "sinc":
+        """Re-draw curve when zoomed in enough that sinc/cubic would kick in."""
+        if self.interp_mode in ("sinc", "cubic"):
             self._add_trace_curve()
 
     def _setup_plot(self):
@@ -266,7 +285,7 @@ class TraceLane(pg.PlotWidget):
         y_full = self.trace.processed_data
         self._sinc_active = False
 
-        if self.interp_mode == "sinc":
+        if self.interp_mode in ("sinc", "cubic"):
             # Get current view window to know how many raw samples are visible
             vr = self.getPlotItem().viewRange()
             x0, x1 = vr[0]
@@ -280,10 +299,14 @@ class TraceLane(pg.PlotWidget):
                 t_vis = t_full[mask] if n_visible < len(t_full) else t_full
                 y_vis = y_full[mask] if n_visible < len(y_full) else y_full
                 if len(t_vis) >= 4:
-                    t_vis, y_vis = sinc_interpolate_to_n(
-                        t_vis, y_vis, self.viewport_min_pts)
+                    if self.interp_mode == "cubic":
+                        t_vis, y_vis = cubic_interpolate_to_n(
+                            t_vis, y_vis, self.viewport_min_pts)
+                    else:
+                        t_vis, y_vis = sinc_interpolate_to_n(
+                            t_vis, y_vis, self.viewport_min_pts)
                     self._sinc_active = True
-                # Merge back: replace visible window portion
+                # Replace visible window portion
                 t_full = t_vis
                 y_full = y_vis
 
@@ -449,6 +472,7 @@ class ScopePlotWidget(QWidget):
     cursor_values_changed = pyqtSignal(dict)
 
     sinc_active_changed = pyqtSignal(bool)  # emitted when sinc kicks in/out
+    view_changed        = pyqtSignal()       # emitted (throttled) on pan/zoom
 
     def __init__(self, theme_colors: dict, theme_name: str = "dark",
                  y_lock_auto: bool = True, interp_mode: str = "linear",
@@ -499,11 +523,12 @@ class ScopePlotWidget(QWidget):
         self._range_bar.range_changed.connect(self._on_range_bar_changed)
         layout.addWidget(self._range_bar)
 
-        # Timer to update range bar (throttled)
+        # Timer to update range bar AND status bar (throttled to 100ms)
         self._range_timer = QTimer()
         self._range_timer.setSingleShot(True)
         self._range_timer.setInterval(100)
         self._range_timer.timeout.connect(self._update_range_bar)
+        self._range_timer.timeout.connect(self.view_changed)
 
     def _setup_overlay(self):
         # Replace default axes with engineering-unit axes
@@ -556,8 +581,12 @@ class ScopePlotWidget(QWidget):
             pi.enableAutoRange(axis="y")
 
     def set_interp_mode(self, mode: str):
-        """Switch interpolation: 'linear' or 'sinc'."""
+        """Switch global interpolation mode. Clears per-trace overrides."""
         self.interp_mode = mode
+        # Clear per-trace overrides so all traces follow global mode
+        for trace in self.traces:
+            if hasattr(trace, '_interp_mode_override'):
+                del trace._interp_mode_override
         self._rebuild()
 
     def add_trace(self, trace: TraceModel):
@@ -683,16 +712,19 @@ class ScopePlotWidget(QWidget):
             mode = getattr(trace, '_interp_mode_override',
                            self.interp_mode)
 
-            if mode == "sinc":
+            if mode in ("sinc", "cubic"):
                 mask = (t_full >= x0) & (t_full <= x1)
                 n_vis = int(mask.sum()) or len(t_full)
                 if n_vis < self.viewport_min_pts and n_vis >= 4:
                     t_s = t_full[mask] if n_vis < len(t_full) else t_full
                     y_s = y_full[mask] if n_vis < len(y_full) else y_full
-                    t_s, y_s = sinc_interpolate_to_n(
-                        t_s, y_s, self.viewport_min_pts)
+                    if mode == "cubic":
+                        t_s, y_s = cubic_interpolate_to_n(
+                            t_s, y_s, self.viewport_min_pts)
+                    else:
+                        t_s, y_s = sinc_interpolate_to_n(
+                            t_s, y_s, self.viewport_min_pts)
                     t_full, y_full = t_s, y_s
-
             t_data, y_data = downsample_for_display(t_full, y_full)
             color = _effective_color(trace.color, self.theme_name)
             pen = pg.mkPen(color=color, width=1.5)

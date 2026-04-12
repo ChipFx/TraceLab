@@ -13,7 +13,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QIcon, QPixmap, QColor
 from typing import List, Optional
 
-from core.trace_model import TraceModel, DEFAULT_TRACE_COLORS, DEFAULT_TRACE_COLORS_LIGHT
+from core.trace_model import (TraceModel, DEFAULT_TRACE_COLORS,
+    DEFAULT_TRACE_COLORS_LIGHT, DEFAULT_TRACE_COLORS_PRINT)
 from core.theme_manager import ThemeManager
 from core.data_loader import load_csv
 from core.import_dialog import ImportDialog
@@ -113,6 +114,7 @@ class MainWindow(QMainWindow):
         self._channel_panel.trace_removed.connect(self._remove_trace)
         self._channel_panel.order_changed.connect(self._on_channel_order_changed)
         self._channel_panel.interp_changed.connect(self._on_channel_interp_changed)
+        self._channel_panel.reset_color_requested.connect(self._on_reset_trace_color)
         self._splitter.addWidget(self._channel_panel)
 
         plot_colors = self.theme.plot_colors()
@@ -122,6 +124,7 @@ class MainWindow(QMainWindow):
             self._interp_mode, self._viewport_min_pts)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
+        self._plot.view_changed.connect(self._refresh_status_bar)
 
         # Wrap plot + status bar in a vertical container
         plot_container = QWidget()
@@ -209,7 +212,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         a = view_menu.addAction("Zoom to Fit")
         a.setShortcut(QKeySequence("F"))
-        a.triggered.connect(self._plot.zoom_full)
+        a.triggered.connect(self._zoom_full_safe)
         a = view_menu.addAction("Fit Time (X only)")
         a.setShortcut(QKeySequence("T"))
         a.triggered.connect(self._plot.zoom_fit_x)
@@ -240,16 +243,23 @@ class MainWindow(QMainWindow):
         self._act_interp_linear.setCheckable(True)
         self._act_interp_sinc   = interp_menu.addAction("Sinc (sin(x)/x)")
         self._act_interp_sinc.setCheckable(True)
+        self._act_interp_cubic  = interp_menu.addAction("Cubic Spline")
+        self._act_interp_cubic.setCheckable(True)
         ag = QActionGroup(self)
         ag.setExclusive(True)
         ag.addAction(self._act_interp_linear)
         ag.addAction(self._act_interp_sinc)
-        (self._act_interp_sinc if self._interp_mode == "sinc"
+        ag.addAction(self._act_interp_cubic)
+        m = self._interp_mode
+        (self._act_interp_sinc if m == "sinc"
+         else self._act_interp_cubic if m == "cubic"
          else self._act_interp_linear).setChecked(True)
         self._act_interp_linear.triggered.connect(
             lambda: self._set_interp_mode("linear"))
         self._act_interp_sinc.triggered.connect(
             lambda: self._set_interp_mode("sinc"))
+        self._act_interp_cubic.triggered.connect(
+            lambda: self._set_interp_mode("cubic"))
 
         view_menu.addSeparator()
         a = view_menu.addAction("Theme: Dark")
@@ -258,6 +268,8 @@ class MainWindow(QMainWindow):
         a.triggered.connect(lambda: self._set_theme("light"))
         a = view_menu.addAction("Theme: Green Phosphor")
         a.triggered.connect(lambda: self._set_theme("rs_green"))
+        a = view_menu.addAction("Theme: Print (Light, ink-saving)")
+        a.triggered.connect(lambda: self._set_theme("print"))
 
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
@@ -285,6 +297,9 @@ class MainWindow(QMainWindow):
             self._show_font_scale_dialog)
         settings_menu.addAction("Decimal Separator...").triggered.connect(
             self._show_decimal_sep_dialog)
+        settings_menu.addSeparator()
+        settings_menu.addAction("Phosphor Colors...").triggered.connect(
+            self._show_phosphor_settings)
         settings_menu.addSeparator()
         self._act_remember_folder = settings_menu.addAction("Remember Last Folder")
         self._act_remember_folder.setCheckable(True)
@@ -329,7 +344,7 @@ class MainWindow(QMainWindow):
         add("Cursor A", lambda: self._start_cursor_placement(0))
         add("Cursor B", lambda: self._start_cursor_placement(1))
         tb.addSeparator()
-        add("Fit (F)", self._plot.zoom_full)
+        add("Fit (F)", self._zoom_full_safe)
         add("Fit X (T)", self._plot.zoom_fit_x)
         add("Fit Y (A)", self._plot.zoom_fit_y)
         tb.addSeparator()
@@ -440,9 +455,13 @@ class MainWindow(QMainWindow):
             return
 
         # Assign color from appropriate palette
-        color_palette = (DEFAULT_TRACE_COLORS_LIGHT
-                         if self.theme.theme_name == "light"
-                         else DEFAULT_TRACE_COLORS)
+        tn = self.theme.theme_name
+        if tn == "light":
+            color_palette = DEFAULT_TRACE_COLORS_LIGHT
+        elif tn == "print":
+            color_palette = DEFAULT_TRACE_COLORS_PRINT
+        else:
+            color_palette = DEFAULT_TRACE_COLORS
         n = len(self._traces)
         trace.color = color_palette[n % len(color_palette)]
 
@@ -632,13 +651,16 @@ class MainWindow(QMainWindow):
         if not hasattr(self, '_scope_status'):
             return
         x0, x1 = self._plot.get_current_view_range()
-        y_ranges = {}
+
+        # Get actual major tick spacing for time axis and each Y lane
+        x_major_div = self._get_x_major_tick()
+        y_major_divs = {}
         for trace in self._traces:
             if trace.visible:
                 lane = self._plot._lanes.get(trace.name)
                 if lane:
-                    vr = lane.getPlotItem().viewRange()
-                    y_ranges[trace.name] = (vr[1][0], vr[1][1])
+                    y_major_divs[trace.name] = self._get_y_major_tick(lane)
+
         trig_info = getattr(self, '_last_trigger_info', "")
         sinc_active = self._plot.get_sinc_active()
         unit_map = {t.name: getattr(t, 'unit', '') for t in self._traces}
@@ -648,9 +670,85 @@ class MainWindow(QMainWindow):
                       for t in self._traces}
         self._scope_status.set_trace_interp_modes(interp_map)
         self._scope_status.update(
-            self._traces, x1 - x0, trig_info, y_ranges, sinc_active)
+            self._traces, x_major_div, trig_info, y_major_divs,
+            sinc_active, settings=self._settings)
+
+    def _get_x_major_tick(self) -> float:
+        """Return the actual major X tick spacing in data units (seconds)."""
+        try:
+            if self._plot._lanes:
+                lane = next(iter(self._plot._lanes.values()))
+                ax = lane.getPlotItem().getAxis('bottom')
+                vr = lane.getPlotItem().viewRange()[0]
+                w = lane.width() or 800
+                ticks = ax.tickSpacing(vr[0], vr[1], w)
+                if ticks:
+                    return float(ticks[0][0])
+            elif self._plot._mode == "overlay":
+                pi = self._plot._overlay_widget.getPlotItem()
+                ax = pi.getAxis('bottom')
+                vr = pi.viewRange()[0]
+                w = self._plot._overlay_widget.width() or 800
+                ticks = ax.tickSpacing(vr[0], vr[1], w)
+                if ticks:
+                    return float(ticks[0][0])
+        except Exception:
+            pass
+        x0, x1 = self._plot.get_current_view_range()
+        return (x1 - x0) / 10.0
+
+    def _get_y_major_tick(self, lane) -> float:
+        """Return the actual major Y tick spacing for a lane."""
+        try:
+            ax = lane.getPlotItem().getAxis('left')
+            vr = lane.getPlotItem().viewRange()[1]
+            h = lane.height() or 300
+            ticks = ax.tickSpacing(vr[0], vr[1], h)
+            if ticks:
+                return float(ticks[0][0])
+        except Exception:
+            pass
+        return 0.0
 
     def _on_sinc_active_changed(self, active: bool):
+        self._refresh_status_bar()
+
+    def _zoom_full_safe(self):
+        """Zoom to fit all data — forces a range reset even after manual zoom."""
+        if not self._traces:
+            return
+        # Find global data extents
+        import numpy as np
+        t_mins, t_maxs, y_mins, y_maxs = [], [], [], []
+        for trace in self._traces:
+            if not trace.visible:
+                continue
+            t = trace.time_axis
+            y = trace.processed_data
+            if len(t):
+                t_mins.append(float(t.min()))
+                t_maxs.append(float(t.max()))
+            if len(y):
+                y_mins.append(float(y.min()))
+                y_maxs.append(float(y.max()))
+        if not t_mins:
+            self._plot.zoom_full()
+            return
+        t0, t1 = min(t_mins), max(t_maxs)
+        y0, y1 = min(y_mins), max(y_maxs)
+        pad_y = (y1 - y0) * 0.05 or 0.1
+        # Disable then re-enable to clear any stale range lock
+        if self._plot._mode == "split":
+            for lane in self._plot._lanes.values():
+                pi = lane.getPlotItem()
+                pi.disableAutoRange()
+                pi.setXRange(t0, t1, padding=0.02)
+                pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
+        else:
+            pi = self._plot._overlay_widget.getPlotItem()
+            pi.disableAutoRange()
+            pi.setXRange(t0, t1, padding=0.02)
+            pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
         self._refresh_status_bar()
 
     # ── Trace Events ──────────────────────────────────────────────────
@@ -660,6 +758,7 @@ class MainWindow(QMainWindow):
 
     def _on_trace_color(self, name: str, color: str):
         self._plot.refresh_all()
+        self._refresh_status_bar()
 
     # ── Analysis ──────────────────────────────────────────────────────
 
@@ -1032,6 +1131,24 @@ class MainWindow(QMainWindow):
         self._plot.set_interp_mode(mode)
         self._settings["interp_mode"] = mode
 
+    def _on_reset_trace_color(self, trace_name: str):
+        """Reset a single trace to its palette default color."""
+        from core.trace_model import DEFAULT_TRACE_COLORS, DEFAULT_TRACE_COLORS_LIGHT
+        tn = self.theme.theme_name
+        palette = (DEFAULT_TRACE_COLORS_LIGHT if tn == "light"
+                   else DEFAULT_TRACE_COLORS_PRINT if tn == "print"
+                   else DEFAULT_TRACE_COLORS)
+        idx = next((i for i, t in enumerate(self._traces)
+                    if t.name == trace_name), 0)
+        color = palette[idx % len(palette)]
+        for trace in self._traces:
+            if trace.name == trace_name:
+                trace.color = color
+                break
+        self._channel_panel.refresh_all()
+        self._plot.refresh_all()
+        self._refresh_status_bar()
+
     def _on_channel_interp_changed(self, name: str, mode: str):
         """Channel panel context menu or All Lin/Sinc triggered."""
         self._plot.set_interp_mode_for_trace(name, mode)
@@ -1086,6 +1203,48 @@ class MainWindow(QMainWindow):
             trace.trace_labels.clear()
         self._plot.refresh_all()
         self._status_lbl.setText("All trace labels cleared.")
+
+    def _show_phosphor_settings(self):
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+            QLabel, QPushButton, QColorDialog)
+        from PyQt6.QtGui import QColor
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Phosphor Theme Colors")
+        dlg.setFixedWidth(360)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            "Foreground (traces/text) and background for phosphor theme.\n"
+            "Classic: green #00ee44, amber #ffaa00, cyan #00aaff"))
+
+        def pick(key, btn, default):
+            c = QColorDialog.getColor(QColor(self._settings.get(key, default)), dlg)
+            if c.isValid():
+                self._settings[key] = c.name()
+                btn.setStyleSheet(f"background:{c.name()};border:1px solid #555;")
+
+        hl = QHBoxLayout()
+        hl.addWidget(QLabel("Foreground:"))
+        btn_fg = QPushButton()
+        btn_fg.setFixedSize(60, 24)
+        fg = self._settings.get("phosphor_fg", "#00ee44")
+        btn_fg.setStyleSheet(f"background:{fg};border:1px solid #555;")
+        btn_fg.clicked.connect(lambda: pick("phosphor_fg", btn_fg, "#00ee44"))
+        hl.addWidget(btn_fg)
+        hl.addWidget(QLabel("  Background:"))
+        btn_bg = QPushButton()
+        btn_bg.setFixedSize(60, 24)
+        bg = self._settings.get("phosphor_bg", "#001800")
+        btn_bg.setStyleSheet(f"background:{bg};border:1px solid #555;")
+        btn_bg.clicked.connect(lambda: pick("phosphor_bg", btn_bg, "#001800"))
+        hl.addWidget(btn_bg)
+        lay.addLayout(hl)
+        bh = QHBoxLayout()
+        btn_ok = QPushButton("OK")
+        btn_ok.setStyleSheet("background:#2060c0;color:white;padding:4px 16px;")
+        btn_ok.clicked.connect(dlg.accept)
+        bh.addStretch(); bh.addWidget(btn_ok)
+        lay.addLayout(bh)
+        dlg.exec()
 
     def closeEvent(self, event):
         self._save_settings()

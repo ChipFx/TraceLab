@@ -1,167 +1,259 @@
 """
 core/theme_manager.py
-Manages dark/light themes and trace color schemes.
+Single source of truth for all application colours and trace palettes.
+
+Themes are discovered from ./themes/*.json at startup.
+No colour data lives in any other Python file.
+
+Schema of a theme JSON:
+  name          str   — display name in menu
+  tooltip       str   — hover tooltip
+  plotview      dict  — Qt stylesheet colours (bg, text, accent, ...)
+  statusbar     dict  — status bar palette (bar_bg, info_bg, ...)
+  trace_colors  list  — ordered list of hex colour strings for traces
+
+Consumers call:
+  theme_manager.pv(key)          -> plotview colour str
+  theme_manager.sb(key)          -> statusbar colour str
+  theme_manager.trace_color(idx) -> hex colour str (wraps with modulo)
+  theme_manager.trace_colors     -> full list
+  theme_manager.get_stylesheet() -> Qt CSS string
+  theme_manager.plot_colors()    -> dict for pyqtgraph
+  theme_manager.statusbar_palette() -> dict for ScopeStatusBar
 """
 
 import json
 import os
-from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, List, Optional
 
+THEMES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "themes")
 
-THEMES = {
-    "dark": {
-        "bg": "#0d0d0d",
-        "bg_panel": "#141414",
-        "bg_plot": "#050508",
-        "grid_major": "#1a2a1a",
-        "grid_minor": "#111811",
-        "text": "#e0e0e0",
-        "text_dim": "#666666",
-        "accent": "#1e88e5",
-        "border": "#2a2a2a",
-        "cursor_a": "#ffcc00",
-        "cursor_b": "#00ccff",
-        "toolbar_bg": "#181818",
-        "statusbar_bg": "#0d0d0d",
-        "scope_bg": "#050508",
-        "scope_grid": "#1a2a1a",
-    },
-    "light": {
-        "bg": "#f0f0f0",
-        "bg_panel": "#e8e8e8",
-        "bg_plot": "#ffffff",
-        "grid_major": "#ccddcc",
-        "grid_minor": "#e8ece8",
-        "text": "#101010",
-        "text_dim": "#888888",
-        "accent": "#1565c0",
-        "border": "#cccccc",
-        "cursor_a": "#cc8800",
-        "cursor_b": "#0066aa",
-        "toolbar_bg": "#e0e0e0",
-        "statusbar_bg": "#d8d8d8",
-        "scope_bg": "#ffffff",
-        "scope_grid": "#ccddcc",
-    },
-    "print": {   # Light ink-saving theme for printing
-        "bg": "#ffffff",
-        "bg_panel": "#f8f8f8",
-        "bg_plot": "#ffffff",
-        "grid_major": "#dddddd",
-        "grid_minor": "#eeeeee",
-        "text": "#000000",
-        "text_dim": "#777777",
-        "accent": "#0000aa",
-        "border": "#cccccc",
-        "cursor_a": "#884400",
-        "cursor_b": "#004488",
-        "toolbar_bg": "#f0f0f0",
-        "statusbar_bg": "#e8e8e8",
-        "scope_bg": "#ffffff",
-        "scope_grid": "#dddddd",
-    },
-    "rs_green": {  # R&S style green phosphor
-        "bg": "#001200",
-        "bg_panel": "#001800",
-        "bg_plot": "#000800",
-        "grid_major": "#003300",
-        "grid_minor": "#001a00",
-        "text": "#00ee44",
-        "text_dim": "#006622",
-        "accent": "#00cc33",
-        "border": "#003300",
-        "cursor_a": "#ffff00",
-        "cursor_b": "#00ffff",
-        "toolbar_bg": "#001200",
-        "statusbar_bg": "#001000",
-        "scope_bg": "#000800",
-        "scope_grid": "#003300",
-    },
+# Absolute fallback palette — used only if ALL theme files are missing.
+# This is NOT intended to be edited; create/edit theme files instead.
+_FALLBACK_PLOTVIEW = {
+    "bg": "#0d0d0d", "bg_panel": "#141414", "bg_plot": "#050508",
+    "grid_major": "#1a2a1a", "grid_minor": "#111811",
+    "text": "#e0e0e0", "text_dim": "#666666", "accent": "#1e88e5",
+    "border": "#2a2a2a", "cursor_a": "#ffcc00", "cursor_b": "#00ccff",
+    "toolbar_bg": "#181818", "statusbar_bg": "#0d0d0d",
+    "scope_bg": "#050508", "scope_grid": "#1a2a1a",
 }
+_FALLBACK_STATUSBAR = {
+    "bar_bg": "#0a0a14", "info_bg": "#141428", "info_text": "#d0d0e8",
+    "info_dim": "#555577", "trig_text": "#44ee66", "sep": "#1e1e38",
+    "logo_bg": "#060610", "logo_text": "#F0C040", "logo_sub": "#555577",
+}
+_FALLBACK_TRACES = [
+    "#F0C040", "#40C0F0", "#F04080", "#40F080", "#F08040",
+    "#A040F0", "#40F0F0", "#F0F040", "#F04040", "#4080F0",
+]
+
+
+class ThemeData:
+    """Loaded and validated theme from a JSON file."""
+
+    def __init__(self, path: str):
+        self.path       = path
+        self.file_id    = os.path.splitext(os.path.basename(path))[0]
+        self.name       = self.file_id
+        self.tooltip    = ""
+        self._plotview  = dict(_FALLBACK_PLOTVIEW)
+        self._statusbar = dict(_FALLBACK_STATUSBAR)
+        self._traces    = list(_FALLBACK_TRACES)
+        self._load(path)
+
+    def _load(self, path: str):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            self.name    = data.get("name",    self.file_id)
+            self.tooltip = data.get("tooltip", "")
+            if "plotview" in data:
+                self._plotview.update(data["plotview"])
+            if "statusbar" in data:
+                self._statusbar.update(data["statusbar"])
+            if "trace_colors" in data and data["trace_colors"]:
+                self._traces = [str(c) for c in data["trace_colors"]]
+        except Exception as e:
+            print(f"[ThemeManager] Warning: could not load {path}: {e}")
+
+    def pv(self, key: str, default: str = "#ffffff") -> str:
+        return self._plotview.get(key, default)
+
+    def sb(self, key: str, default: str = "#888888") -> str:
+        return self._statusbar.get(key, default)
+
+    def trace_color(self, index: int) -> str:
+        if not self._traces:
+            return "#ffffff"
+        return self._traces[index % len(self._traces)]
+
+    @property
+    def trace_colors(self) -> List[str]:
+        return list(self._traces)
+
+    def to_json(self) -> dict:
+        return {
+            "name":         self.name,
+            "tooltip":      self.tooltip,
+            "plotview":     dict(self._plotview),
+            "statusbar":    dict(self._statusbar),
+            "trace_colors": list(self._traces),
+        }
+
+    def save(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.to_json(), f, indent=2)
 
 
 class ThemeManager:
-    def __init__(self, theme_name: str = "dark"):
-        self.theme_name = theme_name
-        self._colors = THEMES.get(theme_name, THEMES["dark"]).copy()
+    """
+    Single source of truth for application theming.
+    Discovers themes from THEMES_DIR at construction.
+    """
 
-        # Load user overrides from settings file if present
-        settings_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "settings.json")
-        if os.path.exists(settings_path):
-            try:
-                with open(settings_path) as f:
-                    s = json.load(f)
-                if "theme" in s:
-                    self.theme_name = s["theme"]
-                    self._colors = THEMES.get(self.theme_name, THEMES["dark"]).copy()
-                if "color_overrides" in s:
-                    self._colors.update(s["color_overrides"])
-            except Exception:
-                pass
+    def __init__(self, active_id: str = "dark"):
+        self._themes: Dict[str, ThemeData] = {}
+        self._active: ThemeData = ThemeData.__new__(ThemeData)
+        # Bootstrap fallback theme (no file needed)
+        self._active.file_id    = "dark"
+        self._active.name       = "Dark"
+        self._active.tooltip    = ""
+        self._active._plotview  = dict(_FALLBACK_PLOTVIEW)
+        self._active._statusbar = dict(_FALLBACK_STATUSBAR)
+        self._active._traces    = list(_FALLBACK_TRACES)
 
+        self.discover()
+        self.set_theme(active_id)
+
+    # ── Discovery ─────────────────────────────────────────────────────────────
+
+    def discover(self) -> List[str]:
+        """Scan THEMES_DIR and load/reload all .json files."""
+        self._themes.clear()
+        os.makedirs(THEMES_DIR, exist_ok=True)
+
+        # If no themes exist yet, seed the directory
+        if not any(f.endswith(".json") for f in os.listdir(THEMES_DIR)):
+            self._seed_defaults()
+
+        for fname in sorted(os.listdir(THEMES_DIR)):
+            if fname.endswith(".json"):
+                path = os.path.join(THEMES_DIR, fname)
+                td = ThemeData(path)
+                self._themes[td.file_id] = td
+
+        return list(self._themes.keys())
+
+    def _seed_defaults(self):
+        """Write built-in themes if themes dir is empty (first run)."""
+        pass  # themes/ is already in the repo — nothing to seed
+
+    # ── Theme switching ───────────────────────────────────────────────────────
+
+    def set_theme(self, file_id: str) -> bool:
+        if file_id in self._themes:
+            self._active = self._themes[file_id]
+            return True
+        # Try by display name (for backwards compat with settings.json)
+        for td in self._themes.values():
+            if td.name.lower() == file_id.lower():
+                self._active = td
+                return True
+        # Fall back to first available theme
+        if self._themes:
+            self._active = next(iter(self._themes.values()))
+        return False
+
+    @property
+    def theme_name(self) -> str:
+        """File ID of the active theme (used as settings key)."""
+        return self._active.file_id
+
+    @property
+    def display_name(self) -> str:
+        return self._active.name
+
+    @property
+    def available_themes(self) -> Dict[str, ThemeData]:
+        """Ordered dict of file_id -> ThemeData."""
+        return dict(self._themes)
+
+    # ── Colour accessors (forwarded from active theme) ────────────────────────
+
+    def pv(self, key: str, default: str = "#ffffff") -> str:
+        """Get a plotview colour."""
+        return self._active.pv(key, default)
+
+    def sb(self, key: str, default: str = "#888888") -> str:
+        """Get a statusbar colour."""
+        return self._active.sb(key, default)
+
+    def trace_color(self, index: int) -> str:
+        """Get the trace colour for a given index (wraps with modulo)."""
+        return self._active.trace_color(index)
+
+    @property
+    def trace_colors(self) -> List[str]:
+        return self._active.trace_colors
+
+    # Legacy accessor for code that still calls theme_manager.get(key)
     def get(self, key: str, default: str = "#ffffff") -> str:
-        return self._colors.get(key, default)
+        return self.pv(key, default)
 
-    def set_theme(self, name: str):
-        if name in THEMES:
-            self.theme_name = name
-            self._colors = THEMES[name].copy()
+    # ── Derived compound objects ──────────────────────────────────────────────
 
-    def available_themes(self):
-        return list(THEMES.keys())
+    def plot_colors(self) -> dict:
+        """Return colours for pyqtgraph plot widgets."""
+        return {
+            "background": self.pv("scope_bg"),
+            "grid":       self.pv("scope_grid"),
+            "text":       self.pv("text"),
+            "cursor_a":   self.pv("cursor_a"),
+            "cursor_b":   self.pv("cursor_b"),
+        }
+
+    def statusbar_palette(self) -> dict:
+        """Return the full statusbar palette dict (all keys from theme file)."""
+        # Return ALL statusbar keys, not just a hardcoded subset
+        return dict(self._active._statusbar)
 
     def get_stylesheet(self, font_scale: float = 1.0) -> str:
-        c = self._colors
+        c = self._active._plotview
         _fs = max(8, int(11 * font_scale))
         return f"""
         QMainWindow, QWidget {{
-            background-color: {c['bg']};
-            color: {c['text']};
+            background-color: {c.get('bg','#0d0d0d')};
+            color: {c.get('text','#e0e0e0')};
             font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
             font-size: {_fs}px;
         }}
         QMenuBar {{
-            background-color: {c['toolbar_bg']};
-            color: {c['text']};
-            border-bottom: 1px solid {c['border']};
+            background-color: {c.get('toolbar_bg','#181818')};
+            color: {c.get('text','#e0e0e0')};
+            border-bottom: 1px solid {c.get('border','#2a2a2a')};
         }}
-        QMenuBar::item:selected {{
-            background-color: {c['accent']};
-        }}
+        QMenuBar::item:selected {{ background-color: {c.get('accent','#1e88e5')}; }}
         QMenu {{
-            background-color: {c['bg_panel']};
-            color: {c['text']};
-            border: 1px solid {c['border']};
+            background-color: {c.get('bg_panel','#141414')};
+            color: {c.get('text','#e0e0e0')};
+            border: 1px solid {c.get('border','#2a2a2a')};
         }}
-        QMenu::item:selected {{
-            background-color: {c['accent']};
-        }}
+        QMenu::item:selected {{ background-color: {c.get('accent','#1e88e5')}; }}
         QToolBar {{
-            background-color: {c['toolbar_bg']};
+            background-color: {c.get('toolbar_bg','#181818')};
             border: none;
-            border-bottom: 1px solid {c['border']};
+            border-bottom: 1px solid {c.get('border','#2a2a2a')};
             spacing: 2px;
         }}
         QStatusBar {{
-            background-color: {c['statusbar_bg']};
-            color: {c['text_dim']};
-            border-top: 1px solid {c['border']};
-        }}
-        QDockWidget {{
-            background-color: {c['bg_panel']};
-            color: {c['text']};
-            titlebar-close-icon: none;
-        }}
-        QDockWidget::title {{
-            background: {c['toolbar_bg']};
-            padding: 4px;
-            border: 1px solid {c['border']};
+            background-color: {c.get('statusbar_bg','#0d0d0d')};
+            color: {c.get('text_dim','#666666')};
+            border-top: 1px solid {c.get('border','#2a2a2a')};
         }}
         QGroupBox {{
-            color: {c['text']};
-            border: 1px solid {c['border']};
+            color: {c.get('text','#e0e0e0')};
+            border: 1px solid {c.get('border','#2a2a2a')};
             border-radius: 4px;
             margin-top: 16px;
             padding-top: 8px;
@@ -169,94 +261,75 @@ class ThemeManager:
         QGroupBox::title {{
             subcontrol-origin: margin;
             left: 8px;
-            color: {c['accent']};
+            color: {c.get('accent','#1e88e5')};
         }}
         QPushButton {{
-            background-color: {c['bg_panel']};
-            color: {c['text']};
-            border: 1px solid {c['border']};
+            background-color: {c.get('bg_panel','#141414')};
+            color: {c.get('text','#e0e0e0')};
+            border: 1px solid {c.get('border','#2a2a2a')};
             border-radius: 3px;
             padding: 4px 8px;
         }}
-        QPushButton:hover {{
-            background-color: {c['accent']};
-            color: white;
-        }}
-        QPushButton:checked {{
-            background-color: {c['accent']};
-            color: white;
-        }}
+        QPushButton:hover {{ background-color: {c.get('accent','#1e88e5')}; color: white; }}
+        QPushButton:checked {{ background-color: {c.get('accent','#1e88e5')}; color: white; }}
         QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
-            background-color: {c['bg']};
-            color: {c['text']};
-            border: 1px solid {c['border']};
+            background-color: {c.get('bg','#0d0d0d')};
+            color: {c.get('text','#e0e0e0')};
+            border: 1px solid {c.get('border','#2a2a2a')};
             border-radius: 3px;
             padding: 2px 4px;
         }}
-        QCheckBox {{
-            color: {c['text']};
-        }}
+        QCheckBox {{ color: {c.get('text','#e0e0e0')}; }}
         QCheckBox::indicator {{
-            border: 1px solid {c['border']};
-            background: {c['bg']};
+            border: 1px solid {c.get('border','#2a2a2a')};
+            background: {c.get('bg','#0d0d0d')};
         }}
-        QCheckBox::indicator:checked {{
-            background: {c['accent']};
-        }}
-        QTabWidget::pane {{
-            border: 1px solid {c['border']};
-        }}
+        QCheckBox::indicator:checked {{ background: {c.get('accent','#1e88e5')}; }}
+        QTabWidget::pane {{ border: 1px solid {c.get('border','#2a2a2a')}; }}
         QTabBar::tab {{
-            background: {c['bg_panel']};
-            color: {c['text_dim']};
+            background: {c.get('bg_panel','#141414')};
+            color: {c.get('text_dim','#666666')};
             padding: 5px 12px;
-            border: 1px solid {c['border']};
+            border: 1px solid {c.get('border','#2a2a2a')};
         }}
         QTabBar::tab:selected {{
-            background: {c['bg']};
-            color: {c['text']};
-            border-bottom: 2px solid {c['accent']};
+            background: {c.get('bg','#0d0d0d')};
+            color: {c.get('text','#e0e0e0')};
+            border-bottom: 2px solid {c.get('accent','#1e88e5')};
         }}
-        QScrollBar:vertical {{
-            background: {c['bg_panel']};
-            width: 10px;
-        }}
-        QScrollBar::handle:vertical {{
-            background: {c['border']};
-            border-radius: 5px;
-        }}
-        QDialog {{
-            background-color: {c['bg']};
-            color: {c['text']};
-        }}
-        QLabel {{
-            color: {c['text']};
-        }}
+        QScrollBar:vertical {{ background: {c.get('bg_panel','#141414')}; width: 10px; }}
+        QScrollBar::handle:vertical {{ background: {c.get('border','#2a2a2a')}; border-radius: 5px; }}
+        QDialog {{ background-color: {c.get('bg','#0d0d0d')}; color: {c.get('text','#e0e0e0')}; }}
+        QLabel {{ color: {c.get('text','#e0e0e0')}; }}
         QHeaderView::section {{
-            background-color: {c['toolbar_bg']};
-            color: {c['text']};
-            border: 1px solid {c['border']};
+            background-color: {c.get('toolbar_bg','#181818')};
+            color: {c.get('text','#e0e0e0')};
+            border: 1px solid {c.get('border','#2a2a2a')};
             padding: 3px;
         }}
         QTableWidget {{
-            background-color: {c['bg']};
-            color: {c['text']};
-            gridline-color: {c['border']};
+            background-color: {c.get('bg','#0d0d0d')};
+            color: {c.get('text','#e0e0e0')};
+            gridline-color: {c.get('border','#2a2a2a')};
         }}
-        QSplitter::handle {{
-            background: {c['border']};
+        QSplitter::handle {{ background: {c.get('border','#2a2a2a')}; }}
+        QRadioButton {{ color: {c.get('text','#e0e0e0')}; }}
+        QDockWidget {{
+            background-color: {c.get('bg_panel','#141414')};
+            color: {c.get('text','#e0e0e0')};
         }}
-        QRadioButton {{
-            color: {c['text']};
+        QDockWidget::title {{
+            background: {c.get('toolbar_bg','#181818')};
+            padding: 4px;
+            border: 1px solid {c.get('border','#2a2a2a')};
         }}
         """
 
-    def plot_colors(self) -> dict:
-        """Return colors for use in pyqtgraph plots."""
-        return {
-            "background": self._colors["scope_bg"],
-            "grid": self._colors["scope_grid"],
-            "text": self._colors["text"],
-            "cursor_a": self._colors["cursor_a"],
-            "cursor_b": self._colors["cursor_b"],
-        }
+    # ── Theme editor ──────────────────────────────────────────────────────────
+
+    def open_editor(self, parent=None, on_apply=None):
+        """Open the theme editor window."""
+        from core.theme_editor import ThemeEditorWindow
+        win = ThemeEditorWindow(self, parent=parent, on_apply=on_apply)
+        win.show()
+        return win

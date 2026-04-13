@@ -15,57 +15,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-DEFAULT_TRACE_COLORS = [
-    "#F0C040",  # C1 - Yellow
-    "#40C0F0",  # C2 - Cyan
-    "#F04080",  # C3 - Magenta
-    "#40F080",  # C4 - Green
-    "#F08040",  # C5 - Orange
-    "#A040F0",  # C6 - Purple
-    "#40F0F0",  # C7 - Light Cyan
-    "#F0F040",  # C8 - Light Yellow
-    "#F04040",  # C9 - Red
-    "#4080F0",  # C10 - Blue
-]
-
-# Light-theme alternates (more saturated/darker so visible on white)
-DEFAULT_TRACE_COLORS_LIGHT = [
-    "#C08000",  # C1 - Dark Yellow/Gold
-    "#0070B0",  # C2 - Blue
-    "#C0004080", # C3 - Crimson (use hex without alpha for Qt)
-    "#006030",  # C4 - Dark Green
-    "#C05000",  # C5 - Dark Orange
-    "#6000B0",  # C6 - Deep Purple
-    "#007070",  # C7 - Teal
-    "#808000",  # C8 - Olive
-    "#B00000",  # C9 - Dark Red
-    "#0040C0",  # C10 - Dark Blue
-]
-DEFAULT_TRACE_COLORS_LIGHT = [
-    "#C07000",  # C1 - Dark Gold (readable on white)
-    "#0055CC",  # C2 - Royal Blue
-    "#AA0044",  # C3 - Crimson
-    "#006633",  # C4 - Forest Green
-    "#AA4400",  # C5 - Burnt Orange
-    "#660099",  # C6 - Purple
-    "#007777",  # C7 - Teal
-    "#667700",  # C8 - Olive
-    "#990000",  # C9 - Dark Red
-    "#0033AA",  # C10 - Navy Blue
-]
-
-DEFAULT_TRACE_COLORS_PRINT = [
-    "#000077",  # C1 - Dark Navy
-    "#004400",  # C2 - Dark Green
-    "#770000",  # C3 - Dark Red
-    "#440066",  # C4 - Dark Purple
-    "#006666",  # C5 - Dark Teal
-    "#555500",  # C6 - Dark Olive
-    "#003355",  # C7 - Dark Blue
-    "#660033",  # C8 - Dark Maroon
-    "#004422",  # C9 - Dark Forest
-    "#331100",  # C10 - Dark Brown
-]
+# Trace colours are now defined in themes/*.json files and managed
+# exclusively by ThemeManager. No colour data lives here.
+# The import_dialog uses ThemeManager.trace_color(idx) for preview swatches.
 
 
 @dataclass

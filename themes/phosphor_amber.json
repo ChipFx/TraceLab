@@ -1,0 +1,48 @@
+{
+  "name": "Phosphor Amber",
+  "tooltip": "Warm amber phosphor CRT oscilloscope",
+  "plotview": {
+    "bg": "#120800",
+    "bg_panel": "#180c00",
+    "bg_plot": "#080400",
+    "grid_major": "#332200",
+    "grid_minor": "#1a1000",
+    "text": "#ffaa00",
+    "text_dim": "#664400",
+    "accent": "#cc8800",
+    "border": "#332200",
+    "cursor_a": "#ffffff",
+    "cursor_b": "#00ffff",
+    "toolbar_bg": "#120800",
+    "statusbar_bg": "#100600",
+    "scope_bg": "#080400",
+    "scope_grid": "#332200"
+  },
+  "statusbar": {
+    "bar_bg": "#0a0500",
+    "info_bg": "#180c00",
+    "info_text": "#ffaa00",
+    "info_dim": "#664400",
+    "trig_text": "#ffcc44",
+    "sep": "#332200",
+    "logo_bg": "#060300",
+    "logo_text": "#ffaa00",
+    "logo_sub": "#664400",
+    "ch_bg": "#180c00",
+    "ch_text": "#ffaa00",
+    "ch_bar": "#ffaa00",
+    "filt_text": "#ffcc44"
+  },
+  "trace_colors": [
+    "#ffaa00",
+    "#ffcc44",
+    "#ffdd88",
+    "#ff8800",
+    "#ffbb22",
+    "#ffee66",
+    "#ff9911",
+    "#ffcc00",
+    "#ff7700",
+    "#ffddaa"
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "name": "Dark",
+  "tooltip": "Standard dark theme \u2014 easiest on the eyes in low light",
+  "plotview": {
+    "bg": "#0d0d0d",
+    "bg_panel": "#141414",
+    "bg_plot": "#050508",
+    "grid_major": "#1a2a1a",
+    "grid_minor": "#111811",
+    "text": "#e0e0e0",
+    "text_dim": "#666666",
+    "accent": "#1e88e5",
+    "border": "#2a2a2a",
+    "cursor_a": "#ffcc00",
+    "cursor_b": "#00ccff",
+    "toolbar_bg": "#181818",
+    "statusbar_bg": "#0d0d0d",
+    "scope_bg": "#050508",
+    "scope_grid": "#1a2a1a"
+  },
+  "statusbar": {
+    "bar_bg": "#0a0a14",
+    "info_bg": "#141428",
+    "info_text": "#d0d0e8",
+    "info_dim": "#555577",
+    "trig_text": "#44ee66",
+    "sep": "#1e1e38",
+    "logo_bg": "#060610",
+    "logo_text": "#F0C040",
+    "logo_sub": "#555577",
+    "filt_text": "#ffcc66"
+  },
+  "trace_colors": [
+    "#F0C040",
+    "#40C0F0",
+    "#F04080",
+    "#40F080",
+    "#F08040",
+    "#A040F0",
+    "#40F0F0",
+    "#F0F040",
+    "#F04040",
+    "#4080F0"
+  ]
+}

@@ -1,11 +1,11 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb00030000000005280000015600000b2e00000622000005280000017500000b2e0000062200000000000000000f00000005280000017500000b2e00000622",
+  "geometry": "01d9d0cb00030000000005a60000013000000a40000004da000005a60000014f00000a40000004da00000000000000000f00000005a60000014f00000a40000004da",
   "import_replace": true,
   "import_reset_view": true,
-  "fft_min_freq": 1.0,
+  "fft_min_freq": 40.0,
   "y_lock_auto": true,
-  "font_scale": 1.0,
+  "font_scale": 1.2500000000000002,
   "trace_colors": [
     "#F0C040",
     "#40C0F0",
@@ -28,7 +28,5 @@
   "viewport_min_pts": 2048,
   "last_gain": "2.048/4096",
   "last_offset": "-1.024",
-  "last_unit": "V",
-  "phosphor_fg": "#00ee55",
-  "phosphor_bg": "#001700"
+  "last_unit": "V"
 }

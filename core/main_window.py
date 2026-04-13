@@ -13,8 +13,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QIcon, QPixmap, QColor
 from typing import List, Optional
 
-from core.trace_model import (TraceModel, DEFAULT_TRACE_COLORS,
-    DEFAULT_TRACE_COLORS_LIGHT, DEFAULT_TRACE_COLORS_PRINT)
+from core.trace_model import TraceModel
 from core.theme_manager import ThemeManager
 from core.data_loader import load_csv
 from core.import_dialog import ImportDialog
@@ -138,7 +137,7 @@ class MainWindow(QMainWindow):
         # bar last. We grab the plot (which includes range bar internally).
         pcl.addWidget(self._plot)
 
-        self._scope_status = ScopeStatusBar(self.theme.theme_name)
+        self._scope_status = ScopeStatusBar(self.theme.statusbar_palette())
         self._scope_status.toggle_trace_interp.connect(
             self._on_status_bar_toggle_interp)
         # Insert status bar BEFORE the range bar — achieved by the fact
@@ -262,14 +261,9 @@ class MainWindow(QMainWindow):
             lambda: self._set_interp_mode("cubic"))
 
         view_menu.addSeparator()
-        a = view_menu.addAction("Theme: Dark")
-        a.triggered.connect(lambda: self._set_theme("dark"))
-        a = view_menu.addAction("Theme: Light")
-        a.triggered.connect(lambda: self._set_theme("light"))
-        a = view_menu.addAction("Theme: Green Phosphor")
-        a.triggered.connect(lambda: self._set_theme("rs_green"))
-        a = view_menu.addAction("Theme: Print (Light, ink-saving)")
-        a.triggered.connect(lambda: self._set_theme("print"))
+        # Dynamically populated from themes/ folder
+        self._theme_submenu = view_menu.addMenu("Theme")
+        self._rebuild_theme_menu()
 
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
@@ -298,8 +292,10 @@ class MainWindow(QMainWindow):
         settings_menu.addAction("Decimal Separator...").triggered.connect(
             self._show_decimal_sep_dialog)
         settings_menu.addSeparator()
-        settings_menu.addAction("Phosphor Colors...").triggered.connect(
-            self._show_phosphor_settings)
+        settings_menu.addAction("Edit Current Theme...").triggered.connect(
+            self._open_theme_editor)
+        settings_menu.addAction("Reload Themes from Disk").triggered.connect(
+            self._reload_themes)
         settings_menu.addSeparator()
         self._act_remember_folder = settings_menu.addAction("Remember Last Folder")
         self._act_remember_folder.setCheckable(True)
@@ -454,16 +450,9 @@ class MainWindow(QMainWindow):
             self._plot.add_trace(trace)  # add_trace handles overwrite
             return
 
-        # Assign color from appropriate palette
-        tn = self.theme.theme_name
-        if tn == "light":
-            color_palette = DEFAULT_TRACE_COLORS_LIGHT
-        elif tn == "print":
-            color_palette = DEFAULT_TRACE_COLORS_PRINT
-        else:
-            color_palette = DEFAULT_TRACE_COLORS
+        # Assign color from active theme via ThemeManager
         n = len(self._traces)
-        trace.color = color_palette[n % len(color_palette)]
+        trace.color = self.theme.trace_color(n)
 
         self._traces.append(trace)
         self._channel_panel.add_trace(trace)
@@ -600,21 +589,21 @@ class MainWindow(QMainWindow):
     def _set_display_mode(self, mode: str):
         self._plot.set_mode(mode)
 
-    def _set_theme(self, name: str, save: bool = True):
+    def _set_theme(self, file_id: str, save: bool = True):
         from PyQt6.QtWidgets import QApplication
-        self.theme.set_theme(name)
+        self.theme.set_theme(file_id)
         scale = self._settings.get("font_scale", 1.0)
         QApplication.instance().setStyleSheet(
             self.theme.get_stylesheet(font_scale=scale))
         new_colors = self.theme.plot_colors()
         self._plot.theme = new_colors
-        self._plot.theme_name = name
+        self._plot.theme_name = file_id
         self._plot._rebuild()
         if hasattr(self, '_scope_status'):
-            self._scope_status.set_theme(name)
+            self._scope_status.set_palette(self.theme.statusbar_palette())
             self._scope_status.set_branding(self._get_branding_path())
         if save:
-            self._settings["theme"] = name
+            self._settings["theme"] = file_id
 
     def _toggle_y_lock(self, checked: bool):
         self._y_lock_auto = checked
@@ -1132,15 +1121,10 @@ class MainWindow(QMainWindow):
         self._settings["interp_mode"] = mode
 
     def _on_reset_trace_color(self, trace_name: str):
-        """Reset a single trace to its palette default color."""
-        from core.trace_model import DEFAULT_TRACE_COLORS, DEFAULT_TRACE_COLORS_LIGHT
-        tn = self.theme.theme_name
-        palette = (DEFAULT_TRACE_COLORS_LIGHT if tn == "light"
-                   else DEFAULT_TRACE_COLORS_PRINT if tn == "print"
-                   else DEFAULT_TRACE_COLORS)
+        """Reset a single trace to its theme-default colour."""
         idx = next((i for i, t in enumerate(self._traces)
                     if t.name == trace_name), 0)
-        color = palette[idx % len(palette)]
+        color = self.theme.trace_color(idx)
         for trace in self._traces:
             if trace.name == trace_name:
                 trace.color = color
@@ -1204,47 +1188,33 @@ class MainWindow(QMainWindow):
         self._plot.refresh_all()
         self._status_lbl.setText("All trace labels cleared.")
 
-    def _show_phosphor_settings(self):
-        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
-            QLabel, QPushButton, QColorDialog)
-        from PyQt6.QtGui import QColor
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Phosphor Theme Colors")
-        dlg.setFixedWidth(360)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel(
-            "Foreground (traces/text) and background for phosphor theme.\n"
-            "Classic: green #00ee44, amber #ffaa00, cyan #00aaff"))
+    def _rebuild_theme_menu(self):
+        """Populate Theme submenu from discovered theme files."""
+        self._theme_submenu.clear()
+        active_id = self.theme.theme_name
+        ag = QActionGroup(self)
+        ag.setExclusive(True)
+        for file_id, td in self.theme.available_themes.items():
+            a = QAction(td.name, self)
+            a.setCheckable(True)
+            a.setChecked(file_id == active_id)
+            if td.tooltip:
+                a.setToolTip(td.tooltip)
+            a.triggered.connect(
+                lambda checked, fid=file_id: self._set_theme(fid))
+            ag.addAction(a)
+            self._theme_submenu.addAction(a)
 
-        def pick(key, btn, default):
-            c = QColorDialog.getColor(QColor(self._settings.get(key, default)), dlg)
-            if c.isValid():
-                self._settings[key] = c.name()
-                btn.setStyleSheet(f"background:{c.name()};border:1px solid #555;")
+    def _open_theme_editor(self):
+        def on_apply(file_id):
+            self._set_theme(file_id)
+        self.theme.open_editor(parent=self, on_apply=on_apply)
 
-        hl = QHBoxLayout()
-        hl.addWidget(QLabel("Foreground:"))
-        btn_fg = QPushButton()
-        btn_fg.setFixedSize(60, 24)
-        fg = self._settings.get("phosphor_fg", "#00ee44")
-        btn_fg.setStyleSheet(f"background:{fg};border:1px solid #555;")
-        btn_fg.clicked.connect(lambda: pick("phosphor_fg", btn_fg, "#00ee44"))
-        hl.addWidget(btn_fg)
-        hl.addWidget(QLabel("  Background:"))
-        btn_bg = QPushButton()
-        btn_bg.setFixedSize(60, 24)
-        bg = self._settings.get("phosphor_bg", "#001800")
-        btn_bg.setStyleSheet(f"background:{bg};border:1px solid #555;")
-        btn_bg.clicked.connect(lambda: pick("phosphor_bg", btn_bg, "#001800"))
-        hl.addWidget(btn_bg)
-        lay.addLayout(hl)
-        bh = QHBoxLayout()
-        btn_ok = QPushButton("OK")
-        btn_ok.setStyleSheet("background:#2060c0;color:white;padding:4px 16px;")
-        btn_ok.clicked.connect(dlg.accept)
-        bh.addStretch(); bh.addWidget(btn_ok)
-        lay.addLayout(bh)
-        dlg.exec()
+    def _reload_themes(self):
+        self.theme.discover()
+        self._rebuild_theme_menu()
+        self._status_lbl.setText(
+            f"Themes reloaded: {len(self.theme.available_themes)} found.")
 
     def closeEvent(self, event):
         self._save_settings()

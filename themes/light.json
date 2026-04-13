@@ -1,0 +1,45 @@
+{
+  "name": "Light",
+  "tooltip": "Light theme \u2014 good for well-lit rooms and presentations",
+  "plotview": {
+    "bg": "#f0f0f0",
+    "bg_panel": "#e8e8e8",
+    "bg_plot": "#ffffff",
+    "grid_major": "#ccddcc",
+    "grid_minor": "#e8ece8",
+    "text": "#101010",
+    "text_dim": "#888888",
+    "accent": "#1565c0",
+    "border": "#cccccc",
+    "cursor_a": "#cc8800",
+    "cursor_b": "#0066aa",
+    "toolbar_bg": "#e0e0e0",
+    "statusbar_bg": "#d8d8d8",
+    "scope_bg": "#ffffff",
+    "scope_grid": "#ccddcc"
+  },
+  "statusbar": {
+    "bar_bg": "#d8d8ec",
+    "info_bg": "#c4c4dc",
+    "info_text": "#181828",
+    "info_dim": "#8888aa",
+    "trig_text": "#006622",
+    "sep": "#aaaacc",
+    "logo_bg": "#d0d0ec",
+    "logo_text": "#2244aa",
+    "logo_sub": "#8888aa",
+    "filt_text": "#884400"
+  },
+  "trace_colors": [
+    "#C07000",
+    "#0055CC",
+    "#AA0044",
+    "#006633",
+    "#AA4400",
+    "#660099",
+    "#007777",
+    "#667700",
+    "#990000",
+    "#0033AA"
+  ]
+}

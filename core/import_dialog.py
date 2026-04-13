@@ -14,7 +14,7 @@ from PyQt6.QtGui import QColor, QFont
 import numpy as np
 from typing import Dict, List, Optional
 from core.data_loader import LoadResult, is_numeric_column, CsvMetadata, parse_value
-from core.trace_model import TraceModel, ScalingConfig, DEFAULT_TRACE_COLORS
+from core.trace_model import TraceModel, ScalingConfig
 
 
 # ── Locale-safe number input ──────────────────────────────────────────────────
@@ -361,10 +361,20 @@ class ImportDialog(QDialog):
         sl = QVBoxLayout(sw)
         sl.setSpacing(2)
 
+        # Get trace colours from ThemeManager if available, else use safe defaults
+        try:
+            from core.theme_manager import ThemeManager
+            import os
+            _tm_tmp = ThemeManager()
+            _trace_palette = _tm_tmp.trace_colors
+        except Exception:
+            _trace_palette = ["#F0C040","#40C0F0","#F04080","#40F080","#F08040",
+                              "#A040F0","#40F0F0","#F0F040","#F04040","#4080F0"]
+
         color_idx = 0
         for i, (col_name, data) in enumerate(self.load_result.columns.items()):
             is_time = col_name == self.load_result.suggested_time_col
-            color = DEFAULT_TRACE_COLORS[color_idx % len(DEFAULT_TRACE_COLORS)]
+            color = _trace_palette[color_idx % len(_trace_palette)]
             if is_numeric_column(data) and not is_time:
                 color_idx += 1
             row = ColumnConfigRow(col_name, data, color,

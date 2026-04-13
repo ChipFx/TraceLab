@@ -1,0 +1,48 @@
+{
+  "name": "Phosphor Green",
+  "tooltip": "Classic green phosphor CRT oscilloscope \u2014 R&S style",
+  "plotview": {
+    "bg": "#001200",
+    "bg_panel": "#001800",
+    "bg_plot": "#000800",
+    "grid_major": "#003300",
+    "grid_minor": "#001a00",
+    "text": "#00ee44",
+    "text_dim": "#006622",
+    "accent": "#00cc33",
+    "border": "#003300",
+    "cursor_a": "#ffff00",
+    "cursor_b": "#00ffff",
+    "toolbar_bg": "#001200",
+    "statusbar_bg": "#001000",
+    "scope_bg": "#000800",
+    "scope_grid": "#003300"
+  },
+  "statusbar": {
+    "bar_bg": "#000800",
+    "info_bg": "#001800",
+    "info_text": "#00dd44",
+    "info_dim": "#004422",
+    "trig_text": "#00ff66",
+    "sep": "#003322",
+    "logo_bg": "#000600",
+    "logo_text": "#00ee44",
+    "logo_sub": "#004422",
+    "ch_bg": "#001800",
+    "ch_text": "#00ee44",
+    "ch_bar": "#00ee44",
+    "filt_text": "#aaee00"
+  },
+  "trace_colors": [
+    "#00ee44",
+    "#00cc33",
+    "#44ff88",
+    "#88ffaa",
+    "#00ff66",
+    "#33ee77",
+    "#00dd55",
+    "#66ffbb",
+    "#11ff55",
+    "#00ee88"
+  ]
+}

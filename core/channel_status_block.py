@@ -51,28 +51,19 @@ def _outlined_text(painter: QPainter, x: int, y: int, text: str,
     painter.fillPath(path, QBrush(fill))
 
 
-def _get_phosphor_colors(settings: dict) -> tuple:
-    """Return (fg_hex, bg_hex) for phosphor theme from settings or defaults."""
-    fg = settings.get("phosphor_fg", "#00ee44") if settings else "#00ee44"
-    bg = settings.get("phosphor_bg", "#001800") if settings else "#001800"
-    return fg, bg
-
-
 class ChannelStatusBlock(QWidget):
     toggle_interp = pyqtSignal(str)
 
     def __init__(self, trace: TraceModel,
-                 y_major_div: float = 0.0,   # actual major Y tick spacing
+                 y_major_div: float = 0.0,
                  interp_mode: str = "linear",
-                 theme_name: str = "dark",
-                 settings: dict = None,
+                 palette: dict = None,
                  parent=None):
         super().__init__(parent)
         self._trace       = trace
-        self._y_major_div = y_major_div   # volts per major division
+        self._y_major_div = y_major_div
         self._interp_mode = interp_mode
-        self._theme_name  = theme_name
-        self._settings    = settings or {}
+        self._pal         = palette or {}
         self.setFixedSize(BLOCK_W, BLOCK_H)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         mode_lbl = {"linear": "Linear", "sinc": "Sinc (sin(x)/x)",
@@ -91,26 +82,20 @@ class ChannelStatusBlock(QWidget):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         w, h = self.width(), self.height()
 
-        # ── Background ────────────────────────────────────────────────────
-        is_phosphor = (self._theme_name == "rs_green")
-        if is_phosphor:
-            _, ph_bg = _get_phosphor_colors(self._settings)
-            bg = QColor(ph_bg)
-        elif self._theme_name == "print":
-            bg = QColor("#f0f4ff")   # near-white, slight blue tint
+        # ── Background and text colours from palette ──────────────────────
+        # palette may supply "ch_bg" and "ch_text" overrides (phosphor/print)
+        # otherwise fall back to the trace colour with auto text contrast
+        if "ch_bg" in self._pal:
+            bg = QColor(self._pal["ch_bg"])
         else:
             bg = QColor(self._trace.color)
-
         painter.fillRect(0, 0, w, h, bg)
 
-        # ── Text colours ──────────────────────────────────────────────────
-        if is_phosphor:
-            ph_fg, _ = _get_phosphor_colors(self._settings)
-            fill_c    = QColor(ph_fg)
-            outline_c = QColor("#000800")
-        elif self._theme_name == "print":
-            fill_c    = QColor("#000044")
-            outline_c = QColor("#ffffff")
+        if "ch_text" in self._pal:
+            fill_c    = QColor(self._pal["ch_text"])
+            # Outline: complement of fill
+            lum_fill = (fill_c.red()*299 + fill_c.green()*587 + fill_c.blue()*114)/1000
+            outline_c = QColor("#000000") if lum_fill > 128 else QColor("#ffffff")
         else:
             lum = (bg.red() * 299 + bg.green() * 587 + bg.blue() * 114) / 1000
             if lum > 128:
@@ -163,26 +148,14 @@ class ChannelStatusBlock(QWidget):
         imp      = getattr(self._trace, 'impedance', '') or ''
         extra    = "  ".join(p for p in [coupling, imp, filt] if p)
         if extra:
-            if is_phosphor:
-                ph_fg, _ = _get_phosphor_colors(self._settings)
-                filt_c = QColor(ph_fg).lighter(120)
-            elif self._theme_name in ("light", "print"):
-                filt_c = QColor("#663300")
-            else:
-                filt_c = QColor("#ffcc66")
+            filt_c = QColor(self._pal.get("filt_text", "#ffcc66"))
             f_extra = QFont("Courier New", 10)   # was 8, plain
             f_extra.setBold(True)
             _outlined_text(painter, 5, 84, extra,
                             f_extra, filt_c, outline_c, 0.8)
 
         # ── Left colour bar ───────────────────────────────────────────────
-        if is_phosphor:
-            ph_fg, _ = _get_phosphor_colors(self._settings)
-            bar_c = QColor(ph_fg)
-        elif self._theme_name == "print":
-            bar_c = QColor("#0000cc")
-        else:
-            bar_c = QColor(self._trace.color)
+        bar_c = QColor(self._pal.get("ch_bar", self._trace.color))
         painter.setBrush(QBrush(bar_c))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRect(0, 0, 5, h)

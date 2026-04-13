@@ -2,17 +2,14 @@
 core/scope_status_bar.py
 LeCroy-style scope status bar for ChipFX TraceLab.
 
-Layout (left → right):
-  [Logo — width from SVG aspect ratio × BAR_H] |
-  [Time+Trig block — fixed BLOCK_W] |
-  [Ch1 block][Ch2 block]... (scrollable QScrollArea)
+ALL colour data comes from ThemeManager via set_theme(palette_dict).
+No colour constants live here.
 
-Channel blocks are ChannelStatusBlock instances from channel_status_block.py.
-The scroll area is the only stretch element.
+Layout: [Logo] | [Time+Trig] | [Ch1][Ch2]...(scrollable)
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QScrollArea, QFrame, QLabel, QSizePolicy
+    QWidget, QHBoxLayout, QScrollArea, QFrame
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF
 from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPixmap, QCursor
@@ -21,68 +18,30 @@ from typing import List
 from core.trace_model import TraceModel
 from core.channel_status_block import ChannelStatusBlock, BLOCK_H, BLOCK_W, _eng
 
-BAR_H   = BLOCK_H          # 110 px
-SEP_W   = 2
-INFO_W  = 120               # Time+Trig block width
-DEFAULT_LOGO_W = 200        # fallback if no SVG loaded
+BAR_H  = BLOCK_H   # 110 px
+SEP_W  = 2
+INFO_W = 120
 
-
-# ── Theme palettes ─────────────────────────────────────────────────────────────
-_THEME = {
-    "dark": {
-        "bar_bg":    "#0a0a14",
-        "info_bg":   "#141428",
-        "info_text": "#d0d0e8",
-        "info_dim":  "#555577",
-        "trig_text": "#44ee66",
-        "sep":       "#1e1e38",
-        "logo_bg":   "#060610",
-        "logo_text": "#F0C040",
-        "logo_sub":  "#555577",
-    },
-    "light": {
-        "bar_bg":    "#d8d8ec",
-        "info_bg":   "#c4c4dc",
-        "info_text": "#181828",
-        "info_dim":  "#8888aa",
-        "trig_text": "#006622",
-        "sep":       "#aaaacc",
-        "logo_bg":   "#d0d0ec",
-        "logo_text": "#2244aa",
-        "logo_sub":  "#8888aa",
-    },
-    "rs_green": {
-        "bar_bg":    "#000800",
-        "info_bg":   "#001800",
-        "info_text": "#00dd44",
-        "info_dim":  "#004422",
-        "trig_text": "#00ff66",
-        "sep":       "#003322",
-        "logo_bg":   "#000600",
-        "logo_text": "#00ee44",
-        "logo_sub":  "#004422",
-    },
-}
-
-def _pal(name: str) -> dict:
-    return _THEME.get(name, _THEME["dark"])
 
 def _tdiv(span: float) -> str:
     return "---" if span <= 0 else _eng(span / 10.0, "s") + "/div"
 
 
+def _sep_widget(color: str = "#1e1e38") -> QFrame:
+    s = QFrame()
+    s.setFrameShape(QFrame.Shape.VLine)
+    s.setFixedWidth(SEP_W)
+    s.setStyleSheet(f"color: {color};")
+    return s
+
+
 # ── Logo block ─────────────────────────────────────────────────────────────────
 class LogoBlock(QWidget):
-    """
-    Renders an SVG logo at the prescribed BAR_H height, width derived from
-    the SVG viewBox aspect ratio so the logo is never squished.
-    Falls back to text if no SVG.
-    """
-    def __init__(self, theme_name: str = "dark", parent=None):
+    def __init__(self, palette: dict, parent=None):
         super().__init__(parent)
-        self._theme_name = theme_name
-        self._pixmap: QPixmap = None
-        self._logo_w = DEFAULT_LOGO_W
+        self._pal     = palette
+        self._pixmap  = None
+        self._logo_w  = 200
         self.setFixedSize(self._logo_w, BAR_H)
 
     def set_svg(self, svg_path: str):
@@ -90,109 +49,84 @@ class LogoBlock(QWidget):
             from PyQt6.QtSvg import QSvgRenderer
             renderer = QSvgRenderer(svg_path)
             if not renderer.isValid():
-                self._pixmap = None
-                self._logo_w = DEFAULT_LOGO_W
-                self.setFixedWidth(self._logo_w)
-                self.update()
-                return
-            # Derive width from SVG aspect ratio
+                self._pixmap = None; self.update(); return
             vb = renderer.viewBox()
             if vb.width() > 0 and vb.height() > 0:
-                aspect = vb.width() / vb.height()
-                self._logo_w = max(80, min(400, int(BAR_H * aspect)))
-            else:
-                self._logo_w = DEFAULT_LOGO_W
+                self._logo_w = max(80, min(400, int(BAR_H * vb.width() / vb.height())))
             self.setFixedWidth(self._logo_w)
-
-            pal = _pal(self._theme_name)
             px = QPixmap(self._logo_w, BAR_H)
-            px.fill(QColor(pal["logo_bg"]))
+            px.fill(QColor(self._pal.get("logo_bg", "#060610")))
             p = QPainter(px)
             renderer.render(p, QRectF(0, 0, self._logo_w, BAR_H))
             p.end()
             self._pixmap = px
         except Exception:
             self._pixmap = None
-            self._logo_w = DEFAULT_LOGO_W
-            self.setFixedWidth(self._logo_w)
         self.update()
 
-    def set_theme(self, name: str):
-        self._theme_name = name
-        self._pixmap = None   # will redraw as text; caller should re-set SVG
+    def set_palette(self, palette: dict):
+        self._pal = palette
+        self._pixmap = None   # will redraw as text
         self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
-        pal = _pal(self._theme_name)
         w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor(pal["logo_bg"]))
+        p.fillRect(0, 0, w, h, QColor(self._pal.get("logo_bg", "#060610")))
         if self._pixmap:
             p.drawPixmap(0, 0, self._pixmap)
         else:
-            f1 = QFont("Courier New", 14)
-            f1.setBold(True)
+            f1 = QFont("Courier New", 14); f1.setBold(True)
             p.setFont(f1)
-            p.setPen(QPen(QColor(pal["logo_text"])))
+            p.setPen(QPen(QColor(self._pal.get("logo_text", "#F0C040"))))
             p.drawText(8, 38, "TraceLab")
             f2 = QFont("Courier New", 9)
             p.setFont(f2)
-            p.setPen(QPen(QColor(pal["logo_sub"])))
+            p.setPen(QPen(QColor(self._pal.get("logo_sub", "#555577"))))
             p.drawText(10, 58, "by ChipFX")
         p.end()
 
 
 # ── Time+Trigger block ──────────────────────────────────────────────────────────
 class TimeTrigBlock(QWidget):
-    def __init__(self, theme_name: str = "dark", parent=None):
+    def __init__(self, palette: dict, parent=None):
         super().__init__(parent)
-        self._theme_name = theme_name
+        self._pal      = palette
         self._tdiv_txt = "---"
         self._trig_txt = "---"
         self.setFixedSize(INFO_W, BAR_H)
 
-    def set_tdiv(self, t: str):
-        self._tdiv_txt = t
-        self.update()
-
-    def set_trig(self, t: str):
-        self._trig_txt = t or "---"
-        self.update()
-
-    def set_theme(self, name: str):
-        self._theme_name = name
-        self.update()
+    def set_tdiv(self, t: str):  self._tdiv_txt = t; self.update()
+    def set_trig(self, t: str):  self._trig_txt = t or "---"; self.update()
+    def set_palette(self, p: dict): self._pal = p; self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        pal = _pal(self._theme_name)
         w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor(pal["info_bg"]))
+        p.fillRect(0, 0, w, h, QColor(self._pal.get("info_bg", "#141428")))
 
-        f_dim = QFont("Courier New", 7)
-        f_val = QFont("Courier New", 11)
-        f_val.setBold(True)
-        f_trig = QFont("Courier New", 9)
-        f_trig.setBold(True)
+        f_dim  = QFont("Courier New", 7)
+        f_val  = QFont("Courier New", 11); f_val.setBold(True)
+        f_trig = QFont("Courier New", 9);  f_trig.setBold(True)
 
         p.setFont(f_dim)
-        p.setPen(QPen(QColor(pal["info_dim"])))
+        p.setPen(QPen(QColor(self._pal.get("info_dim", "#555577"))))
         p.drawText(6, 16, "TIME BASE")
 
         p.setFont(f_val)
-        p.setPen(QPen(QColor(pal["info_text"])))
+        p.setPen(QPen(QColor(self._pal.get("info_text", "#d0d0e8"))))
         p.drawText(6, 38, self._tdiv_txt)
 
-        p.setPen(QPen(QColor(pal["sep"]), 1))
+        p.setPen(QPen(QColor(self._pal.get("sep", "#1e1e38")), 1))
         p.drawLine(6, 50, w - 6, 50)
 
         p.setFont(f_dim)
-        p.setPen(QPen(QColor(pal["info_dim"])))
+        p.setPen(QPen(QColor(self._pal.get("info_dim", "#555577"))))
         p.drawText(6, 64, "TRIGGER")
 
         p.setFont(f_trig)
-        p.setPen(QPen(QColor(pal["trig_text"])))
+        p.setPen(QPen(QColor(self._pal.get("trig_text", "#44ee66"))))
         txt = self._trig_txt
         if len(txt) > 15:
             mid = txt.rfind(' ', 0, 15) or 15
@@ -203,26 +137,16 @@ class TimeTrigBlock(QWidget):
         p.end()
 
 
-# ── Separator ──────────────────────────────────────────────────────────────────
-def _sep(theme_name: str = "dark") -> QFrame:
-    pal = _pal(theme_name)
-    s = QFrame()
-    s.setFrameShape(QFrame.Shape.VLine)
-    s.setFixedWidth(SEP_W)
-    s.setStyleSheet(f"color: {pal['sep']};")
-    return s
-
-
 # ── Main status bar ─────────────────────────────────────────────────────────────
 class ScopeStatusBar(QWidget):
-    toggle_trace_interp = pyqtSignal(str)   # trace name
+    toggle_trace_interp = pyqtSignal(str)
 
-    def __init__(self, theme_name: str = "dark", parent=None):
+    def __init__(self, palette: dict, parent=None):
         super().__init__(parent)
-        self._theme_name = theme_name
+        self._pal = dict(palette)
         self._trace_interp_modes: dict = {}
         self._svg_path: str = ""
-        self._ch_blocks: list = []   # keep strong refs to avoid GC race
+        self._ch_blocks: list = []
 
         self.setFixedHeight(BAR_H)
         self._apply_style()
@@ -231,17 +155,14 @@ class ScopeStatusBar(QWidget):
         self._outer.setContentsMargins(0, 0, 0, 0)
         self._outer.setSpacing(0)
 
-        # Logo
-        self._logo = LogoBlock(theme_name)
+        self._logo = LogoBlock(self._pal)
         self._outer.addWidget(self._logo)
-        self._outer.addWidget(_sep(theme_name))
+        self._outer.addWidget(_sep_widget(self._pal.get("sep", "#1e1e38")))
 
-        # Time+Trigger
-        self._timetrig = TimeTrigBlock(theme_name)
+        self._timetrig = TimeTrigBlock(self._pal)
         self._outer.addWidget(self._timetrig)
-        self._outer.addWidget(_sep(theme_name))
+        self._outer.addWidget(_sep_widget(self._pal.get("sep", "#1e1e38")))
 
-        # Scrollable channel area
         self._ch_scroll = QScrollArea()
         self._ch_scroll.setWidgetResizable(False)
         self._ch_scroll.setHorizontalScrollBarPolicy(
@@ -255,40 +176,39 @@ class ScopeStatusBar(QWidget):
         self._ch_layout.setSpacing(SEP_W)
         self._ch_scroll.setWidget(self._ch_container)
         self._outer.addWidget(self._ch_scroll, stretch=1)
-
         self._update_scroll_style()
 
     def _apply_style(self):
-        pal = _pal(self._theme_name)
-        self.setStyleSheet(
-            f"background: {pal['bar_bg']}; "
-            f"border-top: 2px solid {pal['sep']};")
+        bg  = self._pal.get("bar_bg",  "#0a0a14")
+        sep = self._pal.get("sep",     "#1e1e38")
+        self.setStyleSheet(f"background:{bg}; border-top:2px solid {sep};")
 
     def _update_scroll_style(self):
-        pal = _pal(self._theme_name)
+        bg  = self._pal.get("bar_bg", "#0a0a14")
+        sep = self._pal.get("sep",    "#1e1e38")
         self._ch_scroll.setStyleSheet(
-            f"QScrollArea {{ border: none; background: {pal['bar_bg']}; }}"
-            f"QScrollBar:horizontal {{ height: 5px; background: {pal['bar_bg']}; }}"
-            f"QScrollBar::handle:horizontal {{ background: {pal['sep']}; "
-            f"border-radius: 2px; }}")
-        self._ch_container.setStyleSheet(
-            f"background: {pal['bar_bg']};")
+            f"QScrollArea{{border:none;background:{bg};}}"
+            f"QScrollBar:horizontal{{height:5px;background:{bg};}}"
+            f"QScrollBar::handle:horizontal{{background:{sep};border-radius:2px;}}")
+        self._ch_container.setStyleSheet(f"background:{bg};")
+
+    def set_palette(self, palette: dict):
+        """Called by main_window when theme changes."""
+        self._pal = dict(palette)
+        self._apply_style()
+        self._update_scroll_style()
+        self._logo.set_palette(self._pal)
+        if self._svg_path:
+            self._logo.set_svg(self._svg_path)
+        self._timetrig.set_palette(self._pal)
+
+    # Keep old name for compatibility
+    def set_theme(self, theme_name_ignored: str):
+        pass   # palette is set via set_palette(); theme_name no longer used here
 
     def set_branding(self, svg_path: str):
         self._svg_path = svg_path
-        if svg_path:
-            self._logo.set_svg(svg_path)
-        else:
-            self._logo.set_theme(self._theme_name)  # text fallback
-
-    def set_theme(self, theme_name: str):
-        self._theme_name = theme_name
-        self._apply_style()
-        self._update_scroll_style()
-        self._logo.set_theme(theme_name)
-        if self._svg_path:
-            self._logo.set_svg(self._svg_path)
-        self._timetrig.set_theme(theme_name)
+        self._logo.set_svg(svg_path) if svg_path else self._logo.set_palette(self._pal)
 
     def set_trace_interp_modes(self, modes: dict):
         self._trace_interp_modes = dict(modes)
@@ -296,37 +216,35 @@ class ScopeStatusBar(QWidget):
     def update(self, traces: List[TraceModel],
                x_span: float,
                trigger_info: str = "",
-               y_major_divs: dict = None,  # {name: major_tick_spacing_in_data_units}
+               y_major_divs: dict = None,
                interp_active: bool = False,
                settings: dict = None):
-        """Rebuild the status bar. Call whenever view or traces change."""
         self._timetrig.set_tdiv(_tdiv(x_span))
         self._timetrig.set_trig(trigger_info)
 
-        # ── Rebuild channel blocks ─────────────────────────────────────────
+        # Rebuild channel blocks
         while self._ch_layout.count():
             item = self._ch_layout.takeAt(0)
-            if item:
-                w = item.widget()
-                if w:
-                    w.setParent(None)
+            if item and item.widget():
+                item.widget().setParent(None)
         self._ch_blocks.clear()
 
         y_major_divs = y_major_divs or {}
         visible = [t for t in traces if t.visible]
 
+        # Determine theme name from palette (use bar_bg as proxy for phosphor)
+        # Channel blocks now receive the full palette dict
         for trace in visible:
             y_div = y_major_divs.get(trace.name, 0.0)
-            mode = self._trace_interp_modes.get(trace.name, "linear")
+            mode  = self._trace_interp_modes.get(trace.name, "linear")
             block = ChannelStatusBlock(
-                trace, y_div, mode, self._theme_name,
-                settings=settings, parent=self._ch_container)
+                trace, y_div, mode, self._pal,
+                parent=self._ch_container)
             block.toggle_interp.connect(self.toggle_trace_interp)
             self._ch_blocks.append(block)
             self._ch_layout.addWidget(block)
             block.show()
 
         n = len(visible)
-        total_w = n * (BLOCK_W + SEP_W) + 4
-        self._ch_container.setFixedWidth(max(total_w, BLOCK_W))
+        self._ch_container.setFixedWidth(max(n * (BLOCK_W + SEP_W) + 4, BLOCK_W))
         self._ch_container.setFixedHeight(BAR_H)

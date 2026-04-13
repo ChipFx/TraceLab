@@ -1,0 +1,48 @@
+{
+  "name": "Phosphor Cyan",
+  "tooltip": "Cyan phosphor CRT oscilloscope \u2014 Tektronix style",
+  "plotview": {
+    "bg": "#000c12",
+    "bg_panel": "#001018",
+    "bg_plot": "#000608",
+    "grid_major": "#002233",
+    "grid_minor": "#001018",
+    "text": "#00ccff",
+    "text_dim": "#005577",
+    "accent": "#0088cc",
+    "border": "#002233",
+    "cursor_a": "#ffff00",
+    "cursor_b": "#ff8800",
+    "toolbar_bg": "#000c12",
+    "statusbar_bg": "#000a10",
+    "scope_bg": "#000608",
+    "scope_grid": "#002233"
+  },
+  "statusbar": {
+    "bar_bg": "#000810",
+    "info_bg": "#001020",
+    "info_text": "#00ccff",
+    "info_dim": "#004466",
+    "trig_text": "#44eeff",
+    "sep": "#002233",
+    "logo_bg": "#000608",
+    "logo_text": "#00ccff",
+    "logo_sub": "#004466",
+    "ch_bg": "#001020",
+    "ch_text": "#00ccff",
+    "ch_bar": "#00ccff",
+    "filt_text": "#44eeff"
+  },
+  "trace_colors": [
+    "#00ccff",
+    "#0099dd",
+    "#44ddff",
+    "#88eeff",
+    "#00bbee",
+    "#33ccff",
+    "#0088bb",
+    "#66ddff",
+    "#00aadd",
+    "#99eeff"
+  ]
+}

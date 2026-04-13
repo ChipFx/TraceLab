@@ -1,0 +1,48 @@
+{
+  "name": "Print",
+  "tooltip": "Ink-saving white background theme for printing and documentation",
+  "plotview": {
+    "bg": "#ffffff",
+    "bg_panel": "#f8f8f8",
+    "bg_plot": "#ffffff",
+    "grid_major": "#dddddd",
+    "grid_minor": "#eeeeee",
+    "text": "#000000",
+    "text_dim": "#777777",
+    "accent": "#0000aa",
+    "border": "#cccccc",
+    "cursor_a": "#884400",
+    "cursor_b": "#004488",
+    "toolbar_bg": "#f0f0f0",
+    "statusbar_bg": "#e8e8e8",
+    "scope_bg": "#ffffff",
+    "scope_grid": "#dddddd"
+  },
+  "statusbar": {
+    "bar_bg": "#f0f0f8",
+    "info_bg": "#e4e4f0",
+    "info_text": "#000000",
+    "info_dim": "#888899",
+    "trig_text": "#005500",
+    "sep": "#ccccdd",
+    "logo_bg": "#eeeefc",
+    "logo_text": "#0000aa",
+    "logo_sub": "#888899",
+    "ch_bg": "#f0f4ff",
+    "ch_text": "#000044",
+    "ch_bar": "#0000cc",
+    "filt_text": "#663300"
+  },
+  "trace_colors": [
+    "#000077",
+    "#004400",
+    "#770000",
+    "#440066",
+    "#006666",
+    "#555500",
+    "#003355",
+    "#660033",
+    "#004422",
+    "#331100"
+  ]
+}

@@ -656,14 +656,11 @@ class MainWindow(QMainWindow):
     # ── Cursors ────────────────────────────────────────────────────────
 
     def _start_cursor_placement(self, cursor_id: int):
-        x0, x1 = self._plot.get_current_view_range()
-        mid = (x0 + x1) / 2
-        if cursor_id == 1 and self._plot._cursors.get(0) is not None:
-            mid = self._plot._cursors[0] + (x1 - x0) * 0.1
-        self._plot.set_cursor(cursor_id, mid)
+        x_pos = self._plot.get_cursor_placement_x(cursor_id)
+        self._plot.set_cursor(cursor_id, x_pos)
         name = "A" if cursor_id == 0 else "B"
         self._status_lbl.setText(
-            f"Cursor {name} placed at {mid:.6g} s — drag to move")
+            f"Cursor {name} placed at {x_pos:.6g} s — drag to move")
 
     def _on_cursor_values(self, data: dict):
         self._cursor_panel.update_cursors(data)

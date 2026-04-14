@@ -952,7 +952,7 @@ class ScopePlotWidget(QWidget):
         if self.interp_mode == "sinc" or any(
                 getattr(t, '_interp_mode_override', '') == 'sinc'
                 for t in self.traces):
-            self._rebuild_overlay()
+            self._refresh_overlay_visuals()
         else:
             for visual in self._overlay_visuals.values():
                 visual.update_render_style()
@@ -967,6 +967,16 @@ class ScopePlotWidget(QWidget):
             self._overlay_widget.hide()
             self._scroll.show()
             self._rebuild_split()
+
+    def get_cursor_placement_x(self, cursor_id: int) -> float:
+        x0, x1 = self.get_current_view_range()
+        if self._mode == "overlay":
+            fraction = 0.5 if cursor_id == 0 else 0.75
+            return x0 + (x1 - x0) * fraction
+        mid = (x0 + x1) / 2.0
+        if cursor_id == 1 and self._cursors.get(0) is not None:
+            return self._cursors[0] + (x1 - x0) * 0.1
+        return mid
 
     def set_y_lock_auto(self, locked: bool):
         self.y_lock_auto = locked
@@ -1048,9 +1058,7 @@ class ScopePlotWidget(QWidget):
                 self._last_sinc_active = sinc_now
                 self.sinc_active_changed.emit(sinc_now)
         else:
-            self._rebuild_overlay()
-            for visual in self._overlay_visuals.values():
-                visual.update_render_style()
+            self._refresh_overlay_visuals()
 
     def _rebuild(self):
         if self._mode == "split":
@@ -1092,8 +1100,37 @@ class ScopePlotWidget(QWidget):
 
         self._range_timer.start()
 
+    def _refresh_overlay_visuals(self):
+        visible = [t for t in self.traces if t.visible]
+        visible_names = [t.name for t in visible]
+        if set(visible_names) != set(self._overlay_visuals.keys()):
+            self._rebuild_overlay()
+            return
+
+        view_range = self.get_current_view_range()
+        self._overlay_z_order = visible_names
+        unit = next((t.unit for t in visible
+                     if t.unit and t.unit != 'raw'), '')
+        self._ov_y_axis.set_unit(unit)
+
+        for trace in visible:
+            visual = self._overlay_visuals.get(trace.name)
+            if visual is None:
+                self._rebuild_overlay()
+                return
+            visual.trace = trace
+            visual.interp_mode = getattr(trace, '_interp_mode_override',
+                                         self.interp_mode)
+            visual.refresh_curve(view_range)
+
+        if self.y_lock_auto:
+            self._overlay_widget.getPlotItem().enableAutoRange(axis="y")
+        self._range_timer.start()
+
     def _rebuild_overlay(self):
         pi = self._overlay_widget.getPlotItem()
+        saved_view = pi.viewRange()
+        had_items = bool(self._overlay_visuals)
         for visual in self._overlay_visuals.values():
             visual.remove()
         self._overlay_visuals.clear()
@@ -1117,7 +1154,13 @@ class ScopePlotWidget(QWidget):
             visual.refresh_curve((x0, x1))
             self._overlay_visuals[trace.name] = visual
 
-        if self.y_lock_auto:
+        if had_items:
+            pi.setXRange(saved_view[0][0], saved_view[0][1], padding=0)
+            if self.y_lock_auto:
+                pi.enableAutoRange(axis="y")
+            else:
+                pi.setYRange(saved_view[1][0], saved_view[1][1], padding=0)
+        elif self.y_lock_auto:
             pi.enableAutoRange(axis="y")
 
         # Re-place cursors
@@ -1230,22 +1273,22 @@ class ScopePlotWidget(QWidget):
     # ── View range ────────────────────────────────────────────────────
 
     def get_current_view_range(self) -> Tuple[float, float]:
+        if self._mode == "overlay":
+            vr = self._overlay_widget.getPlotItem().viewRange()
+            return vr[0][0], vr[0][1]
         if self._lanes:
             first = next(iter(self._lanes.values()))
             vr = first.getPlotItem().viewRange()
-            return vr[0][0], vr[0][1]
-        if self._mode == "overlay":
-            vr = self._overlay_widget.getPlotItem().viewRange()
             return vr[0][0], vr[0][1]
         return 0.0, 1.0
 
     def get_current_y_range(self) -> Tuple[float, float]:
+        if self._mode == "overlay":
+            vr = self._overlay_widget.getPlotItem().viewRange()
+            return vr[1][0], vr[1][1]
         if self._lanes:
             first = next(iter(self._lanes.values()))
             vr = first.getPlotItem().viewRange()
-            return vr[1][0], vr[1][1]
-        if self._mode == "overlay":
-            vr = self._overlay_widget.getPlotItem().viewRange()
             return vr[1][0], vr[1][1]
         return -1.0, 1.0
 

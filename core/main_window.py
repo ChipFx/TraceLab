@@ -1040,24 +1040,23 @@ class MainWindow(QMainWindow):
         if not self._traces:
             self._per_trace_interp_menu.addAction("(no traces)").setEnabled(False)
             return
+        from PyQt6.QtGui import QActionGroup
         for trace in self._traces:
             ch_menu = self._per_trace_interp_menu.addMenu(trace.label)
             current = getattr(trace, '_interp_mode_override', self._interp_mode)
-            a_lin = ch_menu.addAction("Linear")
-            a_lin.setCheckable(True)
-            a_lin.setChecked(current == "linear")
-            a_sin = ch_menu.addAction("Sinc (sin(x)/x)")
-            a_sin.setCheckable(True)
-            a_sin.setChecked(current == "sinc")
-            from PyQt6.QtGui import QActionGroup
             ag = QActionGroup(ch_menu)
             ag.setExclusive(True)
-            ag.addAction(a_lin); ag.addAction(a_sin)
             name = trace.name
-            a_lin.triggered.connect(
-                lambda _, n=name: self._plot.set_interp_mode_for_trace(n, "linear"))
-            a_sin.triggered.connect(
-                lambda _, n=name: self._plot.set_interp_mode_for_trace(n, "sinc"))
+            for mode, lbl in [("linear", "Linear"),
+                               ("cubic",  "Cubic Spline"),
+                               ("sinc",   "Sinc (sin(x)/x)")]:
+                a = ch_menu.addAction(lbl)
+                a.setCheckable(True)
+                a.setChecked(current == mode)
+                ag.addAction(a)
+                a.triggered.connect(
+                    lambda _, n=name, m=mode:
+                        self._plot.set_interp_mode_for_trace(n, m))
 
     # ── Channel order ─────────────────────────────────────────────────
 
@@ -1228,11 +1227,13 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
 
     def _on_status_bar_toggle_interp(self, name: str):
-        """Clicking the interp badge on a channel block in the status bar."""
+        """Clicking the interp badge on a channel block cycles linear→cubic→sinc→…"""
+        _CYCLE = ("linear", "cubic", "sinc")
         for trace in self._traces:
             if trace.name == name:
                 cur = getattr(trace, '_interp_mode_override', self._interp_mode)
-                new_mode = 'linear' if cur == 'sinc' else 'sinc'
+                idx = _CYCLE.index(cur) if cur in _CYCLE else 0
+                new_mode = _CYCLE[(idx + 1) % len(_CYCLE)]
                 trace._interp_mode_override = new_mode
                 self._plot.set_interp_mode_for_trace(name, new_mode)
                 break

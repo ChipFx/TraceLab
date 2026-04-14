@@ -84,29 +84,31 @@ class ChannelRow(QWidget):
         self._update_color_btn()
 
     def contextMenuEvent(self, event):
+        from PyQt6.QtGui import QActionGroup
         menu = QMenu(self)
-        # Interpolation toggle
+        interp_menu = menu.addMenu("Interpolation")
         mode = getattr(self.trace, '_interp_mode_override', 'linear')
-        if mode == 'sinc':
-            interp_lbl = "Interpolation: Sinc  →  Switch to Linear"
-        else:
-            interp_lbl = "Interpolation: Linear  →  Switch to Sinc"
-        act_interp = menu.addAction(interp_lbl)
-        act_interp.triggered.connect(self._toggle_interp)
+        ag = QActionGroup(interp_menu)
+        ag.setExclusive(True)
+        for m, lbl in [("linear", "Linear"),
+                        ("cubic",  "Cubic Spline"),
+                        ("sinc",   "Sinc (sin(x)/x)")]:
+            a = interp_menu.addAction(lbl)
+            a.setCheckable(True)
+            a.setChecked(mode == m)
+            ag.addAction(a)
+            a.triggered.connect(lambda _, _m=m: self._set_interp(_m))
         menu.addSeparator()
-        act_reset_c = menu.addAction("Reset Color to Default")
-        act_reset_c.triggered.connect(
+        menu.addAction("Reset Color to Default").triggered.connect(
             lambda: self.reset_color.emit(self.trace.name))
         menu.addSeparator()
         menu.addAction("Remove Trace").triggered.connect(
             lambda: self.remove_requested.emit(self.trace.name))
         menu.exec(event.globalPos())
 
-    def _toggle_interp(self):
-        mode = getattr(self.trace, '_interp_mode_override', 'linear')
-        new_mode = 'linear' if mode == 'sinc' else 'sinc'
-        self.trace._interp_mode_override = new_mode
-        self.interp_changed.emit(self.trace.name, new_mode)
+    def _set_interp(self, mode: str):
+        self.trace._interp_mode_override = mode
+        self.interp_changed.emit(self.trace.name, mode)
 
 
 class ChannelPanel(QWidget):
@@ -172,17 +174,23 @@ class ChannelPanel(QWidget):
         ctrl2 = QHBoxLayout()
         ctrl2.setContentsMargins(4, 0, 4, 4)
         ctrl2.setSpacing(3)
-        btn_lin = QPushButton("All Lin")
+        btn_lin  = QPushButton("All Lin")
+        btn_cub  = QPushButton("All Cub")
         btn_sinc = QPushButton("All Sinc")
         btn_lin.setFixedHeight(20)
+        btn_cub.setFixedHeight(20)
         btn_sinc.setFixedHeight(20)
         btn_lin.setToolTip("Set all channels to Linear interpolation")
+        btn_cub.setToolTip("Set all channels to Cubic Spline interpolation")
         btn_sinc.setToolTip("Set all channels to Sinc (sin(x)/x) interpolation")
         btn_lin.setStyleSheet("font-size: 9px;")
+        btn_cub.setStyleSheet("font-size: 9px; color: #cc88ff;")
         btn_sinc.setStyleSheet("font-size: 9px; color: #ff8888;")
         btn_lin.clicked.connect(lambda: self._set_all_interp("linear"))
+        btn_cub.clicked.connect(lambda: self._set_all_interp("cubic"))
         btn_sinc.clicked.connect(lambda: self._set_all_interp("sinc"))
         ctrl2.addWidget(btn_lin)
+        ctrl2.addWidget(btn_cub)
         ctrl2.addWidget(btn_sinc)
         layout.addLayout(ctrl2)
 

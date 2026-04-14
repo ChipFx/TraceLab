@@ -1,6 +1,6 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb0003000000000520000001fe000009ba000005a8000005200000021d000009ba000005a800000000000000000f00000005200000021d000009ba000005a8",
+  "geometry": "01d9d0cb0003000000000501000000f80000099a000004a200000501000001170000099a000004a200000000000000000f0000000501000001170000099a000004a2",
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 40.0,
@@ -25,6 +25,12 @@
   "last_save_folder": "./",
   "remember_folder": true,
   "interp_mode": "linear",
+  "draw_mode": "Clear",
+  "density_pen_mapping": {
+    "min_width": 0.8,
+    "max_width": 3.5,
+    "response_curve": 0.45
+  },
   "viewport_min_pts": 2048,
   "last_gain": "2.048/4096",
   "last_offset": "-1.024",

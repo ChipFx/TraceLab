@@ -23,6 +23,15 @@ from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
 from core.plugin_manager import PluginManager
 from core.scope_status_bar import ScopeStatusBar
+from core.draw_mode import (
+    DEFAULT_DENSITY_PEN_MAPPING,
+    DEFAULT_DRAW_MODE,
+    DRAW_MODE_ADVANCED,
+    DRAW_MODE_CLEAR,
+    DRAW_MODE_FAST,
+    DRAW_MODE_SIMPLE,
+    DRAW_MODE_TOOLTIPS,
+)
 
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
 
@@ -64,6 +73,8 @@ class MainWindow(QMainWindow):
         s["y_lock_auto"] = self._plot.y_lock_auto
         s["interp_mode"] = self._interp_mode
         s["viewport_min_pts"] = self._viewport_min_pts
+        s["draw_mode"] = self._draw_mode
+        s["density_pen_mapping"] = dict(self._density_pen_mapping)
         s["import_replace"] = self._import_replace
         s["import_reset_view"] = self._import_reset_view
         s["fft_min_freq"] = self._fft_min_freq
@@ -97,6 +108,10 @@ class MainWindow(QMainWindow):
         self._y_lock_auto = self._settings.get("y_lock_auto", True)
         self._fft_min_freq = self._settings.get("fft_min_freq", 1.0)
         self._viewport_min_pts = self._settings.get("viewport_min_pts", 1024)
+        self._draw_mode = self._settings.get("draw_mode", DEFAULT_DRAW_MODE)
+        self._density_pen_mapping = dict(
+            self._settings.get("density_pen_mapping",
+                               DEFAULT_DENSITY_PEN_MAPPING))
         self._last_trigger_info = ""
 
         central = QWidget()
@@ -119,7 +134,8 @@ class MainWindow(QMainWindow):
         self._interp_mode = self._settings.get("interp_mode", "linear")
         self._plot = ScopePlotWidget(
             self.theme, self._y_lock_auto,
-            self._interp_mode, self._viewport_min_pts)
+            self._interp_mode, self._viewport_min_pts,
+            self._draw_mode, self._density_pen_mapping)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
@@ -258,6 +274,27 @@ class MainWindow(QMainWindow):
             lambda: self._set_interp_mode("sinc"))
         self._act_interp_cubic.triggered.connect(
             lambda: self._set_interp_mode("cubic"))
+
+        view_menu.addSeparator()
+        draw_menu = view_menu.addMenu("Draw Mode")
+        self._draw_mode_actions = {}
+        draw_group = QActionGroup(self)
+        draw_group.setExclusive(True)
+        for mode in (
+            DRAW_MODE_SIMPLE,
+            DRAW_MODE_FAST,
+            DRAW_MODE_CLEAR,
+            DRAW_MODE_ADVANCED,
+        ):
+            act = draw_menu.addAction(mode)
+            act.setCheckable(True)
+            act.setToolTip(DRAW_MODE_TOOLTIPS[mode])
+            act.setStatusTip(DRAW_MODE_TOOLTIPS[mode])
+            act.setChecked(mode == self._draw_mode)
+            act.triggered.connect(
+                lambda checked, selected_mode=mode: self._set_draw_mode(selected_mode))
+            draw_group.addAction(act)
+            self._draw_mode_actions[mode] = act
 
         view_menu.addSeparator()
         # Dynamically populated from themes/ folder
@@ -1118,6 +1155,13 @@ class MainWindow(QMainWindow):
         self._interp_mode = mode
         self._plot.set_interp_mode(mode)
         self._settings["interp_mode"] = mode
+
+    def _set_draw_mode(self, mode: str):
+        self._draw_mode = mode
+        if hasattr(self, "_draw_mode_actions") and mode in self._draw_mode_actions:
+            self._draw_mode_actions[mode].setChecked(True)
+        self._plot.set_draw_mode(mode)
+        self._settings["draw_mode"] = mode
 
     def _on_reset_trace_color(self, trace_name: str):
         """Reset a single trace to its theme-default colour."""

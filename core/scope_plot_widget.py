@@ -14,6 +14,13 @@ from PyQt6.QtGui import QColor, QFont, QAction
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from core.trace_model import TraceModel
+from core.draw_mode import (
+    DEFAULT_DENSITY_PEN_MAPPING,
+    DEFAULT_DRAW_MODE,
+    RenderViewport,
+    create_density_estimator,
+    resolve_pen_width,
+)
 
 MAX_DISPLAY_POINTS = 50_000
 
@@ -179,13 +186,22 @@ class TraceStyleContext:
     theme: object
     plot_colors: dict
     theme_name: str
+    draw_mode: str
+    density_pen_mapping: dict
 
 
-def _style_context_from_theme(theme) -> TraceStyleContext:
+def _style_context_from_theme(theme,
+                              draw_mode: str = DEFAULT_DRAW_MODE,
+                              density_pen_mapping: Optional[dict] = None
+                              ) -> TraceStyleContext:
     return TraceStyleContext(
         theme=theme,
         plot_colors=_plot_colors_from_theme(theme),
         theme_name=_theme_name(theme),
+        draw_mode=draw_mode,
+        density_pen_mapping=dict(
+            DEFAULT_DENSITY_PEN_MAPPING if density_pen_mapping is None
+            else density_pen_mapping),
     )
 
 
@@ -275,6 +291,12 @@ class TraceLane(pg.PlotWidget):
         self._cursors: Dict[int, InfiniteLine] = {}
         self._labels: list = []          # TextItem labels anchored to time positions
         self._sinc_active = False         # True when sinc was actually used this draw
+        self._render_t = np.array([])
+        self._render_y = np.array([])
+        self._visible_samples = 0
+        self._density_estimator = create_density_estimator(
+            self._style_context.draw_mode)
+        self._last_style_key = None
 
         self._setup_plot()
         self._add_trace_curve()
@@ -288,6 +310,8 @@ class TraceLane(pg.PlotWidget):
         """Re-draw curve when zoomed in enough that sinc/cubic would kick in."""
         if self.interp_mode in ("sinc", "cubic"):
             self._add_trace_curve()
+        else:
+            self._apply_resolved_style()
 
     def _setup_plot(self):
         pi = self.getPlotItem()
@@ -307,6 +331,7 @@ class TraceLane(pg.PlotWidget):
 
     def apply_style(self, style_context: TraceStyleContext):
         self._style_context = style_context
+        self._density_estimator = create_density_estimator(style_context.draw_mode)
         plot_colors = style_context.plot_colors
         pi = self.getPlotItem()
         self.setBackground(plot_colors["background"])
@@ -318,14 +343,102 @@ class TraceLane(pg.PlotWidget):
             pen = pg.mkPen(color=plot_colors["text"], width=1)
             ax.setPen(pen)
             ax.setTextPen(pen)
-        if self._curve is not None:
-            self._curve.setPen(pg.mkPen(color=disp_color, width=1.5))
+        self._last_style_key = None
+        self._apply_resolved_style()
         self._redraw_labels()
         self.update()
         self.repaint()
 
     def apply_theme(self, theme):
-        self.apply_style(_style_context_from_theme(theme))
+        self.apply_style(_style_context_from_theme(
+            theme,
+            self._style_context.draw_mode,
+            self._style_context.density_pen_mapping))
+
+    def _current_viewport(self) -> RenderViewport:
+        x_range, y_range = self.getPlotItem().viewRange()
+        vb = self.getPlotItem().vb
+        width_px = max(1.0, float(vb.width()))
+        height_px = max(1.0, float(vb.height()))
+        return RenderViewport(
+            width_px=width_px,
+            height_px=height_px,
+            x_range=(float(x_range[0]), float(x_range[1])),
+            y_range=(float(y_range[0]), float(y_range[1])),
+            visible_samples=int(self._visible_samples),
+        )
+
+    def _update_visible_samples(self, viewport: Optional[RenderViewport] = None):
+        viewport = viewport or self._current_viewport()
+        x0, x1 = viewport.x_range
+        visible_mask = (self.trace.time_axis >= x0) & (self.trace.time_axis <= x1)
+        self._visible_samples = int(visible_mask.sum()) or len(self.trace.time_axis)
+
+    def _density_source_points(self, viewport: RenderViewport) -> Tuple[np.ndarray, np.ndarray]:
+        x0, x1 = viewport.x_range
+        if self.interp_mode in ("sinc", "cubic") and self._sinc_active and len(self._render_t):
+            t_points = self._render_t
+            y_points = self._render_y
+        else:
+            t_points, y_points = self.trace.windowed_data(x0, x1)
+            if len(t_points) < 2:
+                t_points = self.trace.time_axis
+                y_points = self.trace.processed_data
+
+        max_points = self._density_estimator.max_segments + 1
+        if len(t_points) > max_points:
+            idx = np.linspace(0, len(t_points) - 1, max_points, dtype=int)
+            t_points = t_points[idx]
+            y_points = y_points[idx]
+        return t_points, y_points
+
+    def _screen_points(self, viewport: RenderViewport) -> np.ndarray:
+        t_points, y_points = self._density_source_points(viewport)
+        if len(t_points) == 0:
+            return np.empty((0, 2), dtype=float)
+        x0, x1 = viewport.x_range
+        y0, y1 = viewport.y_range
+        dx = max(1e-12, x1 - x0)
+        dy = max(1e-12, y1 - y0)
+        x_px = (t_points - x0) / dx * viewport.width_px
+        y_px = (y_points - y0) / dy * viewport.height_px
+        return np.column_stack((x_px, y_px))
+
+    def _resolved_pen_width(self) -> float:
+        viewport = self._current_viewport()
+        self._update_visible_samples(viewport)
+        style_key = (
+            round(viewport.width_px, 2),
+            round(viewport.height_px, 2),
+            round(viewport.x_range[0], 9),
+            round(viewport.x_range[1], 9),
+            round(viewport.y_range[0], 9),
+            round(viewport.y_range[1], 9),
+            viewport.visible_samples,
+            len(self._render_t),
+            self._style_context.draw_mode,
+            tuple(sorted(self._style_context.density_pen_mapping.items())),
+        )
+        if style_key == self._last_style_key and self._curve is not None:
+            return float(self._curve.opts["pen"].widthF())
+        density = self._density_estimator.compute(
+            self.trace,
+            self._screen_points(viewport),
+            viewport,
+        )
+        self._last_style_key = style_key
+        return resolve_pen_width(density, self._style_context.density_pen_mapping)
+
+    def _apply_resolved_style(self):
+        if self._curve is None:
+            return
+        color = self._display_color()
+        width = self._resolved_pen_width()
+        self._curve.setPen(pg.mkPen(color=color, width=width))
+        self._curve.update()
+
+    def update_render_style(self):
+        self._apply_resolved_style()
 
     def _add_trace_curve(self):
         if self._curve is not None:
@@ -359,12 +472,19 @@ class TraceLane(pg.PlotWidget):
                 t_full = t_vis
                 y_full = y_vis
 
+        self._update_visible_samples()
+
         t, y = downsample_for_display(t_full, y_full)
+        self._render_t = t
+        self._render_y = y
+        self._last_style_key = None
         color = self._display_color()
-        pen = pg.mkPen(color=color, width=1.5)
+        pen = pg.mkPen(color=color, width=resolve_pen_width(
+            0.0, self._style_context.density_pen_mapping))
         self._curve = self.plot(t, y, pen=pen, antialias=False)
         self._curve.setDownsampling(auto=True, method="peak")
         self._curve.setClipToView(True)
+        self._apply_resolved_style()
         if self.y_lock_auto:
             self.getPlotItem().enableAutoRange(axis="y")
         self._redraw_labels()
@@ -527,6 +647,12 @@ class OverlayTraceVisual:
         self._style_context = style_context
         self.interp_mode = interp_mode
         self.viewport_min_pts = viewport_min_pts
+        self._density_estimator = create_density_estimator(style_context.draw_mode)
+        self._render_t = np.array([])
+        self._render_y = np.array([])
+        self._visible_samples = 0
+        self._interpolated_view = False
+        self._last_style_key = None
         self.curve = self.plot_item.plot([], [], pen=pg.mkPen(width=1.5),
                                          name=trace.label, antialias=False)
         self.curve.setDownsampling(auto=True, method="peak")
@@ -539,16 +665,110 @@ class OverlayTraceVisual:
 
     def apply_style(self, style_context: TraceStyleContext):
         self._style_context = style_context
-        self.curve.setPen(pg.mkPen(color=self._display_color(), width=1.5))
-        self.curve.update()
+        self._density_estimator = create_density_estimator(style_context.draw_mode)
+        self._last_style_key = None
+        self._apply_resolved_style()
 
     def apply_theme(self, theme):
-        self.apply_style(_style_context_from_theme(theme))
+        self.apply_style(_style_context_from_theme(
+            theme,
+            self._style_context.draw_mode,
+            self._style_context.density_pen_mapping))
+
+    def _current_viewport(self) -> RenderViewport:
+        x_range, y_range = self.plot_item.viewRange()
+        vb = self.plot_item.vb
+        width_px = max(1.0, float(vb.width()))
+        height_px = max(1.0, float(vb.height()))
+        return RenderViewport(
+            width_px=width_px,
+            height_px=height_px,
+            x_range=(float(x_range[0]), float(x_range[1])),
+            y_range=(float(y_range[0]), float(y_range[1])),
+            visible_samples=int(self._visible_samples),
+        )
+
+    def _update_visible_samples(self, viewport: Optional[RenderViewport] = None):
+        viewport = viewport or self._current_viewport()
+        x0, x1 = viewport.x_range
+        visible_mask = (self.trace.time_axis >= x0) & (self.trace.time_axis <= x1)
+        self._visible_samples = int(visible_mask.sum()) or len(self.trace.time_axis)
+
+    def _density_source_points(self, viewport: RenderViewport) -> Tuple[np.ndarray, np.ndarray]:
+        x0, x1 = viewport.x_range
+        if self.interp_mode in ("sinc", "cubic") and self._interpolated_view and len(self._render_t):
+            t_points = self._render_t
+            y_points = self._render_y
+        else:
+            t_points, y_points = self.trace.windowed_data(x0, x1)
+            if len(t_points) < 2:
+                t_points = self.trace.time_axis
+                y_points = self.trace.processed_data
+
+        max_points = self._density_estimator.max_segments + 1
+        if len(t_points) > max_points:
+            idx = np.linspace(0, len(t_points) - 1, max_points, dtype=int)
+            t_points = t_points[idx]
+            y_points = y_points[idx]
+        return t_points, y_points
+
+    def _screen_points(self, viewport: RenderViewport) -> np.ndarray:
+        t_points, y_points = self._density_source_points(viewport)
+        if len(t_points) == 0:
+            return np.empty((0, 2), dtype=float)
+        x0, x1 = viewport.x_range
+        y0, y1 = viewport.y_range
+        dx = max(1e-12, x1 - x0)
+        dy = max(1e-12, y1 - y0)
+        x_px = (t_points - x0) / dx * viewport.width_px
+        y_px = (y_points - y0) / dy * viewport.height_px
+        return np.column_stack((x_px, y_px))
+
+    def _resolved_pen_width(self) -> float:
+        viewport = self._current_viewport()
+        self._update_visible_samples(viewport)
+        style_key = (
+            round(viewport.width_px, 2),
+            round(viewport.height_px, 2),
+            round(viewport.x_range[0], 9),
+            round(viewport.x_range[1], 9),
+            round(viewport.y_range[0], 9),
+            round(viewport.y_range[1], 9),
+            viewport.visible_samples,
+            len(self._render_t),
+            self._style_context.draw_mode,
+            tuple(sorted(self._style_context.density_pen_mapping.items())),
+        )
+        if style_key == self._last_style_key:
+            return float(self.curve.opts["pen"].widthF())
+        density = self._density_estimator.compute(
+            self.trace,
+            self._screen_points(viewport),
+            viewport,
+        )
+        self._last_style_key = style_key
+        return resolve_pen_width(density, self._style_context.density_pen_mapping)
+
+    def _apply_resolved_style(self):
+        width = self._resolved_pen_width()
+        self.curve.setPen(pg.mkPen(color=self._display_color(), width=width))
+        self.curve.update()
+
+    def update_render_style(self):
+        self._apply_resolved_style()
 
     def refresh_curve(self, view_range: Tuple[float, float]):
         t_full = self.trace.time_axis
         y_full = self.trace.processed_data
         x0, x1 = view_range
+        self._interpolated_view = False
+        self._update_visible_samples(RenderViewport(
+            width_px=max(1.0, float(self.plot_item.vb.width())),
+            height_px=max(1.0, float(self.plot_item.vb.height())),
+            x_range=(x0, x1),
+            y_range=tuple(self.plot_item.viewRange()[1]),
+            visible_samples=self._visible_samples,
+        ))
 
         if self.interp_mode in ("sinc", "cubic"):
             mask = (t_full >= x0) & (t_full <= x1)
@@ -563,10 +783,15 @@ class OverlayTraceVisual:
                     t_s, y_s = sinc_interpolate_to_n(
                         t_s, y_s, self.viewport_min_pts)
                 t_full, y_full = t_s, y_s
+                self._interpolated_view = True
 
         t_data, y_data = downsample_for_display(t_full, y_full)
+        self._render_t = t_data
+        self._render_y = y_data
+        self._last_style_key = None
         self.curve.setData(t_data, y_data)
         self.curve.opts["name"] = self.trace.label
+        self._apply_resolved_style()
 
     def remove(self):
         self.plot_item.removeItem(self.curve)
@@ -580,11 +805,19 @@ class ScopePlotWidget(QWidget):
 
     def __init__(self, theme_manager, y_lock_auto: bool = True,
                  interp_mode: str = "linear",
-                 viewport_min_pts: int = 1024, parent=None):
+                 viewport_min_pts: int = 1024,
+                 draw_mode: str = DEFAULT_DRAW_MODE,
+                 density_pen_mapping: Optional[dict] = None,
+                 parent=None):
         super().__init__(parent)
         self._theme_manager = theme_manager
         self._active_theme = theme_manager.active_theme
-        self._style_context = _style_context_from_theme(self._active_theme)
+        self._draw_mode = draw_mode or DEFAULT_DRAW_MODE
+        self._density_pen_mapping = dict(
+            DEFAULT_DENSITY_PEN_MAPPING if density_pen_mapping is None
+            else density_pen_mapping)
+        self._style_context = _style_context_from_theme(
+            self._active_theme, self._draw_mode, self._density_pen_mapping)
         self.y_lock_auto = y_lock_auto
         self.interp_mode = interp_mode
         self.viewport_min_pts = viewport_min_pts
@@ -662,7 +895,8 @@ class ScopePlotWidget(QWidget):
 
     def _apply_plot_theme(self, theme):
         self._active_theme = theme
-        self._style_context = _style_context_from_theme(theme)
+        self._style_context = _style_context_from_theme(
+            theme, self._draw_mode, self._density_pen_mapping)
         plot_colors = self._style_context.plot_colors
         self._overlay_widget.setBackground(plot_colors["background"])
         pi = self._overlay_widget.getPlotItem()
@@ -692,12 +926,36 @@ class ScopePlotWidget(QWidget):
         self.update()
         self.repaint()
 
+    def set_draw_mode(self, draw_mode: str):
+        self._draw_mode = draw_mode or DEFAULT_DRAW_MODE
+        self._style_context = _style_context_from_theme(
+            self._active_theme, self._draw_mode, self._density_pen_mapping)
+        for lane in self._lanes.values():
+            lane.apply_style(self._style_context)
+            lane.refresh_curve()
+        for trace_name, visual in self._overlay_visuals.items():
+            visual.apply_style(self._style_context)
+            visual.interp_mode = getattr(
+                next((t for t in self.traces if t.name == trace_name), None),
+                '_interp_mode_override',
+                self.interp_mode)
+            visual.refresh_curve(self.get_current_view_range())
+        self.update()
+        self.repaint()
+
+    def set_density_pen_mapping(self, density_pen_mapping: dict):
+        self._density_pen_mapping = dict(density_pen_mapping or DEFAULT_DENSITY_PEN_MAPPING)
+        self.set_draw_mode(self._draw_mode)
+
     def _on_overlay_range_changed(self):
         """Re-render overlay curves when zoomed in (viewport sinc)."""
         if self.interp_mode == "sinc" or any(
                 getattr(t, '_interp_mode_override', '') == 'sinc'
                 for t in self.traces):
             self._rebuild_overlay()
+        else:
+            for visual in self._overlay_visuals.values():
+                visual.update_render_style()
 
     def set_mode(self, mode: str):
         self._mode = mode
@@ -768,6 +1026,10 @@ class ScopePlotWidget(QWidget):
         if lane:
             lane.interp_mode = mode
             lane.refresh_curve()
+        visual = self._overlay_visuals.get(trace_name)
+        if visual:
+            visual.interp_mode = mode
+            visual.refresh_curve(self.get_current_view_range())
 
     def get_sinc_active(self) -> bool:
         """True if any visible lane is currently sinc-interpolating."""
@@ -787,6 +1049,8 @@ class ScopePlotWidget(QWidget):
                 self.sinc_active_changed.emit(sinc_now)
         else:
             self._rebuild_overlay()
+            for visual in self._overlay_visuals.values():
+                visual.update_render_style()
 
     def _rebuild(self):
         if self._mode == "split":

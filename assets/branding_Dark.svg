@@ -1,33 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 90">
-  <!-- ChipFX TraceLab logo — dark theme -->
-  <!-- Background -->
+  <!-- ChipFX TraceLab logo — Dark theme -->
   <rect width="200" height="90" fill="#060610"/>
-
-  <!-- Oscilloscope waveform decoration -->
   <polyline points="2,60 18,60 26,20 34,75 42,40 52,40 60,60 76,60"
             fill="none" stroke="#F0C040" stroke-width="2.2"
             stroke-linejoin="round" stroke-linecap="round"/>
-  <!-- Second trace -->
   <polyline points="2,70 14,70 22,45 32,82 44,55 58,55 68,70 76,70"
             fill="none" stroke="#40C0F0" stroke-width="1.5"
             stroke-linejoin="round" stroke-linecap="round" opacity="0.7"/>
-
-  <!-- Vertical separator -->
   <line x1="82" y1="8" x2="82" y2="82" stroke="#2a2a4a" stroke-width="1"/>
-
-  <!-- "TraceLab" wordmark -->
   <text x="90" y="38"
         font-family="'Courier New', Courier, monospace"
         font-size="22" font-weight="bold"
         fill="#F0C040" letter-spacing="1">TraceLab</text>
-
-  <!-- "by ChipFX" sub-label -->
   <text x="92" y="58"
         font-family="'Courier New', Courier, monospace"
         font-size="11"
         fill="#888899" letter-spacing="2">by ChipFX</text>
-
-  <!-- Bottom accent line in trace colours -->
   <line x1="0" y1="87" x2="200" y2="87" stroke="#F0C040" stroke-width="1.5" opacity="0.5"/>
   <line x1="0" y1="89" x2="200" y2="89" stroke="#40C0F0" stroke-width="1" opacity="0.3"/>
 </svg>

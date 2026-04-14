@@ -36,6 +36,18 @@ from core.draw_mode import (
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
 
 
+def _hex_perceived_luminance(hex_color: str) -> float:
+    """Perceived luminance 0–255 for a #rrggbb color (ITU-R BT.601 coefficients)."""
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = h[0] * 2 + h[1] * 2 + h[2] * 2
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except (ValueError, IndexError):
+        return 0.0
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -613,14 +625,30 @@ class MainWindow(QMainWindow):
             combined.save(filepath)
 
     def _get_branding_path(self) -> str:
-        """Return path to branding SVG if it exists, else empty string."""
+        """Return path to branding SVG if it exists, else empty string.
+
+        Resolution order:
+          1. branding_{theme display name}.svg   e.g. "branding_Phosphor Green.svg"
+          2. branding_Dark.svg / branding_Light.svg  chosen by bg_plot luminance
+          3. empty string  (caller falls back to text)
+        """
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        # Try theme-specific first, then generic
-        theme = self.theme.theme_name
-        for name in [f"branding_{theme}.svg", "branding.svg"]:
-            p = os.path.join(base, "assets", name)
-            if os.path.exists(p):
-                return p
+        assets = os.path.join(base, "assets")
+
+        # 1. Exact match on the theme's display name
+        p = os.path.join(assets, f"branding_{self.theme.display_name}.svg")
+        if os.path.exists(p):
+            return p
+
+        # 2. Brightness-based generic fallback
+        bg_hex = self.theme.pv("bg_plot") or self.theme.pv("bg", "#0d0d0d")
+        fallback = ("branding_Light.svg"
+                    if _hex_perceived_luminance(bg_hex) >= 128
+                    else "branding_Dark.svg")
+        p = os.path.join(assets, fallback)
+        if os.path.exists(p):
+            return p
+
         return ""
 
     # ── Display / Theme ────────────────────────────────────────────────

@@ -660,6 +660,9 @@ class ImportDialog(QDialog):
         self._settings["last_gain"]   = self.edit_global_gain.text().strip()
         self._settings["last_offset"] = self.edit_global_offset.text().strip()
         self._settings["last_unit"]   = self.edit_global_unit.text().strip() or "V"
+        # Persist sample rate so next file with no time column uses the same default
+        if not use_time_col:
+            self._settings["default_sample_rate"] = sps
         self.accept()
 
 

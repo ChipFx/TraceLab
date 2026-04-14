@@ -1,20 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 90">
-  <!-- ChipFX TraceLab logo — Light theme -->
-  <rect width="200" height="90" fill="#eeeef8"/>
+  <!-- ChipFX TraceLab logo — Phosphor Green theme -->
+  <rect width="200" height="90" fill="#000800"/>
   <polyline points="2,60 18,60 26,20 34,75 42,40 52,40 60,60 76,60"
-            fill="none" stroke="#2244aa" stroke-width="2.2"
+            fill="none" stroke="#00ee44" stroke-width="2.2"
             stroke-linejoin="round" stroke-linecap="round"/>
   <polyline points="2,70 14,70 22,45 32,82 44,55 58,55 68,70 76,70"
-            fill="none" stroke="#0077aa" stroke-width="1.5"
+            fill="none" stroke="#00cc33" stroke-width="1.5"
             stroke-linejoin="round" stroke-linecap="round" opacity="0.6"/>
-  <line x1="82" y1="8" x2="82" y2="82" stroke="#bbbbcc" stroke-width="1"/>
+  <line x1="82" y1="8" x2="82" y2="82" stroke="#003322" stroke-width="1"/>
   <text x="90" y="38"
         font-family="'Courier New', Courier, monospace"
         font-size="22" font-weight="bold"
-        fill="#2244aa" letter-spacing="1">TraceLab</text>
+        fill="#00ee44" letter-spacing="1">TraceLab</text>
   <text x="92" y="58"
         font-family="'Courier New', Courier, monospace"
         font-size="11"
-        fill="#666688" letter-spacing="2">by ChipFX</text>
-  <line x1="0" y1="87" x2="200" y2="87" stroke="#2244aa" stroke-width="1.5" opacity="0.5"/>
+        fill="#006633" letter-spacing="2">by ChipFX</text>
+  <line x1="0" y1="87" x2="200" y2="87" stroke="#00ee44" stroke-width="1.5" opacity="0.4"/>
 </svg>

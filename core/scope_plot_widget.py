@@ -288,6 +288,8 @@ class TraceLane(pg.PlotWidget):
         self.interp_mode = interp_mode   # "linear" or "sinc"
         self.viewport_min_pts = 1024      # minimum display points; set from settings
         self._curve = None
+        self._persist_curves: list = []   # ghost curves for persistence layers
+        self._retrigger_curve = None      # averaged / interpolated override curve
         self._cursors: Dict[int, InfiniteLine] = {}
         self._labels: list = []          # TextItem labels anchored to time positions
         self._sinc_active = False         # True when sinc was actually used this draw
@@ -485,6 +487,9 @@ class TraceLane(pg.PlotWidget):
         self._curve.setDownsampling(auto=True, method="peak")
         self._curve.setClipToView(True)
         self._apply_resolved_style()
+        if self._persist_curves:
+            # Always keep main curve above all persistence ghost layers
+            self._curve.setZValue(len(self._persist_curves) + 1)
         if self.y_lock_auto:
             self.getPlotItem().enableAutoRange(axis="y")
         self._redraw_labels()
@@ -549,6 +554,62 @@ class TraceLane(pg.PlotWidget):
         y0, y1 = y[idx-1], y[idx]
         if t1 == t0: return float(y0)
         return float(y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0))
+
+    # ── Persistence / retrigger overlay ───────────────────────────────────────
+
+    def set_persistence_layers(self, layers: list, t_ref: float = 0.0):
+        """Overlay ghost traces for persistence mode."""
+        self.clear_persistence_layers()
+        color_hex = self._display_color()
+        for layer in layers:
+            t_plot = layer.time + t_ref
+            d_plot = layer.data
+            # Apply sinc/cubic interpolation to ghost layers when active
+            if (self.interp_mode in ("sinc", "cubic")
+                    and len(t_plot) >= 4
+                    and len(t_plot) < self.viewport_min_pts):
+                if self.interp_mode == "cubic":
+                    t_plot, d_plot = cubic_interpolate_to_n(
+                        t_plot, d_plot, self.viewport_min_pts)
+                else:
+                    t_plot, d_plot = sinc_interpolate_to_n(
+                        t_plot, d_plot, self.viewport_min_pts)
+            c = QColor(color_hex)
+            c.setAlphaF(max(0.0, min(1.0, layer.opacity)))
+            pen = pg.mkPen(color=c, width=max(0.5, 1.5 * layer.width_multiplier))
+            curve = self.plot(t_plot, d_plot, pen=pen, antialias=False)
+            curve.setZValue(layer.z_order)
+            self._persist_curves.append(curve)
+        if self._curve is not None:
+            # Keep main curve above all ghost layers regardless of count
+            self._curve.setZValue(len(self._persist_curves) + 1)
+
+    def clear_persistence_layers(self):
+        for c in self._persist_curves:
+            try:
+                self.removeItem(c)
+            except Exception:
+                pass
+        self._persist_curves.clear()
+        if self._curve is not None:
+            self._curve.setZValue(0)
+
+    def set_retrigger_curve(self, time_abs: np.ndarray, data: np.ndarray):
+        """Show averaged / interpolated result curve above the main trace."""
+        self.clear_retrigger_curve()
+        c = QColor(self._display_color())
+        c.setAlphaF(0.9)
+        pen = pg.mkPen(color=c, width=2.2, style=Qt.PenStyle.DashLine)
+        self._retrigger_curve = self.plot(time_abs, data, pen=pen, antialias=False)
+        self._retrigger_curve.setZValue(15)
+
+    def clear_retrigger_curve(self):
+        if self._retrigger_curve is not None:
+            try:
+                self.removeItem(self._retrigger_curve)
+            except Exception:
+                pass
+            self._retrigger_curve = None
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
@@ -653,6 +714,8 @@ class OverlayTraceVisual:
         self._visible_samples = 0
         self._interpolated_view = False
         self._last_style_key = None
+        self._persist_curves: list = []
+        self._retrigger_curve = None
         self.curve = self.plot_item.plot([], [], pen=pg.mkPen(width=1.5),
                                          name=trace.label, antialias=False)
         self.curve.setDownsampling(auto=True, method="peak")
@@ -792,8 +855,64 @@ class OverlayTraceVisual:
         self.curve.setData(t_data, y_data)
         self.curve.opts["name"] = self.trace.label
         self._apply_resolved_style()
+        if self._persist_curves:
+            self.curve.setZValue(len(self._persist_curves) + 1)
+
+    # ── Persistence / retrigger overlay ───────────────────────────────────────
+
+    def set_persistence_layers(self, layers: list, t_ref: float = 0.0):
+        self.clear_persistence_layers()
+        color_hex = self._display_color()
+        for layer in layers:
+            t_plot = layer.time + t_ref
+            d_plot = layer.data
+            # Apply sinc/cubic interpolation to ghost layers when active
+            if (self.interp_mode in ("sinc", "cubic")
+                    and len(t_plot) >= 4
+                    and len(t_plot) < self.viewport_min_pts):
+                if self.interp_mode == "cubic":
+                    t_plot, d_plot = cubic_interpolate_to_n(
+                        t_plot, d_plot, self.viewport_min_pts)
+                else:
+                    t_plot, d_plot = sinc_interpolate_to_n(
+                        t_plot, d_plot, self.viewport_min_pts)
+            c = QColor(color_hex)
+            c.setAlphaF(max(0.0, min(1.0, layer.opacity)))
+            pen = pg.mkPen(color=c, width=max(0.5, 1.5 * layer.width_multiplier))
+            curve = self.plot_item.plot(t_plot, d_plot, pen=pen, antialias=False)
+            curve.setZValue(layer.z_order)
+            self._persist_curves.append(curve)
+        self.curve.setZValue(len(self._persist_curves) + 1)
+
+    def clear_persistence_layers(self):
+        for c in self._persist_curves:
+            try:
+                self.plot_item.removeItem(c)
+            except Exception:
+                pass
+        self._persist_curves.clear()
+        self.curve.setZValue(0)
+
+    def set_retrigger_curve(self, time_abs: np.ndarray, data: np.ndarray):
+        self.clear_retrigger_curve()
+        c = QColor(self._display_color())
+        c.setAlphaF(0.9)
+        pen = pg.mkPen(color=c, width=2.2, style=Qt.PenStyle.DashLine)
+        self._retrigger_curve = self.plot_item.plot(
+            time_abs, data, pen=pen, antialias=False)
+        self._retrigger_curve.setZValue(15)
+
+    def clear_retrigger_curve(self):
+        if self._retrigger_curve is not None:
+            try:
+                self.plot_item.removeItem(self._retrigger_curve)
+            except Exception:
+                pass
+            self._retrigger_curve = None
 
     def remove(self):
+        self.clear_persistence_layers()
+        self.clear_retrigger_curve()
         self.plot_item.removeItem(self.curve)
 
 
@@ -832,6 +951,9 @@ class ScopePlotWidget(QWidget):
         }
         self._overlay_visuals: Dict[str, OverlayTraceVisual] = {}
         self._overlay_z_order: List[str] = []  # for bring-to-front
+        # Persistence / retrigger state — reapplied after every rebuild
+        self._persist_state: Dict[str, tuple] = {}       # name->(layers, t_ref)
+        self._retrigger_curve_state: Dict[str, tuple] = {}  # name->(t_abs, data)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(1)
@@ -1015,10 +1137,14 @@ class ScopePlotWidget(QWidget):
 
     def clear_all(self):
         self.traces.clear()
+        self._persist_state.clear()
+        self._retrigger_curve_state.clear()
         self._rebuild()
 
     def remove_trace(self, trace_name: str):
         self.traces = [t for t in self.traces if t.name != trace_name]
+        self._persist_state.pop(trace_name, None)
+        self._retrigger_curve_state.pop(trace_name, None)
         self._rebuild()
 
     def set_trace_visible(self, trace_name: str, visible: bool):
@@ -1098,6 +1224,15 @@ class ScopePlotWidget(QWidget):
             if t_pos is not None:
                 self._place_cursors(cid, t_pos)
 
+        for name, (layers, t_ref) in self._persist_state.items():
+            lane = self._lanes.get(name)
+            if lane:
+                lane.set_persistence_layers(layers, t_ref)
+        for name, (t_abs, data) in self._retrigger_curve_state.items():
+            lane = self._lanes.get(name)
+            if lane:
+                lane.set_retrigger_curve(t_abs, data)
+
         self._range_timer.start()
 
     def _refresh_overlay_visuals(self):
@@ -1168,7 +1303,78 @@ class ScopePlotWidget(QWidget):
             if t_pos is not None:
                 self._place_cursors(cid, t_pos)
 
+        for name, (layers, t_ref) in self._persist_state.items():
+            visual = self._overlay_visuals.get(name)
+            if visual:
+                visual.set_persistence_layers(layers, t_ref)
+        for name, (t_abs, data) in self._retrigger_curve_state.items():
+            visual = self._overlay_visuals.get(name)
+            if visual:
+                visual.set_retrigger_curve(t_abs, data)
+
         self._range_timer.start()
+
+    # ── Persistence / retrigger public API ────────────────────────────────────
+
+    def set_persistence_layers(self, trace_name: str,
+                               layers: list, t_ref: float = 0.0):
+        """Store and display persistence ghost curves for one trace."""
+        self._persist_state[trace_name] = (layers, t_ref)
+        if self._mode == "split":
+            lane = self._lanes.get(trace_name)
+            if lane:
+                lane.set_persistence_layers(layers, t_ref)
+        else:
+            visual = self._overlay_visuals.get(trace_name)
+            if visual:
+                visual.set_persistence_layers(layers, t_ref)
+
+    def clear_persistence_layers(self, trace_name: str = None):
+        """Remove persistence ghost curves for one trace, or all if None."""
+        if trace_name is None:
+            self._persist_state.clear()
+            for lane in self._lanes.values():
+                lane.clear_persistence_layers()
+            for visual in self._overlay_visuals.values():
+                visual.clear_persistence_layers()
+        else:
+            self._persist_state.pop(trace_name, None)
+            lane = self._lanes.get(trace_name)
+            if lane:
+                lane.clear_persistence_layers()
+            visual = self._overlay_visuals.get(trace_name)
+            if visual:
+                visual.clear_persistence_layers()
+
+    def set_retrigger_curve(self, trace_name: str,
+                            time_abs: np.ndarray, data: np.ndarray):
+        """Store and display an averaged / interpolated result curve."""
+        self._retrigger_curve_state[trace_name] = (time_abs, data)
+        if self._mode == "split":
+            lane = self._lanes.get(trace_name)
+            if lane:
+                lane.set_retrigger_curve(time_abs, data)
+        else:
+            visual = self._overlay_visuals.get(trace_name)
+            if visual:
+                visual.set_retrigger_curve(time_abs, data)
+
+    def clear_retrigger_curve(self, trace_name: str = None):
+        """Remove retrigger result curve(s)."""
+        if trace_name is None:
+            self._retrigger_curve_state.clear()
+            for lane in self._lanes.values():
+                lane.clear_retrigger_curve()
+            for visual in self._overlay_visuals.values():
+                visual.clear_retrigger_curve()
+        else:
+            self._retrigger_curve_state.pop(trace_name, None)
+            lane = self._lanes.get(trace_name)
+            if lane:
+                lane.clear_retrigger_curve()
+            visual = self._overlay_visuals.get(trace_name)
+            if visual:
+                visual.clear_retrigger_curve()
 
     def bring_trace_to_front(self, trace_name: str):
         """Move a trace curve to the top of the overlay z-order."""

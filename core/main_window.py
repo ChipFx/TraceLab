@@ -32,6 +32,13 @@ from core.draw_mode import (
     DRAW_MODE_SIMPLE,
     DRAW_MODE_TOOLTIPS,
 )
+from core.retrigger import (
+    MODE_OFF, MODE_PERSIST_FUTURE, MODE_PERSIST_PAST,
+    MODE_AVERAGING, MODE_INTERPOLATION, PERSIST_MODES,
+    PERSISTENCE_DEFAULTS, AVERAGING_DEFAULTS, INTERPOLATION_DEFAULTS,
+    apply_mode_with_triggers as retrigger_apply_with_triggers,
+    find_all_triggers_with_times,
+)
 
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
 
@@ -90,6 +97,11 @@ class MainWindow(QMainWindow):
         s["import_replace"] = self._import_replace
         s["import_reset_view"] = self._import_reset_view
         s["fft_min_freq"] = self._fft_min_freq
+        s["retrigger_mode"] = self._retrigger_mode
+        s["persistence"] = dict(self._persist_settings)
+        s["averaging"] = dict(self._averaging_settings)
+        s["interpolation"] = dict(self._interpolation_settings)
+        s["auto_retrigger"] = self._trigger_panel.chk_auto_retrigger.isChecked()
         try:
             with open(SETTINGS_PATH, "w") as f:
                 json.dump(s, f, indent=2)
@@ -126,6 +138,22 @@ class MainWindow(QMainWindow):
                                DEFAULT_DENSITY_PEN_MAPPING))
         self._last_trigger_info = ""
 
+        # ── Retrigger / persistence state ─────────────────────────────────────
+        self._retrigger_mode: str = self._settings.get(
+            "retrigger_mode", MODE_OFF)
+        self._persist_settings: dict = dict(
+            {**PERSISTENCE_DEFAULTS,
+             **self._settings.get("persistence", {})})
+        self._averaging_settings: dict = dict(
+            {**AVERAGING_DEFAULTS,
+             **self._settings.get("averaging", {})})
+        self._interpolation_settings: dict = dict(
+            {**INTERPOLATION_DEFAULTS,
+             **self._settings.get("interpolation", {})})
+        self._last_trigger_t_pos: Optional[float] = None
+        self._last_retrigger_results: dict = {}
+        self._last_retrigger_span: float = 0.0   # tracks view_span at last calc
+
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
@@ -151,6 +179,7 @@ class MainWindow(QMainWindow):
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
+        self._plot.view_changed.connect(self._on_view_changed_retrigger)
 
         # Wrap plot + status bar in a vertical container
         plot_container = QWidget()
@@ -192,6 +221,9 @@ class MainWindow(QMainWindow):
         self._trigger_panel.trigger_found.connect(self._on_trigger_found)
         self._trigger_panel.set_time_zero.connect(self._on_trigger_set_t0)
         self._trigger_panel.place_cursor.connect(self._plot.set_cursor)
+        self._trigger_panel.retrigger_update_requested.connect(self._reapply_retrigger)
+        self._trigger_panel.chk_auto_retrigger.setChecked(
+            self._settings.get("auto_retrigger", False))
         right_splitter.addWidget(self._trigger_panel)
 
         right_splitter.setStretchFactor(0, 2)
@@ -314,6 +346,63 @@ class MainWindow(QMainWindow):
         self._theme_submenu = view_menu.addMenu("Theme")
         self._rebuild_theme_menu()
 
+        # ── Retrigger ──────────────────────────────────────────────────
+        view_menu.addSeparator()
+        rt_menu = view_menu.addMenu("Retrigger")
+
+        persist_menu = rt_menu.addMenu("Persistence")
+        persist_group = QActionGroup(self)
+        persist_group.setExclusive(True)
+
+        self._act_persist_off = persist_menu.addAction("Off")
+        self._act_persist_off.setCheckable(True)
+        self._act_persist_off.setChecked(self._retrigger_mode == MODE_OFF)
+        persist_group.addAction(self._act_persist_off)
+        self._act_persist_off.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_OFF))
+
+        self._act_persist_future = persist_menu.addAction("Future Persist")
+        self._act_persist_future.setCheckable(True)
+        self._act_persist_future.setChecked(
+            self._retrigger_mode == MODE_PERSIST_FUTURE)
+        self._act_persist_future.setToolTip(
+            "First trigger shown as hard line; later triggers fade into "
+            "the future below it.")
+        persist_group.addAction(self._act_persist_future)
+        self._act_persist_future.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_PERSIST_FUTURE))
+
+        self._act_persist_past = persist_menu.addAction("Past Persist (Normal)")
+        self._act_persist_past.setCheckable(True)
+        self._act_persist_past.setChecked(
+            self._retrigger_mode == MODE_PERSIST_PAST)
+        self._act_persist_past.setToolTip(
+            "Last trigger shown as hard line; earlier triggers fade into "
+            "history below it.  Classic oscilloscope persistence.")
+        persist_group.addAction(self._act_persist_past)
+        self._act_persist_past.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_PERSIST_PAST))
+
+        rt_menu.addSeparator()
+
+        self._act_rt_averaging = rt_menu.addAction("Averaging")
+        self._act_rt_averaging.setCheckable(True)
+        self._act_rt_averaging.setChecked(self._retrigger_mode == MODE_AVERAGING)
+        self._act_rt_averaging.setToolTip(
+            "Average multiple trigger-aligned segments to reduce noise.")
+        self._act_rt_averaging.triggered.connect(
+            self._toggle_retrigger_averaging)
+
+        self._act_rt_interp = rt_menu.addAction("Interpolate")
+        self._act_rt_interp.setCheckable(True)
+        self._act_rt_interp.setChecked(
+            self._retrigger_mode == MODE_INTERPOLATION)
+        self._act_rt_interp.setToolTip(
+            "Interleave multiple trigger-aligned segments to increase "
+            "effective sample resolution.")
+        self._act_rt_interp.triggered.connect(
+            self._toggle_retrigger_interpolation)
+
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
         a = analysis_menu.addAction("FFT...")
@@ -353,6 +442,32 @@ class MainWindow(QMainWindow):
         self._act_remember_folder.setToolTip(
             "When enabled, open/save dialogs start in the last used folder.")
         self._act_remember_folder.triggered.connect(self._toggle_remember_folder)
+
+        settings_menu.addSeparator()
+
+        # ── Persistence settings ──────────────────────────────────────
+        pm = settings_menu.addMenu("Persistence Settings")
+        pm.addAction("Count…").triggered.connect(self._dlg_persist_count)
+        pm.addAction("Selection…").triggered.connect(self._dlg_persist_selection)
+        pm.addAction("Emphasis…").triggered.connect(self._dlg_persist_emphasis)
+        pm.addAction("Opacity Decay…").triggered.connect(
+            self._dlg_persist_opacity)
+        pm.addAction("Width Growth…").triggered.connect(self._dlg_persist_width)
+        pm.addSeparator()
+        pm.addAction("Restore Defaults").triggered.connect(
+            self._reset_persist_defaults)
+
+        am = settings_menu.addMenu("Averaging Settings")
+        am.addAction("Count…").triggered.connect(self._dlg_avg_count)
+        am.addSeparator()
+        am.addAction("Restore Defaults").triggered.connect(
+            self._reset_avg_defaults)
+
+        im = settings_menu.addMenu("Interpolation Settings")
+        im.addAction("Count…").triggered.connect(self._dlg_interp_count)
+        im.addSeparator()
+        im.addAction("Restore Defaults").triggered.connect(
+            self._reset_interp_defaults)
 
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
@@ -530,7 +645,10 @@ class MainWindow(QMainWindow):
         for t in list(self._traces):
             self._channel_panel.remove_trace(t.name)
         self._traces.clear()
-        self._plot.clear_all()
+        self._plot.clear_all()          # also clears persist/retrigger state in plot
+        self._last_retrigger_results.clear()
+        self._last_trigger_t_pos  = None
+        self._last_retrigger_span = 0.0
         self._refresh_trigger_channels()
         self._update_status()
 
@@ -999,6 +1117,7 @@ class MainWindow(QMainWindow):
             half_win = (x1 - x0) / 2
             self._plot.zoom_x_range(t_pos - half_win, t_pos + half_win)
         self._refresh_status_bar()
+        self._apply_retrigger(t_pos)
 
     def _on_trigger_set_t0(self, t_pos: float):
         """Shift all trace time axes so t_pos becomes 0."""
@@ -1238,6 +1357,342 @@ class MainWindow(QMainWindow):
                 self._plot.set_interp_mode_for_trace(name, new_mode)
                 break
         self._refresh_status_bar()
+
+    # ── Retrigger pipeline ─────────────────────────────────────────────
+
+    def _set_retrigger_mode(self, mode: str):
+        """Select a persistence mode; deselects Averaging and Interpolate."""
+        self._retrigger_mode = mode
+        # Auto-wire selection & emphasis to match the mode's semantic meaning.
+        # Future Persist: first trigger is the "hard" line; history grows forward.
+        # Past Persist Normal: last trigger is the "hard" line; history grows back.
+        if mode == MODE_PERSIST_FUTURE:
+            self._persist_settings["selection"] = "first"
+            self._persist_settings["emphasis"]  = "first"
+        elif mode == MODE_PERSIST_PAST:
+            self._persist_settings["selection"] = "last"
+            self._persist_settings["emphasis"]  = "last"
+        self._act_rt_averaging.blockSignals(True)
+        self._act_rt_averaging.setChecked(False)
+        self._act_rt_averaging.blockSignals(False)
+        self._act_rt_interp.blockSignals(True)
+        self._act_rt_interp.setChecked(False)
+        self._act_rt_interp.blockSignals(False)
+        self._plot.clear_persistence_layers()
+        self._plot.clear_retrigger_curve()
+        self._last_retrigger_results.clear()
+        self._update_retrigger_controls()
+        if mode != MODE_OFF:
+            self._reapply_retrigger()
+
+    def _toggle_retrigger_averaging(self, checked: bool):
+        """Toggle trigger-aligned averaging; disables persistence on enable."""
+        if checked:
+            self._retrigger_mode = MODE_AVERAGING
+            self._act_persist_off.blockSignals(True)
+            self._act_persist_off.setChecked(True)
+            self._act_persist_off.blockSignals(False)
+            self._act_rt_interp.blockSignals(True)
+            self._act_rt_interp.setChecked(False)
+            self._act_rt_interp.blockSignals(False)
+        else:
+            self._retrigger_mode = MODE_OFF
+        self._plot.clear_persistence_layers()
+        self._plot.clear_retrigger_curve()
+        self._last_retrigger_results.clear()
+        self._update_retrigger_controls()
+        if checked:
+            self._reapply_retrigger()
+
+    def _toggle_retrigger_interpolation(self, checked: bool):
+        """Toggle sub-sample interpolation; disables persistence on enable."""
+        if checked:
+            self._retrigger_mode = MODE_INTERPOLATION
+            self._act_persist_off.blockSignals(True)
+            self._act_persist_off.setChecked(True)
+            self._act_persist_off.blockSignals(False)
+            self._act_rt_averaging.blockSignals(True)
+            self._act_rt_averaging.setChecked(False)
+            self._act_rt_averaging.blockSignals(False)
+        else:
+            self._retrigger_mode = MODE_OFF
+        self._plot.clear_persistence_layers()
+        self._plot.clear_retrigger_curve()
+        self._last_retrigger_results.clear()
+        self._update_retrigger_controls()
+        if checked:
+            self._reapply_retrigger()
+
+    def _apply_retrigger(self, t_pos: float):
+        """
+        Full retrigger pipeline.
+
+        Triggers are found ONCE on the selected trigger channel, then the
+        same trigger times are applied to ALL visible traces — exactly how a
+        real oscilloscope works: the trigger channel fires, every channel
+        captures in sync.
+        """
+        if self._retrigger_mode == MODE_OFF:
+            return
+
+        level    = self._trigger_panel.edit_level.get_value(0.0)
+        edge_idx = self._trigger_panel.combo_edge.currentIndex()
+        x0, x1  = self._plot.get_current_view_range()
+        view_span = x1 - x0
+        if view_span <= 0:
+            return
+
+        # ── Step 1: find triggers on the selected trigger channel only ─────────
+        trig_trace = self._trigger_panel._get_selected_trace()
+        if trig_trace is None or len(trig_trace.time_axis) < 2:
+            return
+
+        trig_t = trig_trace.time_axis
+        trig_y = trig_trace.processed_data
+        dt_est  = float(trig_t[1] - trig_t[0])
+        # One view-span holdoff: no two consecutive trigger windows may overlap
+        holdoff = max(1, int(view_span / dt_est)) if dt_est > 0 else 1
+
+        idxs, t_trigs = find_all_triggers_with_times(
+            trig_y, trig_t, level, edge_idx, holdoff)
+
+        if not idxs:
+            # No triggers found — clear any existing display and bail
+            self._plot.clear_persistence_layers()
+            self._plot.clear_retrigger_curve()
+            self._last_retrigger_results.clear()
+            return
+
+        # ── Step 2: apply the same trigger times to every visible channel ──────
+        self._last_trigger_t_pos  = t_pos
+        self._last_retrigger_span = view_span
+        self._plot.clear_persistence_layers()
+        self._plot.clear_retrigger_curve()
+        self._last_retrigger_results.clear()
+
+        # Adaptive count cap: limit ghost count when zoomed far out.
+        # If the full trace contains 10× more samples than are visible,
+        # the max useful sweeps is at most total/visible (each sweep
+        # would be below-viewport resolution otherwise).
+        mask_v = (trig_t >= x0) & (trig_t <= x1)
+        visible_s = max(1, int(mask_v.sum()))
+        zoom_cap = max(1, len(trig_t) // visible_s)
+        effective_persist = dict(self._persist_settings)
+        effective_persist["count"] = min(
+            self._persist_settings.get("count", 10), zoom_cap)
+
+        for trace in self._traces:
+            if not trace.visible:
+                continue
+            t = trace.time_axis
+            y = trace.processed_data
+            if len(t) < 2:
+                continue
+
+            result = retrigger_apply_with_triggers(
+                mode=self._retrigger_mode,
+                time=t,
+                data=y,
+                trigger_indices=idxs,
+                trigger_times=t_trigs,
+                view_span=view_span,
+                persistence_settings=effective_persist,
+                averaging_settings=self._averaging_settings,
+                interpolation_settings=self._interpolation_settings,
+            )
+            self._last_retrigger_results[trace.name] = result
+            self._render_retrigger(trace.name, result, t_pos)
+
+    def _render_retrigger(self, trace_name: str, result, t_ref: float):
+        """Dispatch a RetriggerResult to the appropriate plot calls."""
+        mode = result.mode
+        if mode in PERSIST_MODES:
+            if result.layers:
+                self._plot.set_persistence_layers(trace_name, result.layers, t_ref)
+            else:
+                self._plot.clear_persistence_layers(trace_name)
+            self._plot.clear_retrigger_curve(trace_name)
+        elif mode == MODE_AVERAGING:
+            self._plot.clear_persistence_layers(trace_name)
+            if result.avg_time is not None and result.avg_data is not None:
+                self._plot.set_retrigger_curve(
+                    trace_name, result.avg_time + t_ref, result.avg_data)
+            else:
+                self._plot.clear_retrigger_curve(trace_name)
+        elif mode == MODE_INTERPOLATION:
+            self._plot.clear_persistence_layers(trace_name)
+            if result.interp_time is not None and result.interp_data is not None:
+                self._plot.set_retrigger_curve(
+                    trace_name, result.interp_time + t_ref, result.interp_data)
+            else:
+                self._plot.clear_retrigger_curve(trace_name)
+        else:
+            self._plot.clear_persistence_layers(trace_name)
+            self._plot.clear_retrigger_curve(trace_name)
+
+    def _reapply_retrigger(self):
+        """Re-run the pipeline with the last known trigger position.
+        If no trigger has been found yet, auto-detects the first one."""
+        if self._retrigger_mode == MODE_OFF:
+            return
+        t_pos = self._last_trigger_t_pos
+        if t_pos is None:
+            t_pos = self._auto_find_trigger()
+            if t_pos is None:
+                return
+            self._last_trigger_t_pos = t_pos
+        self._apply_retrigger(t_pos)
+
+    def _auto_find_trigger(self) -> Optional[float]:
+        """
+        Find the first trigger crossing in the current view window using the
+        trigger panel's current level/edge/channel settings.
+        Falls back to searching the full trace if no crossing is visible.
+        Returns the sub-sample accurate trigger time, or None.
+        """
+        trig_trace = self._trigger_panel._get_selected_trace()
+        if trig_trace is None:
+            return None
+        level    = self._trigger_panel.edit_level.get_value(0.0)
+        edge_idx = self._trigger_panel.combo_edge.currentIndex()
+        t_full = trig_trace.time_axis
+        y_full = trig_trace.processed_data
+        if len(t_full) < 2:
+            return None
+
+        # Try the visible window first — gives the most relevant trigger
+        x0, x1 = self._plot.get_current_view_range()
+        mask = (t_full >= x0) & (t_full <= x1)
+        t_v, y_v = t_full[mask], y_full[mask]
+        if len(t_v) >= 2:
+            _, t_trigs = find_all_triggers_with_times(y_v, t_v, level, edge_idx, 0)
+            if t_trigs:
+                return t_trigs[0]
+
+        # Fall back to the full trace
+        _, t_trigs = find_all_triggers_with_times(y_full, t_full, level, edge_idx, 0)
+        return t_trigs[0] if t_trigs else None
+
+    def _update_retrigger_controls(self):
+        """Enable/disable the manual Update Retrigger button."""
+        active = self._retrigger_mode != MODE_OFF
+        self._trigger_panel.btn_retrigger_update.setEnabled(active)
+
+    def _on_view_changed_retrigger(self):
+        """
+        Called (throttled, ~100 ms) whenever the user pans or zooms.
+        Recalculates persistence when:
+          - the view span changed by more than 20 % (zoom in or out), OR
+          - the current trigger reference has scrolled out of the visible window.
+        Finding a new trigger near the centre of the view keeps the display
+        consistent as the user scrolls through the data.
+        """
+        if self._retrigger_mode == MODE_OFF or not self._traces:
+            return
+        if not self._trigger_panel.chk_auto_retrigger.isChecked():
+            return
+        x0, x1 = self._plot.get_current_view_range()
+        new_span = x1 - x0
+
+        old_span = self._last_retrigger_span
+        span_changed = (
+            old_span <= 0
+            or abs(new_span - old_span) / max(old_span, 1e-12) > 0.20
+        )
+        t_pos = self._last_trigger_t_pos
+        pos_offscreen = (t_pos is None) or not (x0 <= t_pos <= x1)
+
+        if span_changed or pos_offscreen:
+            new_t = self._auto_find_trigger()
+            if new_t is not None:
+                self._last_trigger_t_pos  = new_t
+                self._last_retrigger_span = new_span
+                self._apply_retrigger(new_t)
+
+    # ── Retrigger settings dialogs ─────────────────────────────────────
+
+    def _dlg_persist_count(self):
+        val, ok = QInputDialog.getInt(
+            self, "Persistence Count",
+            "Maximum number of trigger-aligned sweeps to overlay:",
+            self._persist_settings.get("count", 20), 2, 1000, 1)
+        if ok:
+            self._persist_settings["count"] = val
+            self._reapply_retrigger()
+
+    def _dlg_persist_selection(self):
+        items = ["first", "last"]
+        cur = self._persist_settings.get("selection", "first")
+        idx = items.index(cur) if cur in items else 0
+        val, ok = QInputDialog.getItem(
+            self, "Persistence Selection",
+            "Which triggers to keep (first N or last N):",
+            items, idx, False)
+        if ok:
+            self._persist_settings["selection"] = val
+            self._reapply_retrigger()
+
+    def _dlg_persist_emphasis(self):
+        items = ["first", "last"]
+        cur = self._persist_settings.get("emphasis", "first")
+        idx = items.index(cur) if cur in items else 0
+        val, ok = QInputDialog.getItem(
+            self, "Persistence Emphasis",
+            "Which sweep is drawn as the hard line on top:",
+            items, idx, False)
+        if ok:
+            self._persist_settings["emphasis"] = val
+            self._reapply_retrigger()
+
+    def _dlg_persist_opacity(self):
+        val, ok = QInputDialog.getDouble(
+            self, "Opacity Decay",
+            "Opacity multiplier per step back from emphasis (0.01 – 0.99):\n"
+            "Lower = faster fade.   0.9 = gentle fade.",
+            self._persist_settings.get("opacity_decay", 0.9), 0.01, 0.99, 2)
+        if ok:
+            self._persist_settings["opacity_decay"] = val
+            self._reapply_retrigger()
+
+    def _dlg_persist_width(self):
+        val, ok = QInputDialog.getDouble(
+            self, "Width Growth",
+            "Line-width multiplier per step back from emphasis (1.0 – 5.0):\n"
+            "Higher = older sweeps drawn thicker.   1.0 = all same width.",
+            self._persist_settings.get("width_growth", 1.1), 1.0, 5.0, 2)
+        if ok:
+            self._persist_settings["width_growth"] = val
+            self._reapply_retrigger()
+
+    def _reset_persist_defaults(self):
+        self._persist_settings = dict(PERSISTENCE_DEFAULTS)
+        self._reapply_retrigger()
+
+    def _dlg_avg_count(self):
+        val, ok = QInputDialog.getInt(
+            self, "Averaging Count",
+            "Number of trigger-aligned segments to average:",
+            self._averaging_settings.get("count", 20), 2, 1000, 1)
+        if ok:
+            self._averaging_settings["count"] = val
+            self._reapply_retrigger()
+
+    def _reset_avg_defaults(self):
+        self._averaging_settings = dict(AVERAGING_DEFAULTS)
+        self._reapply_retrigger()
+
+    def _dlg_interp_count(self):
+        val, ok = QInputDialog.getInt(
+            self, "Interpolation Count",
+            "Number of trigger-aligned segments to interleave:",
+            self._interpolation_settings.get("count", 20), 2, 1000, 1)
+        if ok:
+            self._interpolation_settings["count"] = val
+            self._reapply_retrigger()
+
+    def _reset_interp_defaults(self):
+        self._interpolation_settings = dict(INTERPOLATION_DEFAULTS)
+        self._reapply_retrigger()
 
     # ── Trace labels ───────────────────────────────────────────────────
 

@@ -34,9 +34,10 @@ class TriggerPanel(QWidget):
     Emits set_time_zero(t_pos) to request a time-zero shift.
     """
 
-    trigger_found   = pyqtSignal(float)   # time of trigger crossing
-    set_time_zero   = pyqtSignal(float)   # request t=0 shift to this time
-    place_cursor    = pyqtSignal(int, float)  # cursor_id, time
+    trigger_found              = pyqtSignal(float)   # time of trigger crossing
+    set_time_zero              = pyqtSignal(float)   # request t=0 shift to this time
+    place_cursor               = pyqtSignal(int, float)  # cursor_id, time
+    retrigger_update_requested = pyqtSignal()        # manual "Update Retrigger" press
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -103,9 +104,16 @@ class TriggerPanel(QWidget):
             "All earlier samples appear with negative time.")
         self.chk_zoom     = QCheckBox("Zoom to show trigger context")
         self.chk_zoom.setChecked(True)
+        self.chk_auto_retrigger = QCheckBox("Auto-update retrigger")
+        self.chk_auto_retrigger.setChecked(False)
+        self.chk_auto_retrigger.setToolTip(
+            "Automatically recalculate persistence / averaging / interpolation\n"
+            "when you zoom or scroll.  Disable on large datasets to keep the\n"
+            "app responsive.")
         ol.addWidget(self.chk_cursor_a)
         ol.addWidget(self.chk_set_t0)
         ol.addWidget(self.chk_zoom)
+        ol.addWidget(self.chk_auto_retrigger)
         layout.addWidget(opt_grp)
 
         # Trigger button + status
@@ -121,6 +129,17 @@ class TriggerPanel(QWidget):
         self.btn_next.setToolTip("Find next trigger after the last one")
         self.btn_next.clicked.connect(self._find_next)
         layout.addWidget(self.btn_next)
+
+        self.btn_retrigger_update = QPushButton("Update Retrigger")
+        self.btn_retrigger_update.setEnabled(False)
+        self.btn_retrigger_update.setToolTip(
+            "Manually recalculate persistence / averaging / interpolation\n"
+            "using the current view window and trigger settings.")
+        self.btn_retrigger_update.setStyleSheet(
+            "padding: 4px; border: 1px solid #555; border-radius: 3px;")
+        self.btn_retrigger_update.clicked.connect(
+            self.retrigger_update_requested)
+        layout.addWidget(self.btn_retrigger_update)
 
         self.lbl_status = QLabel("No trigger set")
         self.lbl_status.setStyleSheet(

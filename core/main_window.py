@@ -173,6 +173,7 @@ class MainWindow(QMainWindow):
         self._cursor_panel = CursorPanel()
         self._cursor_panel.place_cursor.connect(self._start_cursor_placement)
         self._cursor_panel.set_t0_at_a.connect(self._cursor_set_t0_at_a)
+        self._cursor_panel.jump_to_t0.connect(self._jump_to_t0)
         right_splitter.addWidget(self._cursor_panel)
 
         self._trigger_panel = TriggerPanel()
@@ -948,6 +949,13 @@ class MainWindow(QMainWindow):
             return
         self._on_trigger_set_t0(t_pos)
 
+    def _jump_to_t0(self):
+        """Center t=0 in the current viewport without changing zoom span."""
+        x0, x1 = self._plot.get_current_view_range()
+        half_span = (x1 - x0) / 2.0
+        self._plot.zoom_x_range(-half_span, half_span)
+        self._refresh_status_bar()
+
     def _on_trigger_found(self, t_pos: float):
         """Trigger located — optionally zoom context window around it."""
         trace = None
@@ -969,6 +977,11 @@ class MainWindow(QMainWindow):
 
     def _on_trigger_set_t0(self, t_pos: float):
         """Shift all trace time axes so t_pos becomes 0."""
+        x0, x1 = self._plot.get_current_view_range()
+        shifted_x0 = x0 - t_pos
+        shifted_x1 = x1 - t_pos
+        cursor_positions = dict(self._plot._cursors)
+
         for trace in self._traces:
             # Shift the stored time data
             if trace.time_data is not None:
@@ -978,8 +991,16 @@ class MainWindow(QMainWindow):
                 import numpy as np
                 trace.time_data = trace.time_axis - t_pos
             trace._computed_time = None  # invalidate cache
+
         self._plot.refresh_all()
-        self._plot.zoom_full()
+
+        for cid, pos in cursor_positions.items():
+            if pos is not None:
+                self._plot.set_cursor(cid, pos - t_pos)
+
+        self._plot.zoom_x_range(shifted_x0, shifted_x1)
+        self._plot._update_range_bar()
+        self._refresh_status_bar()
         self._status_lbl.setText(f"t=0 set to trigger at {t_pos:.6g} s")
 
     def _refresh_trigger_channels(self):

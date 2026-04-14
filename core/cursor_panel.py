@@ -69,6 +69,7 @@ class CursorPanel(QWidget):
 
     place_cursor   = pyqtSignal(int)   # emits cursor_id
     set_t0_at_a    = pyqtSignal()      # request: set time-zero at cursor A
+    jump_to_t0     = pyqtSignal()      # request: center t=0 in current viewport
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -100,6 +101,12 @@ class CursorPanel(QWidget):
         btn_t0.setStyleSheet("font-size: 9px;")
         btn_t0.clicked.connect(self.set_t0_at_a)
         ga.addWidget(btn_t0, 1, 1)
+        btn_jump_t0 = QPushButton("Jump to t=0")
+        btn_jump_t0.setToolTip(
+            "Keep the current zoom span and move t=0 to the middle of the viewport.")
+        btn_jump_t0.setStyleSheet("font-size: 9px;")
+        btn_jump_t0.clicked.connect(self.jump_to_t0)
+        ga.addWidget(btn_jump_t0, 2, 0, 1, 2)
         layout.addWidget(grp_a)
 
         # Cursor B

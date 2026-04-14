@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont, QAction
 from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
 from core.trace_model import TraceModel
 
 MAX_DISPLAY_POINTS = 50_000
@@ -159,6 +160,35 @@ class EngineeringAxisItem(pg.AxisItem):
 
 
 
+def _theme_name(theme) -> str:
+    return getattr(theme, "file_id", "dark")
+
+
+def _plot_colors_from_theme(theme) -> dict:
+    return {
+        "background": theme.pv("scope_bg"),
+        "grid":       theme.pv("scope_grid"),
+        "text":       theme.pv("text"),
+        "cursor_a":   theme.pv("cursor_a"),
+        "cursor_b":   theme.pv("cursor_b"),
+    }
+
+
+@dataclass(frozen=True)
+class TraceStyleContext:
+    theme: object
+    plot_colors: dict
+    theme_name: str
+
+
+def _style_context_from_theme(theme) -> TraceStyleContext:
+    return TraceStyleContext(
+        theme=theme,
+        plot_colors=_plot_colors_from_theme(theme),
+        theme_name=_theme_name(theme),
+    )
+
+
 def _effective_color(color: str, theme_name: str) -> str:
     """Override trace color for special themes."""
     if theme_name == "rs_green":
@@ -225,19 +255,19 @@ class TraceLane(pg.PlotWidget):
     cursor_moved = pyqtSignal(float, int)
     view_range_changed = pyqtSignal(object)  # passes self
 
-    def __init__(self, trace: TraceModel, theme_colors: dict,
-                 theme_name: str = "dark", y_lock_auto: bool = True,
+    def __init__(self, trace: TraceModel, style_context: TraceStyleContext,
+                 y_lock_auto: bool = True,
                  interp_mode: str = "linear", parent=None):
         self._y_axis = EngineeringAxisItem(orientation="left")
         self._x_axis = EngineeringTimeAxisItem(orientation="bottom")
         unit = getattr(trace, 'unit', '') or ''
         self._y_axis.set_unit(unit)
-        super().__init__(parent=parent, background=theme_colors["background"],
+        super().__init__(parent=parent,
+                         background=style_context.plot_colors["background"],
                          axisItems={"left": self._y_axis,
                                     "bottom": self._x_axis})
         self.trace = trace
-        self.theme = theme_colors
-        self.theme_name = theme_name
+        self._style_context = style_context
         self.y_lock_auto = y_lock_auto
         self.interp_mode = interp_mode   # "linear" or "sinc"
         self.viewport_min_pts = 1024      # minimum display points; set from settings
@@ -263,20 +293,39 @@ class TraceLane(pg.PlotWidget):
         pi = self.getPlotItem()
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.setMenuEnabled(False)
-        disp_color = _effective_color(self.trace.color, self.theme_name)
-        # Label shows trace name coloured; unit appears in tick strings
-        ylabel = f"<span style='color:{disp_color}'>{self.trace.label}</span>"
-        pi.setLabel("left", ylabel, color=self.theme["text"])
         pi.getAxis("left").setWidth(60)
-        for ax_name in ("left", "bottom", "top", "right"):
-            ax = pi.getAxis(ax_name)
-            ax.setPen(pg.mkPen(color=self.theme["text"], width=1))
-            ax.setTextPen(pg.mkPen(color=self.theme["text"]))
         pi.getAxis("top").setStyle(showValues=False)
         pi.getAxis("right").setStyle(showValues=False)
+        self.apply_style(self._style_context)
         self.setMouseTracking(True)
         if self.y_lock_auto:
             pi.setMouseEnabled(x=True, y=False)
+
+    def _display_color(self) -> str:
+        color = self.trace.sync_theme_color(self._style_context.theme)
+        return _effective_color(color, self._style_context.theme_name)
+
+    def apply_style(self, style_context: TraceStyleContext):
+        self._style_context = style_context
+        plot_colors = style_context.plot_colors
+        pi = self.getPlotItem()
+        self.setBackground(plot_colors["background"])
+        disp_color = self._display_color()
+        ylabel = f"<span style='color:{disp_color}'>{self.trace.label}</span>"
+        pi.setLabel("left", ylabel, color=plot_colors["text"])
+        for ax_name in ("left", "bottom", "top", "right"):
+            ax = pi.getAxis(ax_name)
+            pen = pg.mkPen(color=plot_colors["text"], width=1)
+            ax.setPen(pen)
+            ax.setTextPen(pen)
+        if self._curve is not None:
+            self._curve.setPen(pg.mkPen(color=disp_color, width=1.5))
+        self._redraw_labels()
+        self.update()
+        self.repaint()
+
+    def apply_theme(self, theme):
+        self.apply_style(_style_context_from_theme(theme))
 
     def _add_trace_curve(self):
         if self._curve is not None:
@@ -311,7 +360,7 @@ class TraceLane(pg.PlotWidget):
                 y_full = y_vis
 
         t, y = downsample_for_display(t_full, y_full)
-        color = _effective_color(self.trace.color, self.theme_name)
+        color = self._display_color()
         pen = pg.mkPen(color=color, width=1.5)
         self._curve = self.plot(t, y, pen=pen, antialias=False)
         self._curve.setDownsampling(auto=True, method="peak")
@@ -330,7 +379,7 @@ class TraceLane(pg.PlotWidget):
             y_pos = self.get_value_at(t_pos)
             if y_pos is None:
                 continue
-            color = _effective_color(self.trace.color, self.theme_name)
+            color = self._display_color()
             item = pg.TextItem(text=text, color=color, anchor=(0.5, 1.0))
             item.setPos(t_pos, y_pos)
             self.addItem(item)
@@ -403,9 +452,9 @@ class TraceLane(pg.PlotWidget):
     def _change_color(self):
         c = QColorDialog.getColor(QColor(self.trace.color), self)
         if c.isValid():
-            self.trace.color = c.name()
+            self.trace.set_user_color(c.name())
             self.refresh_curve()
-            color = _effective_color(self.trace.color, self.theme_name)
+            color = self._display_color()
             self.getPlotItem().setLabel(
                 "left",
                 f"<span style='color:{color}'>{self.trace.label}</span>")
@@ -415,7 +464,7 @@ class TraceLane(pg.PlotWidget):
             self, "Rename", "New label:", text=self.trace.label)
         if ok and text:
             self.trace.label = text
-            color = _effective_color(self.trace.color, self.theme_name)
+            color = self._display_color()
             self.getPlotItem().setLabel(
                 "left",
                 f"<span style='color:{color}'>{self.trace.label}</span>")
@@ -468,18 +517,74 @@ def _composite_branding(img: "QImage", svg_path: str) -> "QImage":
     return img
 
 
+class OverlayTraceVisual:
+    def __init__(self, plot_item, trace: TraceModel,
+                 style_context: TraceStyleContext,
+                 interp_mode: str = "linear",
+                 viewport_min_pts: int = 1024):
+        self.plot_item = plot_item
+        self.trace = trace
+        self._style_context = style_context
+        self.interp_mode = interp_mode
+        self.viewport_min_pts = viewport_min_pts
+        self.curve = self.plot_item.plot([], [], pen=pg.mkPen(width=1.5),
+                                         name=trace.label, antialias=False)
+        self.curve.setDownsampling(auto=True, method="peak")
+        self.curve.setClipToView(True)
+        self.apply_style(style_context)
+
+    def _display_color(self) -> str:
+        color = self.trace.sync_theme_color(self._style_context.theme)
+        return _effective_color(color, self._style_context.theme_name)
+
+    def apply_style(self, style_context: TraceStyleContext):
+        self._style_context = style_context
+        self.curve.setPen(pg.mkPen(color=self._display_color(), width=1.5))
+        self.curve.update()
+
+    def apply_theme(self, theme):
+        self.apply_style(_style_context_from_theme(theme))
+
+    def refresh_curve(self, view_range: Tuple[float, float]):
+        t_full = self.trace.time_axis
+        y_full = self.trace.processed_data
+        x0, x1 = view_range
+
+        if self.interp_mode in ("sinc", "cubic"):
+            mask = (t_full >= x0) & (t_full <= x1)
+            n_vis = int(mask.sum()) or len(t_full)
+            if n_vis < self.viewport_min_pts and n_vis >= 4:
+                t_s = t_full[mask] if n_vis < len(t_full) else t_full
+                y_s = y_full[mask] if n_vis < len(y_full) else y_full
+                if self.interp_mode == "cubic":
+                    t_s, y_s = cubic_interpolate_to_n(
+                        t_s, y_s, self.viewport_min_pts)
+                else:
+                    t_s, y_s = sinc_interpolate_to_n(
+                        t_s, y_s, self.viewport_min_pts)
+                t_full, y_full = t_s, y_s
+
+        t_data, y_data = downsample_for_display(t_full, y_full)
+        self.curve.setData(t_data, y_data)
+        self.curve.opts["name"] = self.trace.label
+
+    def remove(self):
+        self.plot_item.removeItem(self.curve)
+
+
 class ScopePlotWidget(QWidget):
     cursor_values_changed = pyqtSignal(dict)
 
     sinc_active_changed = pyqtSignal(bool)  # emitted when sinc kicks in/out
     view_changed        = pyqtSignal()       # emitted (throttled) on pan/zoom
 
-    def __init__(self, theme_colors: dict, theme_name: str = "dark",
-                 y_lock_auto: bool = True, interp_mode: str = "linear",
+    def __init__(self, theme_manager, y_lock_auto: bool = True,
+                 interp_mode: str = "linear",
                  viewport_min_pts: int = 1024, parent=None):
         super().__init__(parent)
-        self.theme = theme_colors
-        self.theme_name = theme_name
+        self._theme_manager = theme_manager
+        self._active_theme = theme_manager.active_theme
+        self._style_context = _style_context_from_theme(self._active_theme)
         self.y_lock_auto = y_lock_auto
         self.interp_mode = interp_mode
         self.viewport_min_pts = viewport_min_pts
@@ -489,10 +594,10 @@ class ScopePlotWidget(QWidget):
         self._mode = "split"
         self._cursors = {0: None, 1: None}
         self._cursor_colors = {
-            0: theme_colors["cursor_a"],
-            1: theme_colors["cursor_b"],
+            0: self._style_context.plot_colors["cursor_a"],
+            1: self._style_context.plot_colors["cursor_b"],
         }
-        self._overlay_curves: Dict[str, pg.PlotDataItem] = {}
+        self._overlay_visuals: Dict[str, OverlayTraceVisual] = {}
         self._overlay_z_order: List[str] = []  # for bring-to-front
 
         layout = QVBoxLayout(self)
@@ -513,7 +618,7 @@ class ScopePlotWidget(QWidget):
 
         # Overlay widget
         self._overlay_widget = pg.PlotWidget(
-            background=theme_colors["background"])
+            background=self._style_context.plot_colors["background"])
         self._overlay_widget.hide()
         layout.addWidget(self._overlay_widget)
         self._setup_overlay()
@@ -529,6 +634,7 @@ class ScopePlotWidget(QWidget):
         self._range_timer.setInterval(100)
         self._range_timer.timeout.connect(self._update_range_bar)
         self._range_timer.timeout.connect(self.view_changed)
+        self._theme_manager.themeChanged.connect(self._on_theme_changed)
 
     def _setup_overlay(self):
         # Replace default axes with engineering-unit axes
@@ -541,8 +647,9 @@ class ScopePlotWidget(QWidget):
         pi.setMenuEnabled(False)
         for ax_name in ("left", "bottom"):
             ax = pi.getAxis(ax_name)
-            ax.setPen(pg.mkPen(color=self.theme["text"], width=1))
-            ax.setTextPen(pg.mkPen(color=self.theme["text"]))
+            pen = pg.mkPen(color=self._style_context.plot_colors["text"], width=1)
+            ax.setPen(pen)
+            ax.setTextPen(pen)
         pi.addLegend(offset=(10, 10))
         pi.sigRangeChanged.connect(lambda: self._range_timer.start())
         pi.sigRangeChanged.connect(self._on_overlay_range_changed)
@@ -552,6 +659,38 @@ class ScopePlotWidget(QWidget):
             self._overlay_context_menu)
         if self.y_lock_auto:
             pi.setMouseEnabled(x=True, y=False)
+
+    def _apply_plot_theme(self, theme):
+        self._active_theme = theme
+        self._style_context = _style_context_from_theme(theme)
+        plot_colors = self._style_context.plot_colors
+        self._overlay_widget.setBackground(plot_colors["background"])
+        pi = self._overlay_widget.getPlotItem()
+        for ax_name in ("left", "bottom"):
+            ax = pi.getAxis(ax_name)
+            pen = pg.mkPen(color=plot_colors["text"], width=1)
+            ax.setPen(pen)
+            ax.setTextPen(pen)
+        self._cursor_colors = {
+            0: plot_colors["cursor_a"],
+            1: plot_colors["cursor_b"],
+        }
+
+    def _refresh_cursor_styles(self):
+        for cid, x_pos in self._cursors.items():
+            if x_pos is not None:
+                self._place_cursors(cid, x_pos)
+
+    def _on_theme_changed(self, theme):
+        self._apply_plot_theme(theme)
+        for lane in self._lanes.values():
+            lane.apply_theme(theme)
+        for visual in self._overlay_visuals.values():
+            visual.apply_theme(theme)
+        self._refresh_cursor_styles()
+        self._overlay_widget.update()
+        self.update()
+        self.repaint()
 
     def _on_overlay_range_changed(self):
         """Re-render overlay curves when zoomed in (viewport sinc)."""
@@ -667,7 +806,7 @@ class ScopePlotWidget(QWidget):
 
         first_lane = None
         for trace in visible:
-            lane = TraceLane(trace, self.theme, self.theme_name,
+            lane = TraceLane(trace, self._style_context,
                               self.y_lock_auto,
                               getattr(trace, '_interp_mode_override',
                                       self.interp_mode))
@@ -691,9 +830,9 @@ class ScopePlotWidget(QWidget):
 
     def _rebuild_overlay(self):
         pi = self._overlay_widget.getPlotItem()
-        for curve in self._overlay_curves.values():
-            pi.removeItem(curve)
-        self._overlay_curves.clear()
+        for visual in self._overlay_visuals.values():
+            visual.remove()
+        self._overlay_visuals.clear()
 
         visible = [t for t in self.traces if t.visible]
         self._overlay_z_order = [t.name for t in visible]
@@ -707,32 +846,12 @@ class ScopePlotWidget(QWidget):
         self._ov_y_axis.set_unit(unit)
 
         for trace in visible:
-            t_full = trace.time_axis
-            y_full = trace.processed_data
             mode = getattr(trace, '_interp_mode_override',
                            self.interp_mode)
-
-            if mode in ("sinc", "cubic"):
-                mask = (t_full >= x0) & (t_full <= x1)
-                n_vis = int(mask.sum()) or len(t_full)
-                if n_vis < self.viewport_min_pts and n_vis >= 4:
-                    t_s = t_full[mask] if n_vis < len(t_full) else t_full
-                    y_s = y_full[mask] if n_vis < len(y_full) else y_full
-                    if mode == "cubic":
-                        t_s, y_s = cubic_interpolate_to_n(
-                            t_s, y_s, self.viewport_min_pts)
-                    else:
-                        t_s, y_s = sinc_interpolate_to_n(
-                            t_s, y_s, self.viewport_min_pts)
-                    t_full, y_full = t_s, y_s
-            t_data, y_data = downsample_for_display(t_full, y_full)
-            color = _effective_color(trace.color, self.theme_name)
-            pen = pg.mkPen(color=color, width=1.5)
-            curve = pi.plot(t_data, y_data, pen=pen,
-                            name=trace.label, antialias=False)
-            curve.setDownsampling(auto=True, method="peak")
-            curve.setClipToView(True)
-            self._overlay_curves[trace.name] = curve
+            visual = OverlayTraceVisual(
+                pi, trace, self._style_context, mode, self.viewport_min_pts)
+            visual.refresh_curve((x0, x1))
+            self._overlay_visuals[trace.name] = visual
 
         if self.y_lock_auto:
             pi.enableAutoRange(axis="y")
@@ -748,8 +867,8 @@ class ScopePlotWidget(QWidget):
         """Move a trace curve to the top of the overlay z-order."""
         if self._mode != "overlay":
             return
-        curve = self._overlay_curves.get(trace_name)
-        if curve:
+        if trace_name in self._overlay_visuals:
+            curve = self._overlay_visuals[trace_name].curve
             pi = self._overlay_widget.getPlotItem()
             pi.removeItem(curve)
             pi.addItem(curve)
@@ -763,7 +882,6 @@ class ScopePlotWidget(QWidget):
             for name in self._overlay_z_order:
                 trace = next((t for t in self.traces if t.name == name), None)
                 if trace:
-                    color = _effective_color(trace.color, self.theme_name)
                     act = QAction(
                         f"● {trace.label}", self._overlay_widget)
                     act.setData(name)

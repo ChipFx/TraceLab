@@ -65,7 +65,7 @@ class ChannelRow(QWidget):
     def _pick_color(self):
         c = QColorDialog.getColor(QColor(self.trace.color), self)
         if c.isValid():
-            self.trace.color = c.name()
+            self.trace.set_user_color(c.name())
             self._update_color_btn()
             self.lbl.setStyleSheet(f"color: {self.trace.color};")
             self.color_changed.emit(self.trace.name, self.trace.color)

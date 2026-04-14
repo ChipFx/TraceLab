@@ -116,10 +116,9 @@ class MainWindow(QMainWindow):
         self._channel_panel.reset_color_requested.connect(self._on_reset_trace_color)
         self._splitter.addWidget(self._channel_panel)
 
-        plot_colors = self.theme.plot_colors()
         self._interp_mode = self._settings.get("interp_mode", "linear")
         self._plot = ScopePlotWidget(
-            plot_colors, self.theme.theme_name, self._y_lock_auto,
+            self.theme, self._y_lock_auto,
             self._interp_mode, self._viewport_min_pts)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
@@ -442,9 +441,10 @@ class MainWindow(QMainWindow):
         existing_names = [t.name for t in self._traces]
         if trace.name in existing_names:
             idx = existing_names.index(trace.name)
-            # Preserve color from old trace
-            old_color = self._traces[idx].color
-            trace.color = old_color
+            old_trace = self._traces[idx]
+            trace.color = old_trace.color
+            trace.theme_color_index = old_trace.theme_color_index
+            trace.use_theme_color = old_trace.use_theme_color
             self._traces[idx] = trace
             self._channel_panel.refresh_all()
             self._plot.add_trace(trace)  # add_trace handles overwrite
@@ -452,7 +452,8 @@ class MainWindow(QMainWindow):
 
         # Assign color from active theme via ThemeManager
         n = len(self._traces)
-        trace.color = self.theme.trace_color(n)
+        trace.reset_color_to_theme(n)
+        trace.sync_theme_color(self.theme.active_theme)
 
         self._traces.append(trace)
         self._channel_panel.add_trace(trace)
@@ -595,13 +596,11 @@ class MainWindow(QMainWindow):
         scale = self._settings.get("font_scale", 1.0)
         QApplication.instance().setStyleSheet(
             self.theme.get_stylesheet(font_scale=scale))
-        new_colors = self.theme.plot_colors()
-        self._plot.theme = new_colors
-        self._plot.theme_name = file_id
-        self._plot._rebuild()
+        self._channel_panel.refresh_all()
         if hasattr(self, '_scope_status'):
             self._scope_status.set_palette(self.theme.statusbar_palette())
             self._scope_status.set_branding(self._get_branding_path())
+        self._refresh_status_bar()
         if save:
             self._settings["theme"] = file_id
 
@@ -1124,10 +1123,10 @@ class MainWindow(QMainWindow):
         """Reset a single trace to its theme-default colour."""
         idx = next((i for i, t in enumerate(self._traces)
                     if t.name == trace_name), 0)
-        color = self.theme.trace_color(idx)
         for trace in self._traces:
             if trace.name == trace_name:
-                trace.color = color
+                trace.reset_color_to_theme(idx)
+                trace.sync_theme_color(self.theme.active_theme)
                 break
         self._channel_panel.refresh_all()
         self._plot.refresh_all()

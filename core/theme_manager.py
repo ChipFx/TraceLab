@@ -25,6 +25,7 @@ Consumers call:
 import json
 import os
 from typing import Dict, List, Optional
+from PyQt6.QtCore import QObject, pyqtSignal
 
 THEMES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "themes")
 
@@ -106,13 +107,16 @@ class ThemeData:
             json.dump(self.to_json(), f, indent=2)
 
 
-class ThemeManager:
+class ThemeManager(QObject):
     """
     Single source of truth for application theming.
     Discovers themes from THEMES_DIR at construction.
     """
 
+    themeChanged = pyqtSignal(object)
+
     def __init__(self, active_id: str = "dark"):
+        super().__init__()
         self._themes: Dict[str, ThemeData] = {}
         self._active: ThemeData = ThemeData.__new__(ThemeData)
         # Bootstrap fallback theme (no file needed)
@@ -152,18 +156,22 @@ class ThemeManager:
     # ── Theme switching ───────────────────────────────────────────────────────
 
     def set_theme(self, file_id: str) -> bool:
+        changed = False
         if file_id in self._themes:
             self._active = self._themes[file_id]
-            return True
+            changed = True
         # Try by display name (for backwards compat with settings.json)
-        for td in self._themes.values():
-            if td.name.lower() == file_id.lower():
-                self._active = td
-                return True
+        if not changed:
+            for td in self._themes.values():
+                if td.name.lower() == file_id.lower():
+                    self._active = td
+                    changed = True
+                    break
         # Fall back to first available theme
-        if self._themes:
+        if not changed and self._themes:
             self._active = next(iter(self._themes.values()))
-        return False
+        self.themeChanged.emit(self._active)
+        return changed
 
     @property
     def theme_name(self) -> str:
@@ -173,6 +181,10 @@ class ThemeManager:
     @property
     def display_name(self) -> str:
         return self._active.name
+
+    @property
+    def active_theme(self) -> ThemeData:
+        return self._active
 
     @property
     def available_themes(self) -> Dict[str, ThemeData]:

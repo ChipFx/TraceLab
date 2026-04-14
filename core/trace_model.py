@@ -63,6 +63,8 @@ class TraceModel:
     visible: bool = True
     label: str = ""
     unit: str = "V"
+    theme_color_index: int = 0
+    use_theme_color: bool = True
 
     scaling: ScalingConfig = field(default_factory=ScalingConfig)
 
@@ -96,6 +98,20 @@ class TraceModel:
     def _invalidate_cache(self):
         self._processed_data = None
         self._computed_time = None
+
+    def set_user_color(self, color: str):
+        self.color = color
+        self.use_theme_color = False
+
+    def reset_color_to_theme(self, index: Optional[int] = None):
+        if index is not None:
+            self.theme_color_index = index
+        self.use_theme_color = True
+
+    def sync_theme_color(self, theme) -> str:
+        if self.use_theme_color:
+            self.color = theme.trace_color(self.theme_color_index)
+        return self.color
 
     @property
     def processed_data(self) -> np.ndarray:

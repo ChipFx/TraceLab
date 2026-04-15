@@ -109,6 +109,11 @@ class FFTDialog(QDialog):
         self._freqs:  Optional[np.ndarray] = None
         self._mag_db: Optional[np.ndarray] = None
 
+        # Axis units — not hardcoded; updated by _compute so export stays correct
+        # if future modes change what the axes represent (e.g. dBm, linear V …)
+        self._freq_unit: str = "Hz"
+        self._ampl_unit: str = "dBFS"
+
         # Cursor state — actual frequencies (not log)
         self._cursor_freq: dict = {0: None, 1: None}
         self._cursor_lines: dict = {}   # cursor_id -> InfiniteLine
@@ -228,6 +233,14 @@ class FFTDialog(QDialog):
             "Automatically fit the Y axis after each Compute")
         tool.addWidget(self.chk_auto_y)
 
+        tool.addWidget(self._vsep())
+
+        btn_export = QPushButton("Export ▾")
+        btn_export.setToolTip("Export FFT data as CSV or save a screenshot")
+        btn_export.clicked.connect(self._show_export_menu)
+        tool.addWidget(btn_export)
+        self._btn_export = btn_export
+
         tool.addStretch()
         root.addLayout(tool)
 
@@ -235,8 +248,8 @@ class FFTDialog(QDialog):
         self.plot = pg.PlotWidget(background="#050508")
         pi = self.plot.getPlotItem()
         pi.setMenuEnabled(False)   # suppress pyqtgraph's built-in export menu
-        pi.setLabel("bottom", "Frequency (Hz)")
-        pi.setLabel("left", "Magnitude (dBFS)")
+        pi.setLabel("bottom", f"Frequency ({self._freq_unit})")
+        pi.setLabel("left",   f"Magnitude ({self._ampl_unit})")
         pi.showGrid(x=True, y=True, alpha=0.3)
         pi.setLogMode(x=True, y=False)
         for ax_name in ("left", "bottom"):
@@ -279,6 +292,9 @@ class FFTDialog(QDialog):
         self._peak_markers.clear()
         pi.clear()
         self.plot.addLegend()
+        # Keep axis labels in sync with current units
+        pi.setLabel("bottom", f"Frequency ({self._freq_unit})")
+        pi.setLabel("left",   f"Magnitude ({self._ampl_unit})")
 
         trace_name = self.combo_trace.currentData()
         window_name = self.combo_window.currentText()
@@ -474,6 +490,58 @@ class FFTDialog(QDialog):
             except Exception:
                 pass
         self._peak_markers.clear()
+
+    # ── Export ────────────────────────────────────────────────────────────────
+
+    def _show_export_menu(self):
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+        menu = QMenu(self)
+        act_csv = QAction("Export as CSV…", self)
+        act_csv.triggered.connect(self._export_csv)
+        menu.addAction(act_csv)
+        act_png = QAction("Save Screenshot…", self)
+        act_png.triggered.connect(self._export_screenshot)
+        menu.addAction(act_png)
+        menu.exec(self._btn_export.mapToGlobal(
+            self._btn_export.rect().bottomLeft()))
+
+    def _export_csv(self):
+        if self._freqs is None or self._mag_db is None:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Export", "No FFT data to export.")
+            return
+        from PyQt6.QtWidgets import QFileDialog
+        import os
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export FFT as CSV", "",
+            "CSV Files (*.csv);;All Files (*)")
+        if not path:
+            return
+        freq_hdr = f"Freq ({self._freq_unit})"
+        ampl_hdr = f"Ampl ({self._ampl_unit})"
+        lines = [f"{freq_hdr},{ampl_hdr}"]
+        for f, a in zip(self._freqs, self._mag_db):
+            lines.append(f"{f:.10g},{a:.10g}")
+        try:
+            with open(path, "w") as fh:
+                fh.write("\n".join(lines))
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Export Error", str(e))
+
+    def _export_screenshot(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save FFT Screenshot", "",
+            "PNG Images (*.png);;All Files (*)")
+        if not path:
+            return
+        px = self.plot.grab()
+        if not px.save(path):
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Screenshot Error",
+                                 f"Could not save image to:\n{path}")
 
     # ── View controls ─────────────────────────────────────────────────────────
 

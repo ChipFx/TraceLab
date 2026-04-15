@@ -49,10 +49,6 @@
   "interpolation": {
     "count": 20
   },
-<<<<<<< HEAD
-  "auto_retrigger": true
-=======
   "auto_retrigger": true,
   "fft_marker_bg_opacity": 0.6
->>>>>>> master
 }

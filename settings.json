@@ -3,7 +3,7 @@
   "geometry": "01d9d0cb000300000000025b0000001b00000712000004060000025b0000003a000007120000040600000000000000000f000000025b0000003a0000071200000406",
   "import_replace": true,
   "import_reset_view": true,
-  "fft_min_freq": 50000.0,
+  "fft_min_freq": 50.0,
   "y_lock_auto": true,
   "font_scale": 1.2500000000000002,
   "trace_colors": [
@@ -49,5 +49,6 @@
   "interpolation": {
     "count": 20
   },
-  "auto_retrigger": true
+  "auto_retrigger": true,
+  "fft_marker_bg_opacity": 0.6
 }

@@ -623,14 +623,6 @@ class FFTDialog(QDialog):
 
         group: dict = {"items": []}
 
-        # ── Peak dot ──────────────────────────────────────────────────────────
-        dot = self.plot.plot(
-            [log_f], [a],
-            pen=None, symbol='o', symbolSize=5,
-            symbolBrush=pg.mkBrush(_PEAK_COLOR),
-            symbolPen=pg.mkPen(color=_PEAK_COLOR, width=1))
-        group["items"].append(dot)
-
         # ── Label with filled background ───────────────────────────────────────
         # anchor=(0.5, 1.0): bottom-centre of text sits at (log_f, y_bot)
         bg_color = QColor(_FFT_PLOT_BG)

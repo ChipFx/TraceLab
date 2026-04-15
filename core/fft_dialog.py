@@ -537,7 +537,7 @@ class FFTDialog(QDialog):
             "PNG Images (*.png);;All Files (*)")
         if not path:
             return
-        px = self.plot.grab()
+        px = self.grab()   # includes control bars + plot + cursor readout
         if not px.save(path):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Screenshot Error",

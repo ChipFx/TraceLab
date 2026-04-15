@@ -198,6 +198,20 @@ class FFTDialog(QDialog):
         ctrl.addWidget(self.spin_min_freq)
         ctrl.addSpacing(8)
 
+        ctrl.addWidget(QLabel("Min prominence (dB):"))
+        self.spin_prominence = QDoubleSpinBox()
+        self.spin_prominence.setRange(0.5, 60.0)
+        self.spin_prominence.setDecimals(1)
+        self.spin_prominence.setSingleStep(1.0)
+        self.spin_prominence.setValue(
+            float(self._settings.get("fft_peak_prominence", 3.0)))
+        self.spin_prominence.setFixedWidth(70)
+        self.spin_prominence.setToolTip(
+            "Minimum peak prominence in dB for 'Mark Top N' and cursor snap.\n"
+            "Lower = more peaks found; raise to suppress noise peaks.")
+        ctrl.addWidget(self.spin_prominence)
+        ctrl.addSpacing(8)
+
         btn_compute = QPushButton("Compute FFT")
         btn_compute.clicked.connect(self._compute)
         btn_compute.setStyleSheet(
@@ -320,6 +334,16 @@ class FFTDialog(QDialog):
             "border-top: 1px solid #333;")
         self._lbl_readout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._lbl_readout)
+
+        # ── Out-of-view peaks warning ─────────────────────────────────────────
+        self._lbl_hidden_peaks = QLabel()
+        self._lbl_hidden_peaks.setStyleSheet(
+            "color: #ff6666; background: #3a0000; font-size: 10pt; "
+            "font-weight: bold; padding: 6px 8px; "
+            "border-top: 2px solid #993333;")
+        self._lbl_hidden_peaks.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_hidden_peaks.setVisible(False)
+        root.addWidget(self._lbl_hidden_peaks)
 
     @staticmethod
     def _vsep() -> QFrame:
@@ -510,7 +534,8 @@ class FFTDialog(QDialog):
     def _get_peaks(self) -> np.ndarray:
         if self._mag_db is None:
             return np.array([], dtype=int)
-        return _find_fft_peaks(self._mag_db)
+        return _find_fft_peaks(self._mag_db,
+                               min_prominence=self.spin_prominence.value())
 
     def _snap_to_nearest_peak(self, freq: float, peaks: np.ndarray,
                                snap_frac: float = 0.05
@@ -552,21 +577,52 @@ class FFTDialog(QDialog):
 
     def _mark_peaks(self):
         self._clear_markers()
+        self._lbl_hidden_peaks.setVisible(False)
         if self._freqs is None or self._mag_db is None:
             return
         peaks = self._get_peaks()
         if not len(peaks):
             return
-        # Select top-N by amplitude, then sort left-to-right for layout
-        n = min(_N_MARK_PEAKS, len(peaks))
-        top_idx   = np.argsort(self._mag_db[peaks])[-n:]
-        top_peaks = peaks[top_idx]
-        top_peaks = top_peaks[np.argsort(self._freqs[top_peaks])]  # L→R
+
+        # Split all peaks into visible vs. outside current view (log10 space)
+        xr = self.plot.getPlotItem().viewRange()[0]   # [log10_lo, log10_hi]
+        log_freqs = np.log10(self._freqs[peaks])
+        in_view  = (log_freqs >= xr[0]) & (log_freqs <= xr[1])
+
+        vis_peaks = peaks[in_view]
+        out_peaks = peaks[~in_view]
+
+        # Select top-N from the visible peaks and mark them all
+        if not len(vis_peaks):
+            return
+        n = min(_N_MARK_PEAKS, len(vis_peaks))
+        top_idx   = np.argsort(self._mag_db[vis_peaks])[-n:]
+        top_peaks = vis_peaks[top_idx]
+
+        # Banner: warn if any hidden peak is louder than the quietest marked peak
+        if len(out_peaks):
+            min_marked_db = float(self._mag_db[top_peaks].min())
+            max_hidden_db = float(self._mag_db[out_peaks].max())
+            if max_hidden_db > min_marked_db:
+                n_louder = int((self._mag_db[out_peaks] > min_marked_db).sum())
+                self._lbl_hidden_peaks.setText(
+                    f"⚠  {n_louder} peak{'s' if n_louder != 1 else ''} outside "
+                    f"the current view "
+                    f"{'are' if n_louder != 1 else 'is'} louder than the marked peaks "
+                    f"— zoom out to see {'them' if n_louder != 1 else 'it'}")
+                self._lbl_hidden_peaks.setVisible(True)
+
+        # Place markers sorted left-to-right for layout
+        top_peaks = top_peaks[np.argsort(self._freqs[top_peaks])]
         for idx in top_peaks:
             self._place_single_marker(
                 float(self._freqs[idx]), float(self._mag_db[idx]))
 
+        # Expand Y range to include all label tops
+        self._fit_amplitude()
+
     def _clear_markers(self):
+        self._lbl_hidden_peaks.setVisible(False)
         for group in self._marker_groups:
             for item in group.get("items", []):
                 try:
@@ -730,7 +786,14 @@ class FFTDialog(QDialog):
                 vis = self._mag_db[mask]
                 rng = vis.max() - vis.min()
                 pad = max(rng * 0.06, 3.0)
-                pi.setYRange(vis.min() - pad, vis.max() + pad, padding=0)
+                y_min = vis.min() - pad
+                y_max = vis.max() + pad
+                # Expand upward to include any marker labels that stack above the data
+                if self._marker_boxes:
+                    label_tops = [y_bot + lh
+                                  for (_, y_bot, _, lh) in self._marker_boxes]
+                    y_max = max(y_max, max(label_tops) + pad * 0.5)
+                pi.setYRange(y_min, y_max, padding=0)
                 return
         except Exception:
             pass

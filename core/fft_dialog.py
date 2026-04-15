@@ -118,8 +118,12 @@ class FFTDialog(QDialog):
         self._cursor_freq: dict = {0: None, 1: None}
         self._cursor_lines: dict = {}   # cursor_id -> InfiniteLine
 
-        # Peak markers (list of plot items)
+        # Peak markers (plot items) + bounding boxes for overlap avoidance
         self._peak_markers: list = []
+        self._marker_boxes: list = []    # [(log_f, y_bot, w_data, h_data), …]
+
+        # "Add Marker" interactive placement mode
+        self._marker_placement_mode: bool = False
 
         self._build_ui()
         self._compute()
@@ -213,6 +217,13 @@ class FFTDialog(QDialog):
         btn_mark.setToolTip("Mark the highest amplitude peaks on the plot")
         btn_mark.clicked.connect(self._mark_peaks)
         tool.addWidget(btn_mark)
+        self.btn_add_marker = QPushButton("Add Marker")
+        self.btn_add_marker.setCheckable(True)
+        self.btn_add_marker.setToolTip(
+            "Click anywhere on the FFT trace to place a manual marker.\n"
+            "Click this button again to stop adding markers.")
+        self.btn_add_marker.toggled.connect(self._on_add_marker_toggled)
+        tool.addWidget(self.btn_add_marker)
         btn_clear = QPushButton("Clear Markers")
         btn_clear.clicked.connect(self._clear_markers)
         tool.addWidget(btn_clear)
@@ -344,6 +355,11 @@ class FFTDialog(QDialog):
         if self.chk_auto_y.isChecked() and self._mag_db is not None:
             self._fit_amplitude()
 
+    def _on_add_marker_toggled(self, active: bool):
+        self._marker_placement_mode = active
+        self.plot.setCursor(Qt.CursorShape.CrossCursor if active
+                            else Qt.CursorShape.ArrowCursor)
+
     def _on_plot_clicked(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
@@ -355,6 +371,14 @@ class FFTDialog(QDialog):
         # In log-x mode the view-box X coordinate is log10(freq)
         freq = 10.0 ** mouse_pt.x()
         if self._freqs is None or not (self._freqs[0] <= freq <= self._freqs[-1]):
+            return
+        # Marker placement mode: snap to nearest FFT point and add marker
+        if self._marker_placement_mode:
+            idx = int(np.clip(np.searchsorted(self._freqs, freq),
+                              0, len(self._freqs) - 1))
+            self._place_single_marker(
+                float(self._freqs[idx]), float(self._mag_db[idx]))
+            event.accept()
             return
         # Shift+click → cursor B; plain click → cursor A
         cid = 1 if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) else 0
@@ -465,23 +489,14 @@ class FFTDialog(QDialog):
         peaks = self._get_peaks()
         if not len(peaks):
             return
-        # Take top-N by amplitude
+        # Select top-N by amplitude, then sort left-to-right for layout
         n = min(_N_MARK_PEAKS, len(peaks))
-        top_idx = np.argsort(self._mag_db[peaks])[-n:][::-1]
-        for idx in peaks[top_idx]:
-            f = float(self._freqs[idx])
-            a = float(self._mag_db[idx])
-            log_f = np.log10(f)
-            line = pg.InfiniteLine(
-                pos=log_f, angle=90,
-                pen=pg.mkPen(color=_PEAK_COLOR, width=1,
-                              style=Qt.PenStyle.DotLine))
-            self.plot.addItem(line)
-            txt = pg.TextItem(
-                text=_fmt_freq(f), color=_PEAK_COLOR, anchor=(0.5, 1.15))
-            txt.setPos(log_f, a)
-            self.plot.addItem(txt)
-            self._peak_markers.extend([line, txt])
+        top_idx   = np.argsort(self._mag_db[peaks])[-n:]
+        top_peaks = peaks[top_idx]
+        top_peaks = top_peaks[np.argsort(self._freqs[top_peaks])]  # L→R
+        for idx in top_peaks:
+            self._place_single_marker(
+                float(self._freqs[idx]), float(self._mag_db[idx]))
 
     def _clear_markers(self):
         for item in self._peak_markers:
@@ -490,6 +505,76 @@ class FFTDialog(QDialog):
             except Exception:
                 pass
         self._peak_markers.clear()
+        self._marker_boxes.clear()
+
+    # ── Smart marker placement ────────────────────────────────────────────────
+
+    def _label_size_data(self) -> tuple:
+        """Estimate label width and height in current data (log-f, dB) units."""
+        pi = self.plot.getPlotItem()
+        xr = pi.viewRange()[0]
+        yr = pi.viewRange()[1]
+        # Subtract rough axis margins so estimate matches the actual plot area
+        w_px = max(1, self.plot.width()  - 80)
+        h_px = max(1, self.plot.height() - 40)
+        x_per_px = (xr[1] - xr[0]) / w_px
+        y_per_px = (yr[1] - yr[0]) / h_px
+        # "−23.4 dBFS @ 1.23 kHz" → ~160 px wide, ~16 px tall
+        return 160 * x_per_px, 16 * y_per_px
+
+    def _label_overlaps(self, log_f: float, y_bot: float,
+                        lw: float, lh: float) -> bool:
+        """True if a proposed label box overlaps any already-placed box."""
+        y_top = y_bot + lh
+        for (px, py_bot, pw, ph) in self._marker_boxes:
+            py_top = py_bot + ph
+            if (abs(log_f - px) < (lw + pw) / 2 and
+                    y_bot < py_top and y_top > py_bot):
+                return True
+        return False
+
+    def _find_label_y(self, log_f: float, peak_amp: float,
+                      lw: float, lh: float) -> float:
+        """Return lowest Y (bottom of label) above peak_amp that doesn't overlap."""
+        gap  = lh * 0.4        # breathing room between peak dot and label bottom
+        y    = peak_amp + gap
+        step = lh * 1.15
+        for _ in range(40):    # up to 40 slots before giving up
+            if not self._label_overlaps(log_f, y, lw, lh):
+                return y
+            y += step
+        return y
+
+    def _place_single_marker(self, f: float, a: float):
+        """Place one smart marker (leader line + dot + label) for freq f, amp a."""
+        log_f = np.log10(f)
+        text  = f"{_fmt_db(a)} @ {_fmt_freq(f)}"
+        lw, lh = self._label_size_data()
+        y_bot  = self._find_label_y(log_f, a, lw, lh)
+
+        # ── Leader line (peak → label bottom) ─────────────────────────────────
+        leader = self.plot.plot(
+            [log_f, log_f], [a, y_bot],
+            pen=pg.mkPen(color=_PEAK_COLOR, width=0.8))
+        self._peak_markers.append(leader)
+
+        # ── Peak dot ──────────────────────────────────────────────────────────
+        dot = self.plot.plot(
+            [log_f], [a],
+            pen=None, symbol='o', symbolSize=5,
+            symbolBrush=pg.mkBrush(_PEAK_COLOR),
+            symbolPen=pg.mkPen(color=_PEAK_COLOR, width=1))
+        self._peak_markers.append(dot)
+
+        # ── Label at top of leader line ────────────────────────────────────────
+        # anchor=(0.5, 1.0): bottom-centre of text sits at (log_f, y_bot)
+        txt = pg.TextItem(text=text, color=_PEAK_COLOR, anchor=(0.5, 1.0))
+        txt.setPos(log_f, y_bot)
+        self.plot.addItem(txt)
+        self._peak_markers.append(txt)
+
+        # Record bounding box so the next marker avoids this one
+        self._marker_boxes.append((log_f, y_bot, lw, lh))
 
     # ── Export ────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb0003000000000501000000f80000099a000004a200000501000001170000099a000004a200000000000000000f0000000501000001170000099a000004a2",
+  "geometry": "01d9d0cb000300000000025b0000001b00000d29000005580000025b0000003a00000d290000055800000000000000000f000000025b0000003a00000d2900000558",
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 40.0,
@@ -21,18 +21,33 @@
   "color_overrides": {},
   "max_display_points": 50000,
   "default_sample_rate": 1000,
-  "last_open_folder": "./",
+  "last_open_folder": "E:\\CubIQ\\902. Testing\\2026-04-14 - Optical Signal\\_Plots",
   "last_save_folder": "./",
   "remember_folder": true,
   "interp_mode": "linear",
   "draw_mode": "Clear",
   "density_pen_mapping": {
     "min_width": 0.8,
-    "max_width": 3.5,
-    "response_curve": 0.45
+    "max_width": 3.0,
+    "response_curve": 0.41
   },
   "viewport_min_pts": 2048,
   "last_gain": "2.048/4096",
   "last_offset": "-1.024",
-  "last_unit": "V"
+  "last_unit": "V",
+  "retrigger_mode": "future",
+  "persistence": {
+    "count": 10,
+    "selection": "first",
+    "emphasis": "first",
+    "opacity_decay": 0.7,
+    "width_growth": 1.4
+  },
+  "averaging": {
+    "count": 20
+  },
+  "interpolation": {
+    "count": 20
+  },
+  "auto_retrigger": true
 }

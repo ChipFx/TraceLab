@@ -604,6 +604,17 @@ class ImportDialog(QDialog):
         if use_time_col and time_col_name:
             time_data = self.load_result.columns.get(time_col_name)
 
+        # When a time column is present, derive sps/dt from the actual sample
+        # spacing in that column.  The spin-box values are meaningless for
+        # FFT frequency scaling when real timestamps are available.
+        if time_data is not None and len(time_data) >= 2:
+            _td = time_data[:min(500, len(time_data))].astype(float)
+            _dts = np.diff(_td)
+            _pos = _dts[_dts > 0]
+            if len(_pos):
+                dt  = float(np.median(_pos))
+                sps = 1.0 / dt
+
         # Time zero offset
         t0_sample = int(self.edit_t0_sample.get_value(0))
         t0_time   = self.edit_t0_time.get_value(0.0)

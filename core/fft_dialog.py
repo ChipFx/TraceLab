@@ -251,6 +251,9 @@ class FFTDialog(QDialog):
         # Mouse click to place cursors
         self.plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
 
+        # Auto-Y: refit amplitude whenever the frequency (X) range changes
+        pi.sigRangeChanged.connect(self._on_range_changed)
+
         # ── Cursor readout bar ────────────────────────────────────────────────
         self._lbl_readout = QLabel(
             "Click on plot to place Cursor A  |  Shift+click to place Cursor B")
@@ -317,6 +320,13 @@ class FFTDialog(QDialog):
             pi.enableAutoRange(axis="x")
 
     # ── Cursor placement ──────────────────────────────────────────────────────
+
+    def _on_range_changed(self, _view, ranges):
+        """Called whenever the plot view range changes (pan / zoom)."""
+        # Only refit Y when the X range changed and Auto Y is active.
+        # ranges is [[x0,x1],[y0,y1]]; skip if only Y moved to avoid loops.
+        if self.chk_auto_y.isChecked() and self._mag_db is not None:
+            self._fit_amplitude()
 
     def _on_plot_clicked(self, event):
         if event.button() != Qt.MouseButton.LeftButton:

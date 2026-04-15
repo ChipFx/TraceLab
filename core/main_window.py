@@ -937,7 +937,8 @@ class MainWindow(QMainWindow):
         from core.fft_dialog import FFTDialog
         vr = self._plot.get_current_view_range()
         dlg = FFTDialog(self._traces, view_range=vr,
-                         fft_min_freq=self._fft_min_freq, parent=self)
+                         fft_min_freq=self._fft_min_freq,
+                         settings=self._settings, parent=self)
         dlg.exec()
         self._fft_min_freq = dlg.spin_min_freq.value()
         self._settings["fft_min_freq"] = self._fft_min_freq

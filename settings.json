@@ -1,9 +1,9 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb000300000000025b0000001b00000d29000005580000025b0000003a00000d290000055800000000000000000f000000025b0000003a00000d2900000558",
+  "geometry": "01d9d0cb000300000000025b0000001b00000712000004060000025b0000003a000007120000040600000000000000000f000000025b0000003a0000071200000406",
   "import_replace": true,
   "import_reset_view": true,
-  "fft_min_freq": 40.0,
+  "fft_min_freq": 50000.0,
   "y_lock_auto": true,
   "font_scale": 1.2500000000000002,
   "trace_colors": [
@@ -21,7 +21,7 @@
   "color_overrides": {},
   "max_display_points": 50000,
   "default_sample_rate": 1000,
-  "last_open_folder": "E:\\CubIQ\\902. Testing\\2026-04-14 - Optical Signal\\_Plots",
+  "last_open_folder": "./",
   "last_save_folder": "./",
   "remember_folder": true,
   "interp_mode": "linear",

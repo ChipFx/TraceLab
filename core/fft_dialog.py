@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QFrame, QCheckBox, QSizePolicy
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 import pyqtgraph as pg
 from pyqtgraph import InfiniteLine
 from typing import List, Optional, Tuple
@@ -91,17 +92,39 @@ def _fmt_db(v: float) -> str:
     return f"{v:.2f} dBFS"
 
 
+# ── Clickable TextItem for per-marker delete ───────────────────────────────────
+
+class ClickableMarkerText(pg.TextItem):
+    """TextItem that fires a callback when left-clicked — used for marker delete."""
+    def __init__(self, *args, on_click=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_click = on_click
+
+    def mouseClickEvent(self, ev):
+        if (self._on_click is not None
+                and ev.button() == Qt.MouseButton.LeftButton):
+            self._on_click()
+            ev.accept()
+        else:
+            ev.ignore()
+
+
 # ── Dialog ────────────────────────────────────────────────────────────────────
+
+_FFT_PLOT_BG = "#050508"   # background of the FFT plot widget
+
 
 class FFTDialog(QDialog):
     def __init__(self, traces: List[TraceModel],
                  view_range: Optional[Tuple] = None,
                  fft_min_freq: float = 1.0,
+                 settings: dict = None,
                  parent=None):
         super().__init__(parent)
         self.traces = [t for t in traces if t.visible]
         self.view_range = view_range
         self.fft_min_freq = fft_min_freq
+        self._settings = settings or {}
         self.setWindowTitle("FFT Analysis")
         self.resize(1140, 680)
 
@@ -114,13 +137,18 @@ class FFTDialog(QDialog):
         self._freq_unit: str = "Hz"
         self._ampl_unit: str = "dBFS"
 
+        # Marker label background opacity (settable via settings.json)
+        self._marker_bg_opacity: float = float(
+            self._settings.get("fft_marker_bg_opacity", 0.60))
+
         # Cursor state — actual frequencies (not log)
         self._cursor_freq: dict = {0: None, 1: None}
         self._cursor_lines: dict = {}   # cursor_id -> InfiniteLine
 
-        # Peak markers (plot items) + bounding boxes for overlap avoidance
-        self._peak_markers: list = []
-        self._marker_boxes: list = []    # [(log_f, y_bot, w_data, h_data), …]
+        # Marker groups: each entry is {"items": [dot, txt], "box": (…)}
+        # _marker_boxes mirrors the index of _marker_groups for overlap checks.
+        self._marker_groups: list = []
+        self._marker_boxes:  list = []   # [(log_f, y_bot, w_data, h_data), …]
 
         # "Add Marker" interactive placement mode
         self._marker_placement_mode: bool = False
@@ -224,6 +252,12 @@ class FFTDialog(QDialog):
             "Click this button again to stop adding markers.")
         self.btn_add_marker.toggled.connect(self._on_add_marker_toggled)
         tool.addWidget(self.btn_add_marker)
+        self.chk_snap_peak = QCheckBox("Snap to peak")
+        self.chk_snap_peak.setChecked(True)
+        self.chk_snap_peak.setToolTip(
+            "When placing a manual marker, snap to the nearest FFT peak\n"
+            "if one exists within ~5% of the view width in log space.")
+        tool.addWidget(self.chk_snap_peak)
         btn_clear = QPushButton("Clear Markers")
         btn_clear.clicked.connect(self._clear_markers)
         tool.addWidget(btn_clear)
@@ -300,7 +334,8 @@ class FFTDialog(QDialog):
         pi = self.plot.getPlotItem()
         # pi.clear() removes all items — clear stale references before it
         self._cursor_lines.clear()
-        self._peak_markers.clear()
+        self._marker_groups.clear()
+        self._marker_boxes.clear()
         pi.clear()
         self.plot.addLegend()
         # Keep axis labels in sync with current units
@@ -372,12 +407,22 @@ class FFTDialog(QDialog):
         freq = 10.0 ** mouse_pt.x()
         if self._freqs is None or not (self._freqs[0] <= freq <= self._freqs[-1]):
             return
-        # Marker placement mode: snap to nearest FFT point and add marker
+        # Marker placement mode
         if self._marker_placement_mode:
-            idx = int(np.clip(np.searchsorted(self._freqs, freq),
-                              0, len(self._freqs) - 1))
-            self._place_single_marker(
-                float(self._freqs[idx]), float(self._mag_db[idx]))
+            if self.chk_snap_peak.isChecked():
+                # Snap to nearest peak within ~5% of log view width
+                peaks = self._get_peaks()
+                snap_f, snap_a = self._snap_to_nearest_peak(
+                    freq, peaks, snap_frac=0.05)
+            else:
+                snap_f = snap_a = None
+            if snap_f is not None:
+                self._place_single_marker(snap_f, snap_a)
+            else:
+                idx = int(np.clip(np.searchsorted(self._freqs, freq),
+                                  0, len(self._freqs) - 1))
+                self._place_single_marker(
+                    float(self._freqs[idx]), float(self._mag_db[idx]))
             event.accept()
             return
         # Shift+click → cursor B; plain click → cursor A
@@ -467,6 +512,29 @@ class FFTDialog(QDialog):
             return np.array([], dtype=int)
         return _find_fft_peaks(self._mag_db)
 
+    def _snap_to_nearest_peak(self, freq: float, peaks: np.ndarray,
+                               snap_frac: float = 0.05
+                               ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Return (peak_freq, peak_amp) for the nearest peak to `freq` in log space,
+        if it is within snap_frac * (log view width) of the click.
+        Returns (None, None) when no peak is close enough.
+        """
+        if not len(peaks) or self._freqs is None:
+            return None, None
+        pi = self.plot.getPlotItem()
+        xr = pi.viewRange()[0]          # [log10_lo, log10_hi]
+        view_width_log = abs(xr[1] - xr[0])
+        threshold_log  = snap_frac * view_width_log
+
+        peak_freqs = self._freqs[peaks]
+        peak_amps  = self._mag_db[peaks]
+        log_dists  = np.abs(np.log10(peak_freqs) - np.log10(freq))
+        nearest    = int(np.argmin(log_dists))
+        if log_dists[nearest] <= threshold_log:
+            return float(peak_freqs[nearest]), float(peak_amps[nearest])
+        return None, None
+
     def _snap_to_next_peak(self, cid: int):
         peaks = self._get_peaks()
         if not len(peaks):
@@ -499,12 +567,13 @@ class FFTDialog(QDialog):
                 float(self._freqs[idx]), float(self._mag_db[idx]))
 
     def _clear_markers(self):
-        for item in self._peak_markers:
-            try:
-                self.plot.removeItem(item)
-            except Exception:
-                pass
-        self._peak_markers.clear()
+        for group in self._marker_groups:
+            for item in group.get("items", []):
+                try:
+                    self.plot.removeItem(item)
+                except Exception:
+                    pass
+        self._marker_groups.clear()
         self._marker_boxes.clear()
 
     # ── Smart marker placement ────────────────────────────────────────────────
@@ -546,17 +615,13 @@ class FFTDialog(QDialog):
         return y
 
     def _place_single_marker(self, f: float, a: float):
-        """Place one smart marker (leader line + dot + label) for freq f, amp a."""
+        """Place one smart marker (dot + label with opaque background) for freq f, amp a."""
         log_f = np.log10(f)
         text  = f"{_fmt_db(a)} @ {_fmt_freq(f)}"
         lw, lh = self._label_size_data()
         y_bot  = self._find_label_y(log_f, a, lw, lh)
 
-        # ── Leader line (peak → label bottom) ─────────────────────────────────
-        leader = self.plot.plot(
-            [log_f, log_f], [a, y_bot],
-            pen=pg.mkPen(color=_PEAK_COLOR, width=0.8))
-        self._peak_markers.append(leader)
+        group: dict = {"items": []}
 
         # ── Peak dot ──────────────────────────────────────────────────────────
         dot = self.plot.plot(
@@ -564,17 +629,35 @@ class FFTDialog(QDialog):
             pen=None, symbol='o', symbolSize=5,
             symbolBrush=pg.mkBrush(_PEAK_COLOR),
             symbolPen=pg.mkPen(color=_PEAK_COLOR, width=1))
-        self._peak_markers.append(dot)
+        group["items"].append(dot)
 
-        # ── Label at top of leader line ────────────────────────────────────────
+        # ── Label with filled background ───────────────────────────────────────
         # anchor=(0.5, 1.0): bottom-centre of text sits at (log_f, y_bot)
-        txt = pg.TextItem(text=text, color=_PEAK_COLOR, anchor=(0.5, 1.0))
+        bg_color = QColor(_FFT_PLOT_BG)
+        bg_color.setAlphaF(self._marker_bg_opacity)
+        txt = ClickableMarkerText(
+            text=text, color=_PEAK_COLOR, anchor=(0.5, 1.0),
+            fill=pg.mkBrush(bg_color),
+            on_click=lambda g=group: self._delete_marker_group(g))
         txt.setPos(log_f, y_bot)
         self.plot.addItem(txt)
-        self._peak_markers.append(txt)
+        group["items"].append(txt)
 
+        self._marker_groups.append(group)
         # Record bounding box so the next marker avoids this one
         self._marker_boxes.append((log_f, y_bot, lw, lh))
+
+    def _delete_marker_group(self, group: dict):
+        """Remove a single marker group from the plot and tracking lists."""
+        for item in group.get("items", []):
+            try:
+                self.plot.removeItem(item)
+            except Exception:
+                pass
+        if group in self._marker_groups:
+            idx = self._marker_groups.index(group)
+            self._marker_groups.pop(idx)
+            self._marker_boxes.pop(idx)
 
     # ── Export ────────────────────────────────────────────────────────────────
 

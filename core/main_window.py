@@ -32,6 +32,13 @@ from core.draw_mode import (
     DRAW_MODE_SIMPLE,
     DRAW_MODE_TOOLTIPS,
 )
+from core.periodicity import (
+    estimate_period,
+    ALL_METHODS as PERIODICITY_METHODS,
+    METHOD_NONE, METHOD_FAST, METHOD_ZERO_CROSSING,
+    METHOD_STANDARD, METHOD_PRECISE,
+    METHOD_LABELS as PERIODICITY_METHOD_LABELS,
+)
 from core.retrigger import (
     MODE_OFF, MODE_PERSIST_FUTURE, MODE_PERSIST_PAST,
     MODE_AVERAGING, MODE_INTERPOLATION, PERSIST_MODES,
@@ -104,6 +111,7 @@ class MainWindow(QMainWindow):
         s["original_dimmed_opacity"] = self._original_dimmed_opacity
         s["dashed_line_config"] = dict(self._dashed_line_config)
         s["auto_retrigger"] = self._trigger_panel.chk_auto_retrigger.isChecked()
+        s["periodicity_estimation_method"] = self._periodicity_method
         try:
             with open(SETTINGS_PATH, "w") as f:
                 json.dump(s, f, indent=2)
@@ -161,6 +169,10 @@ class MainWindow(QMainWindow):
         self._last_trigger_t_pos: Optional[float] = None
         self._last_retrigger_results: dict = {}
         self._last_retrigger_span: float = 0.0   # tracks view_span at last calc
+
+        # ── Periodicity estimation ────────────────────────────────────────────
+        self._periodicity_method: str = self._settings.get(
+            "periodicity_estimation_method", METHOD_PRECISE)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -493,6 +505,23 @@ class MainWindow(QMainWindow):
         settings_menu.addAction("Dashed Line Config…").triggered.connect(
             self._dlg_dashed_line_config)
 
+        settings_menu.addSeparator()
+        per_menu = settings_menu.addMenu("Periodicity Estimation")
+        per_menu.setToolTip(
+            "Method used to estimate the dominant period of each trace on load.\n"
+            "Stored as period_estimate / period_confidence on the trace model.")
+        per_group = QActionGroup(self)
+        per_group.setExclusive(True)
+        self._periodicity_method_actions: dict = {}
+        for mkey in PERIODICITY_METHODS:
+            act = per_menu.addAction(PERIODICITY_METHOD_LABELS[mkey])
+            act.setCheckable(True)
+            act.setChecked(mkey == self._periodicity_method)
+            act.triggered.connect(
+                lambda *_, m=mkey: self._set_periodicity_method(m))
+            per_group.addAction(act)
+            self._periodicity_method_actions[mkey] = act
+
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Reload Plugins").triggered.connect(
@@ -626,6 +655,9 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _add_trace(self, trace: TraceModel):
+        # Estimate periodicity before adding to the UI
+        self._estimate_and_store_period(trace)
+
         # If a trace with this name already exists, replace it
         existing_names = [t.name for t in self._traces]
         if trace.name in existing_names:
@@ -1345,6 +1377,26 @@ class MainWindow(QMainWindow):
         self._plot.set_interp_mode(mode)
         self._settings["interp_mode"] = mode
         self._reapply_retrigger()
+
+    # ── Periodicity estimation ─────────────────────────────────────────────
+
+    def _estimate_and_store_period(self, trace: TraceModel) -> None:
+        """Run estimate_period on *trace* and store the result on the model."""
+        T, conf = estimate_period(
+            trace.processed_data, trace.dt, self._periodicity_method)
+        trace.period_estimate   = T
+        trace.period_confidence = conf
+
+    def _set_periodicity_method(self, method: str) -> None:
+        """Change the active method, re-estimate all loaded traces, save."""
+        self._periodicity_method = method
+        self._settings["periodicity_estimation_method"] = method
+        if hasattr(self, "_periodicity_method_actions"):
+            act = self._periodicity_method_actions.get(method)
+            if act:
+                act.setChecked(True)
+        for trace in self._traces:
+            self._estimate_and_store_period(trace)
 
     def _set_draw_mode(self, mode: str):
         self._draw_mode = mode

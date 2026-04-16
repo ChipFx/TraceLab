@@ -82,6 +82,13 @@ class TraceModel:
     # Each label is drawn as a text annotation anchored to that time point.
     trace_labels: list = field(default_factory=list)
 
+    # Periodicity estimate — computed on load by core/periodicity.py.
+    # 0.0 means unknown (estimation disabled, failed, or not yet run).
+    # period_confidence is 0.0–1.0; values below ~0.3 should be treated
+    # with scepticism.  Both fields are read-only to plugins.
+    period_estimate:    float = 0.0
+    period_confidence:  float = 0.0
+
     # Non-destructive filter result (None = no filter active)
     _filter_data: Optional[np.ndarray] = field(default=None, repr=False)
     _filter_desc: str = field(default="", repr=False)  # e.g. "LP 1kHz"

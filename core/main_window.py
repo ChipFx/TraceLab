@@ -4,6 +4,7 @@ Main application window.
 """
 
 import os, sys, json, copy
+import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QToolBar, QFileDialog, QMessageBox, QLabel, QPushButton,
@@ -44,6 +45,7 @@ from core.retrigger import (
     MODE_AVERAGING, MODE_INTERPOLATION, PERSIST_MODES,
     PERSISTENCE_DEFAULTS, AVERAGING_DEFAULTS, INTERPOLATION_DEFAULTS,
     apply_mode_with_triggers as retrigger_apply_with_triggers,
+    find_all_triggers,
     find_all_triggers_with_times,
 )
 
@@ -169,6 +171,14 @@ class MainWindow(QMainWindow):
         self._last_trigger_t_pos: Optional[float] = None
         self._last_retrigger_results: dict = {}
         self._last_retrigger_span: float = 0.0   # tracks view_span at last calc
+
+        # Epoch anchor for averaging / interpolation modes.
+        # Set ONCE when the user places a trigger, then kept fixed across zoom.
+        # Resets to None when trigger parameters (channel/level/edge) change.
+        self._epoch_anchor_idx:   Optional[int] = None   # integer sample index
+        self._epoch_anchor_ch:    str   = ""
+        self._epoch_anchor_level: float = 0.0
+        self._epoch_anchor_edge:  int   = -1
 
         # ── Periodicity estimation ────────────────────────────────────────────
         self._periodicity_method: str = self._settings.get(
@@ -1158,6 +1168,9 @@ class MainWindow(QMainWindow):
 
     def _on_trigger_found(self, t_pos: float):
         """Trigger located — optionally zoom context window around it."""
+        # User explicitly placed a new trigger: invalidate the epoch anchor so
+        # the next _apply_retrigger re-anchors near this new position.
+        self._epoch_anchor_idx = None
         trace = None
         for t in self._traces:
             if t.visible:
@@ -1467,6 +1480,7 @@ class MainWindow(QMainWindow):
         """Toggle trigger-aligned averaging; disables persistence on enable."""
         if checked:
             self._retrigger_mode = MODE_AVERAGING
+            self._epoch_anchor_idx = None   # re-anchor at the new trigger pos
             self._act_persist_off.blockSignals(True)
             self._act_persist_off.setChecked(True)
             self._act_persist_off.blockSignals(False)
@@ -1486,6 +1500,7 @@ class MainWindow(QMainWindow):
         """Toggle sub-sample interpolation; disables persistence on enable."""
         if checked:
             self._retrigger_mode = MODE_INTERPOLATION
+            self._epoch_anchor_idx = None   # re-anchor at the new trigger pos
             self._act_persist_off.blockSignals(True)
             self._act_persist_off.setChecked(True)
             self._act_persist_off.blockSignals(False)
@@ -1537,7 +1552,85 @@ class MainWindow(QMainWindow):
 
         trig_t = trig_trace.time_axis
         trig_y = trig_trace.processed_data
-        dt_est  = float(trig_t[1] - trig_t[0])
+        dt_est = float(trig_t[1] - trig_t[0])
+
+        # ── Epoch selection ───────────────────────────────────────────────────
+        #
+        # Persistence modes use a view-span holdoff so consecutive windows
+        # don't overlap — this is intentional and view-dependent.
+        #
+        # Averaging / interpolation modes MUST use a fixed, view-independent
+        # epoch set.  The holdoff approach causes different zoom levels to
+        # select different trigger crossings (e.g. T/2-spaced on "either edge"
+        # once the holdoff shrinks below half a period), which flips the phase
+        # and depresses amplitude via anti-phase cancellation when averaging.
+        #
+        # Fix: anchor to ONE trigger crossing near t_pos (stored in
+        # _epoch_anchor_idx), then step forward and backward in integer
+        # multiples of T_samples.  The anchor survives zoom/pan; it only
+        # resets when the user explicitly places a new trigger or changes the
+        # trigger channel / level / edge.
+
+        trig_ch = self._trigger_panel.combo_ch.currentText()
+
+        if self._retrigger_mode in (MODE_AVERAGING, MODE_INTERPOLATION):
+            T_est = trig_trace.period_estimate
+            conf  = trig_trace.period_confidence
+
+            if T_est > 0 and conf >= 0.3 and dt_est > 0:
+                T_samples = max(1, round(T_est / dt_est))
+
+                # Re-anchor when trigger parameters changed or never set
+                anchor_stale = (
+                    self._epoch_anchor_idx is None
+                    or self._epoch_anchor_ch    != trig_ch
+                    or abs(self._epoch_anchor_level - level) > 1e-9
+                    or self._epoch_anchor_edge  != edge_idx
+                )
+                if anchor_stale:
+                    # Find all raw crossings (no holdoff) and pick the one
+                    # closest to the user-placed trigger position
+                    raw_idxs = find_all_triggers(
+                        trig_y, trig_t, level, edge_idx, holdoff_samples=0)
+                    if raw_idxs:
+                        t_arr   = np.array([float(trig_t[i]) for i in raw_idxs])
+                        closest = int(np.argmin(np.abs(t_arr - t_pos)))
+                        self._epoch_anchor_idx   = raw_idxs[closest]
+                        self._epoch_anchor_ch    = trig_ch
+                        self._epoch_anchor_level = level
+                        self._epoch_anchor_edge  = edge_idx
+
+                if self._epoch_anchor_idx is not None:
+                    # Walk forward and backward from anchor in integer T steps
+                    n_total = len(trig_y)
+                    epoch_idxs: list = []
+                    ep = self._epoch_anchor_idx
+                    while ep < n_total:
+                        epoch_idxs.append(ep)
+                        ep += T_samples
+                    ep = self._epoch_anchor_idx - T_samples
+                    while ep >= 0:
+                        epoch_idxs.append(ep)
+                        ep -= T_samples
+                    epoch_idxs.sort()
+
+                    # Use exact sample-grid times — no sub-sample interpolation.
+                    # trig_t[i] = i*dt + t0: difference is (i-j)*dt (integer
+                    # arithmetic), so segment time offsets have no FP drift.
+                    idxs    = epoch_idxs
+                    t_trigs = [float(trig_t[i]) for i in idxs]
+
+                    if not idxs:
+                        self._plot.clear_persistence_layers()
+                        self._plot.clear_retrigger_curve()
+                        self._last_retrigger_results.clear()
+                        return
+
+                    # Skip the holdoff-based trigger finding below
+                    return self._apply_retrigger_render(
+                        t_pos, idxs, t_trigs, trig_t, seg_span, x0, x1)
+
+        # ── Persistence (and avg/interp fallback when no period) ─────────────
         # One view-span holdoff: no two consecutive trigger windows may overlap
         holdoff = max(1, int(view_span / dt_est)) if dt_est > 0 else 1
 
@@ -1551,7 +1644,20 @@ class MainWindow(QMainWindow):
             self._last_retrigger_results.clear()
             return
 
-        # ── Step 2: apply the same trigger times to every visible channel ──────
+        self._apply_retrigger_render(t_pos, idxs, t_trigs, trig_t,
+                                     seg_span, x0, x1)
+
+    def _apply_retrigger_render(
+            self,
+            t_pos: float,
+            idxs: list,
+            t_trigs: list,
+            trig_t,
+            seg_span: float,
+            x0: float,
+            x1: float,
+    ):
+        """Shared rendering path for both epoch-based and holdoff-based epochs."""
         self._last_trigger_t_pos  = t_pos
         self._last_retrigger_span = seg_span
         self._plot.clear_persistence_layers()
@@ -1559,9 +1665,6 @@ class MainWindow(QMainWindow):
         self._last_retrigger_results.clear()
 
         # Adaptive count cap: limit ghost count when zoomed far out.
-        # If the full trace contains 10× more samples than are visible,
-        # the max useful sweeps is at most total/visible (each sweep
-        # would be below-viewport resolution otherwise).
         mask_v = (trig_t >= x0) & (trig_t <= x1)
         visible_s = max(1, int(mask_v.sum()))
         zoom_cap = max(1, len(trig_t) // visible_s)

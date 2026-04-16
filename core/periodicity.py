@@ -218,6 +218,21 @@ def _estimate_autocorr(
     if peak_val <= 0 or peak_val <= noise:
         return 0.0, 0.0
 
+    # ── T/2 disambiguation ─────────────────────────────────────────────────
+    # For signals whose autocorrelation has a spurious peak at half the true
+    # period (common with asymmetric noise or distorted waveforms), argmax
+    # may land at T/2.  Check if doubling the candidate lag also yields a
+    # significant positive peak — if so, 2*peak_lag is a better estimate.
+    # We only promote if the doubled peak is clearly present (> 60 % of the
+    # T/2 peak) so that we don't accidentally double a true short period.
+    doubled_lag = peak_lag * 2
+    if doubled_lag < max_lag:
+        doubled_val = float(R[doubled_lag])
+        if doubled_val > 0 and doubled_val >= peak_val * 0.60:
+            peak_lag = doubled_lag
+            peak_val = doubled_val
+            peak_local = peak_lag - min_lag
+
     # ── Confidence ────────────────────────────────────────────────────────
     raw_conf = float(np.clip(
         (peak_val - noise) / (1.0 - noise + 1e-9), 0.0, 1.0))

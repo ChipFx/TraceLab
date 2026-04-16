@@ -1626,9 +1626,17 @@ class MainWindow(QMainWindow):
                         self._last_retrigger_results.clear()
                         return
 
-                    # Skip the holdoff-based trigger finding below
+                    # Snap the display reference to the nearest epoch time.
+                    # _auto_find_trigger returns a noisy sub-sample crossing
+                    # that can drift by arbitrary fractions of T between zoom
+                    # steps, making avg_time + t_display appear to phase-rotate.
+                    # Snapping to the nearest integer-sample epoch time ensures
+                    # the displayed result stays phase-locked across zoom.
+                    t_arr     = np.fromiter(t_trigs, dtype=float)
+                    t_display = float(t_arr[np.argmin(np.abs(t_arr - t_pos))])
+
                     return self._apply_retrigger_render(
-                        t_pos, idxs, t_trigs, trig_t, seg_span, x0, x1)
+                        t_display, idxs, t_trigs, trig_t, seg_span, x0, x1)
 
         # ── Persistence (and avg/interp fallback when no period) ─────────────
         # One view-span holdoff: no two consecutive trigger windows may overlap
@@ -1659,7 +1667,11 @@ class MainWindow(QMainWindow):
     ):
         """Shared rendering path for both epoch-based and holdoff-based epochs."""
         self._last_trigger_t_pos  = t_pos
-        self._last_retrigger_span = seg_span
+        # Store the actual view span (not the inflated seg_span) so the 20 %
+        # change-detection threshold in _on_view_changed_retrigger is compared
+        # against a consistent baseline.  Storing seg_span here caused false
+        # positives because new_span (= view_span) was always < old_span (= seg_span).
+        self._last_retrigger_span = x1 - x0
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()

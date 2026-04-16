@@ -1655,6 +1655,68 @@ class MainWindow(QMainWindow):
         self._apply_retrigger_render(t_pos, idxs, t_trigs, trig_t,
                                      seg_span, x0, x1)
 
+    def _compute_trace_epochs(
+            self,
+            trace,
+            t_arr: np.ndarray,
+            y_arr: np.ndarray,
+            t_pos: float,
+    ):
+        """
+        Compute independent period-based epoch indices for *trace* in
+        interpolation mode.
+
+        Each non-trigger trace finds its own anchor crossing near *t_pos*
+        (using the trace's mean as the level, rising edge) and steps in
+        integer multiples of its own T_samples.  This lets each channel
+        achieve maximum sub-sample resolution independently of the trigger
+        channel's phase.
+
+        Returns (epoch_idxs, epoch_times, t_display) or (None, None, t_pos)
+        on failure (falls back to trigger-channel epochs in the caller).
+        """
+        if len(t_arr) < 2:
+            return None, None, t_pos
+        dt = float(t_arr[1] - t_arr[0])
+        T  = trace.period_estimate
+        if T <= 0 or dt <= 0 or trace.period_confidence < 0.3:
+            return None, None, t_pos
+
+        T_samples = max(1, round(T / dt))
+        mean_level = float(np.mean(y_arr))
+
+        # Find all rising zero-crossings of this trace, pick the one closest
+        # to the trigger position as the per-trace anchor
+        raw_idxs = find_all_triggers(y_arr, t_arr, mean_level, 0,
+                                     holdoff_samples=0)
+        if not raw_idxs:
+            return None, None, t_pos
+
+        t_cross = np.array([float(t_arr[i]) for i in raw_idxs])
+        closest = int(np.argmin(np.abs(t_cross - t_pos)))
+        anchor  = raw_idxs[closest]
+
+        # Walk from anchor in integer T_samples steps
+        n_total = len(y_arr)
+        epoch_idxs: list = []
+        ep = anchor
+        while ep < n_total:
+            epoch_idxs.append(ep)
+            ep += T_samples
+        ep = anchor - T_samples
+        while ep >= 0:
+            epoch_idxs.append(ep)
+            ep -= T_samples
+        epoch_idxs.sort()
+
+        if not epoch_idxs:
+            return None, None, t_pos
+
+        epoch_times = [float(t_arr[i]) for i in epoch_idxs]
+        t_arr_e = np.fromiter(epoch_times, dtype=float)
+        t_display = float(t_arr_e[np.argmin(np.abs(t_arr_e - t_pos))])
+        return epoch_idxs, epoch_times, t_display
+
     def _apply_retrigger_render(
             self,
             t_pos: float,
@@ -1665,7 +1727,16 @@ class MainWindow(QMainWindow):
             x0: float,
             x1: float,
     ):
-        """Shared rendering path for both epoch-based and holdoff-based epochs."""
+        """
+        Shared rendering path for both epoch-based and holdoff-based epochs.
+
+        Averaging   — all traces use the trigger channel's epoch list (idxs /
+                      t_trigs).  Non-coherent signals average away.
+        Interpolation — the trigger trace uses idxs / t_trigs; every other
+                      trace independently computes its own period-based epochs
+                      so each channel achieves maximum sub-sample resolution
+                      without being constrained by the trigger channel's phase.
+        """
         self._last_trigger_t_pos  = t_pos
         # Store the actual view span (not the inflated seg_span) so the 20 %
         # change-detection threshold in _on_view_changed_retrigger is compared
@@ -1675,6 +1746,8 @@ class MainWindow(QMainWindow):
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()
+
+        trig_ch = self._trigger_panel.combo_ch.currentText()
 
         # Adaptive count cap: limit ghost count when zoomed far out.
         mask_v = (trig_t >= x0) & (trig_t <= x1)
@@ -1692,19 +1765,35 @@ class MainWindow(QMainWindow):
             if len(t) < 2:
                 continue
 
+            # In interpolation mode, non-trigger traces find their own
+            # period-based epochs so each channel phase-matches independently.
+            # In averaging mode, all traces share the trigger channel's epochs
+            # so that non-coherent signals average away (the desired behaviour).
+            use_idxs    = idxs
+            use_trigs   = t_trigs
+            use_display = t_pos
+            if (self._retrigger_mode == MODE_INTERPOLATION
+                    and trace.name != trig_ch):
+                tr_i, tr_t, tr_d = self._compute_trace_epochs(
+                    trace, t, y, t_pos)
+                if tr_i is not None:
+                    use_idxs    = tr_i
+                    use_trigs   = tr_t
+                    use_display = tr_d
+
             result = retrigger_apply_with_triggers(
                 mode=self._retrigger_mode,
                 time=t,
                 data=y,
-                trigger_indices=idxs,
-                trigger_times=t_trigs,
+                trigger_indices=use_idxs,
+                trigger_times=use_trigs,
                 view_span=seg_span,
                 persistence_settings=effective_persist,
                 averaging_settings=self._averaging_settings,
                 interpolation_settings=self._interpolation_settings,
             )
             self._last_retrigger_results[trace.name] = result
-            self._render_retrigger(trace.name, result, t_pos)
+            self._render_retrigger(trace.name, result, use_display)
 
     def _render_retrigger(self, trace_name: str, result, t_ref: float):
         """Dispatch a RetriggerResult to the appropriate plot calls."""

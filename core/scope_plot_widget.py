@@ -92,6 +92,25 @@ def cubic_interpolate_to_n(t: np.ndarray, y: np.ndarray,
         return sinc_interpolate_to_n(t, y, target_n)
 
 
+def _upsample_for_display(
+        t: np.ndarray, y: np.ndarray,
+        interp_mode: str, viewport_min_pts: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Apply sinc/cubic upsampling to a short data segment if needed.
+
+    Used for retrigger result curves so they receive the same display
+    interpolation as the raw trace lanes.  The segment is already scoped
+    to the view window, so a simple point-count check is sufficient.
+    """
+    if interp_mode not in ("sinc", "cubic") or len(t) < 4:
+        return t, y
+    if len(t) >= viewport_min_pts:
+        return t, y
+    if interp_mode == "cubic":
+        return cubic_interpolate_to_n(t, y, viewport_min_pts)
+    return sinc_interpolate_to_n(t, y, viewport_min_pts)
+
+
 def _eng_format(value: float, unit: str) -> str:
     """
     Format a float with engineering-style SI prefix and unit.
@@ -317,6 +336,7 @@ class TraceLane(pg.PlotWidget):
             self._add_trace_curve()
         else:
             self._apply_resolved_style()
+            self._reapply_original_style()
 
     def _setup_plot(self):
         pi = self.getPlotItem()
@@ -633,10 +653,13 @@ class TraceLane(pg.PlotWidget):
         self._original_display_mode = original_display
         self._original_dimmed_opacity = max(0.1, min(0.9, dimmed_opacity))
         self._original_dash_pattern = dash_pattern
+        # Apply sinc/cubic upsampling if the mode is active
+        t_plot, d_plot = _upsample_for_display(
+            time_abs, data, self.interp_mode, self.viewport_min_pts)
         # Result curve — solid, full opacity, slightly wider
         color = self._display_color()
         pen = pg.mkPen(color=color, width=2.0)
-        self._retrigger_curve = self.plot(time_abs, data, pen=pen, antialias=False)
+        self._retrigger_curve = self.plot(t_plot, d_plot, pen=pen, antialias=False)
         self._retrigger_curve.setZValue(15)
         self._reapply_original_style()
 
@@ -864,6 +887,7 @@ class OverlayTraceVisual:
 
     def update_render_style(self):
         self._apply_resolved_style()
+        self._reapply_original_style()
 
     def refresh_curve(self, view_range: Tuple[float, float]):
         t_full = self.trace.time_axis
@@ -900,6 +924,7 @@ class OverlayTraceVisual:
         self.curve.setData(t_data, y_data)
         self.curve.opts["name"] = self.trace.label
         self._apply_resolved_style()
+        self._reapply_original_style()
         if self._persist_curves:
             self.curve.setZValue(len(self._persist_curves) + 1)
 
@@ -969,10 +994,12 @@ class OverlayTraceVisual:
         self._original_display_mode = original_display
         self._original_dimmed_opacity = max(0.1, min(0.9, dimmed_opacity))
         self._original_dash_pattern = dash_pattern
+        t_plot, d_plot = _upsample_for_display(
+            time_abs, data, self.interp_mode, self.viewport_min_pts)
         color = self._display_color()
         pen = pg.mkPen(color=color, width=2.0)
         self._retrigger_curve = self.plot_item.plot(
-            time_abs, data, pen=pen, antialias=False)
+            t_plot, d_plot, pen=pen, antialias=False)
         self._retrigger_curve.setZValue(15)
         self._reapply_original_style()
 

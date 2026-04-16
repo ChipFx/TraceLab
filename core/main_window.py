@@ -1344,6 +1344,7 @@ class MainWindow(QMainWindow):
         self._interp_mode = mode
         self._plot.set_interp_mode(mode)
         self._settings["interp_mode"] = mode
+        self._reapply_retrigger()
 
     def _set_draw_mode(self, mode: str):
         self._draw_mode = mode

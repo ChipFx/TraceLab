@@ -50,10 +50,12 @@ PERSISTENCE_DEFAULTS: dict = {
 
 AVERAGING_DEFAULTS: dict = {
     "count": 20,
+    "original_display": "dimmed",   # "dimmed" | "dashed" | "hide"
 }
 
 INTERPOLATION_DEFAULTS: dict = {
     "count": 20,
+    "original_display": "dimmed",   # "dimmed" | "dashed" | "hide"
 }
 
 

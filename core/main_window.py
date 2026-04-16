@@ -101,6 +101,8 @@ class MainWindow(QMainWindow):
         s["persistence"] = dict(self._persist_settings)
         s["averaging"] = dict(self._averaging_settings)
         s["interpolation"] = dict(self._interpolation_settings)
+        s["original_dimmed_opacity"] = self._original_dimmed_opacity
+        s["dashed_line_config"] = dict(self._dashed_line_config)
         s["auto_retrigger"] = self._trigger_panel.chk_auto_retrigger.isChecked()
         try:
             with open(SETTINGS_PATH, "w") as f:
@@ -150,6 +152,12 @@ class MainWindow(QMainWindow):
         self._interpolation_settings: dict = dict(
             {**INTERPOLATION_DEFAULTS,
              **self._settings.get("interpolation", {})})
+        self._original_dimmed_opacity: float = max(0.1, min(0.9, float(
+            self._settings.get("original_dimmed_opacity", 0.5))))
+        self._dashed_line_config: dict = {
+            "dash": 8, "space": 4,
+            **self._settings.get("dashed_line_config", {}),
+        }
         self._last_trigger_t_pos: Optional[float] = None
         self._last_retrigger_results: dict = {}
         self._last_retrigger_span: float = 0.0   # tracks view_span at last calc
@@ -460,14 +468,30 @@ class MainWindow(QMainWindow):
         am = settings_menu.addMenu("Averaging Settings")
         am.addAction("Count…").triggered.connect(self._dlg_avg_count)
         am.addSeparator()
+        avg_orig = am.addMenu("Original Data")
+        self._avg_orig_actions = self._build_original_display_menu(
+            avg_orig, self._averaging_settings,
+            lambda: self._reapply_retrigger())
+        am.addSeparator()
         am.addAction("Restore Defaults").triggered.connect(
             self._reset_avg_defaults)
 
         im = settings_menu.addMenu("Interpolation Settings")
         im.addAction("Count…").triggered.connect(self._dlg_interp_count)
         im.addSeparator()
+        interp_orig = im.addMenu("Original Data")
+        self._interp_orig_actions = self._build_original_display_menu(
+            interp_orig, self._interpolation_settings,
+            lambda: self._reapply_retrigger())
+        im.addSeparator()
         im.addAction("Restore Defaults").triggered.connect(
             self._reset_interp_defaults)
+
+        settings_menu.addSeparator()
+        settings_menu.addAction("Dimmed Opacity…").triggered.connect(
+            self._dlg_dimmed_opacity)
+        settings_menu.addAction("Dashed Line Config…").triggered.connect(
+            self._dlg_dashed_line_config)
 
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
@@ -1517,19 +1541,31 @@ class MainWindow(QMainWindow):
             self._plot.clear_persistence_layers(trace_name)
             if result.avg_time is not None and result.avg_data is not None:
                 self._plot.set_retrigger_curve(
-                    trace_name, result.avg_time + t_ref, result.avg_data)
+                    trace_name, result.avg_time + t_ref, result.avg_data,
+                    **self._retrigger_display_kwargs(self._averaging_settings))
             else:
                 self._plot.clear_retrigger_curve(trace_name)
         elif mode == MODE_INTERPOLATION:
             self._plot.clear_persistence_layers(trace_name)
             if result.interp_time is not None and result.interp_data is not None:
                 self._plot.set_retrigger_curve(
-                    trace_name, result.interp_time + t_ref, result.interp_data)
+                    trace_name, result.interp_time + t_ref, result.interp_data,
+                    **self._retrigger_display_kwargs(self._interpolation_settings))
             else:
                 self._plot.clear_retrigger_curve(trace_name)
         else:
             self._plot.clear_persistence_layers(trace_name)
             self._plot.clear_retrigger_curve(trace_name)
+
+    def _retrigger_display_kwargs(self, mode_settings: dict) -> dict:
+        """Build keyword args for set_retrigger_curve from current display settings."""
+        cfg = self._dashed_line_config
+        dash_pattern = [float(cfg.get("dash", 8)), float(cfg.get("space", 4))]
+        return dict(
+            original_display=mode_settings.get("original_display", "dimmed"),
+            dimmed_opacity=self._original_dimmed_opacity,
+            dash_pattern=dash_pattern,
+        )
 
     def _reapply_retrigger(self):
         """Re-run the pipeline with the last known trigger position.
@@ -1668,6 +1704,65 @@ class MainWindow(QMainWindow):
     def _reset_persist_defaults(self):
         self._persist_settings = dict(PERSISTENCE_DEFAULTS)
         self._reapply_retrigger()
+
+    def _build_original_display_menu(self, menu, settings_dict: dict,
+                                      on_change) -> dict:
+        """Add Show Dimmed / Show Dashed / Don't Show radio actions to *menu*.
+        Returns a dict of the three QActions so callers can update check state."""
+        from PyQt6.QtGui import QActionGroup
+        grp = QActionGroup(menu)
+        grp.setExclusive(True)
+        current = settings_dict.get("original_display", "dimmed")
+        actions = {}
+        for key, label in [("dimmed", "Show Dimmed"),
+                            ("dashed", "Show Dashed"),
+                            ("hide",   "Don't Show")]:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(key == current)
+            grp.addAction(act)
+            def _make_cb(k, d, cb):
+                def _cb(checked):
+                    if checked:
+                        d["original_display"] = k
+                        cb()
+                return _cb
+            act.toggled.connect(_make_cb(key, settings_dict, on_change))
+            actions[key] = act
+        return actions
+
+    def _dlg_dimmed_opacity(self):
+        from PyQt6.QtWidgets import QInputDialog
+        val, ok = QInputDialog.getDouble(
+            self, "Dimmed Opacity",
+            "Opacity of the original trace when 'Show Dimmed' is active\n"
+            "(10 % – 90 %):",
+            self._original_dimmed_opacity * 100, 10.0, 90.0, 0)
+        if ok:
+            self._original_dimmed_opacity = max(0.1, min(0.9, val / 100.0))
+            self._reapply_retrigger()
+
+    def _dlg_dashed_line_config(self):
+        from PyQt6.QtWidgets import QDialog, QFormLayout, QSpinBox, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Dashed Line Config")
+        form = QFormLayout(dlg)
+        sb_dash = QSpinBox(); sb_dash.setRange(1, 64)
+        sb_dash.setValue(int(self._dashed_line_config.get("dash", 8)))
+        sb_dash.setSuffix(" px")
+        sb_space = QSpinBox(); sb_space.setRange(1, 64)
+        sb_space.setValue(int(self._dashed_line_config.get("space", 4)))
+        sb_space.setSuffix(" px")
+        form.addRow("Dash length:", sb_dash)
+        form.addRow("Space length:", sb_space)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        if dlg.exec():
+            self._dashed_line_config = {"dash": sb_dash.value(),
+                                         "space": sb_space.value()}
+            self._reapply_retrigger()
 
     def _dlg_avg_count(self):
         val, ok = QInputDialog.getInt(

@@ -290,6 +290,9 @@ class TraceLane(pg.PlotWidget):
         self._curve = None
         self._persist_curves: list = []   # ghost curves for persistence layers
         self._retrigger_curve = None      # averaged / interpolated override curve
+        self._original_display_mode: Optional[str] = None  # "dimmed"|"dashed"|"hide"
+        self._original_dimmed_opacity: float = 0.5
+        self._original_dash_pattern: Optional[list] = None
         self._cursors: Dict[int, InfiniteLine] = {}
         self._labels: list = []          # TextItem labels anchored to time positions
         self._sinc_active = False         # True when sinc was actually used this draw
@@ -487,6 +490,7 @@ class TraceLane(pg.PlotWidget):
         self._curve.setDownsampling(auto=True, method="peak")
         self._curve.setClipToView(True)
         self._apply_resolved_style()
+        self._reapply_original_style()   # restore dimmed/dashed/hidden if active
         if self._persist_curves:
             # Always keep main curve above all persistence ghost layers
             self._curve.setZValue(len(self._persist_curves) + 1)
@@ -594,14 +598,47 @@ class TraceLane(pg.PlotWidget):
         if self._curve is not None:
             self._curve.setZValue(0)
 
-    def set_retrigger_curve(self, time_abs: np.ndarray, data: np.ndarray):
-        """Show averaged / interpolated result curve above the main trace."""
+    def _reapply_original_style(self):
+        """Apply dimmed/dashed/hidden styling to the raw trace curve when a
+        result curve is active.  No-op when no result curve is set."""
+        if self._curve is None or self._original_display_mode is None:
+            return
+        mode = self._original_display_mode
+        color = self._display_color()
+        width = float(self._curve.opts["pen"].widthF()) or 1.5
+        if mode == "hide":
+            self._curve.setVisible(False)
+        elif mode == "dimmed":
+            c = QColor(color)
+            c.setAlphaF(self._original_dimmed_opacity)
+            self._curve.setPen(pg.mkPen(color=c, width=width))
+            self._curve.setVisible(True)
+        elif mode == "dashed":
+            pen = pg.mkPen(color=color, width=width)
+            if self._original_dash_pattern:
+                pen.setStyle(Qt.PenStyle.CustomDashLine)
+                pen.setDashPattern(self._original_dash_pattern)
+            else:
+                pen.setStyle(Qt.PenStyle.DashLine)
+            self._curve.setPen(pen)
+            self._curve.setVisible(True)
+
+    def set_retrigger_curve(self, time_abs: np.ndarray, data: np.ndarray,
+                             original_display: str = "dimmed",
+                             dimmed_opacity: float = 0.5,
+                             dash_pattern: Optional[list] = None):
+        """Show averaged/interpolated result as the solid hard line;
+        style the raw trace according to original_display."""
         self.clear_retrigger_curve()
-        c = QColor(self._display_color())
-        c.setAlphaF(0.9)
-        pen = pg.mkPen(color=c, width=2.2, style=Qt.PenStyle.DashLine)
+        self._original_display_mode = original_display
+        self._original_dimmed_opacity = max(0.1, min(0.9, dimmed_opacity))
+        self._original_dash_pattern = dash_pattern
+        # Result curve — solid, full opacity, slightly wider
+        color = self._display_color()
+        pen = pg.mkPen(color=color, width=2.0)
         self._retrigger_curve = self.plot(time_abs, data, pen=pen, antialias=False)
         self._retrigger_curve.setZValue(15)
+        self._reapply_original_style()
 
     def clear_retrigger_curve(self):
         if self._retrigger_curve is not None:
@@ -610,6 +647,11 @@ class TraceLane(pg.PlotWidget):
             except Exception:
                 pass
             self._retrigger_curve = None
+        # Restore raw trace to normal solid appearance
+        self._original_display_mode = None
+        if self._curve is not None:
+            self._curve.setVisible(True)
+            self._apply_resolved_style()
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
@@ -716,6 +758,9 @@ class OverlayTraceVisual:
         self._last_style_key = None
         self._persist_curves: list = []
         self._retrigger_curve = None
+        self._original_display_mode: Optional[str] = None
+        self._original_dimmed_opacity: float = 0.5
+        self._original_dash_pattern: Optional[list] = None
         self.curve = self.plot_item.plot([], [], pen=pg.mkPen(width=1.5),
                                          name=trace.label, antialias=False)
         self.curve.setDownsampling(auto=True, method="peak")
@@ -893,14 +938,43 @@ class OverlayTraceVisual:
         self._persist_curves.clear()
         self.curve.setZValue(0)
 
-    def set_retrigger_curve(self, time_abs: np.ndarray, data: np.ndarray):
+    def _reapply_original_style(self):
+        if self._original_display_mode is None:
+            return
+        mode = self._original_display_mode
+        color = self._display_color()
+        width = float(self.curve.opts["pen"].widthF()) or 1.5
+        if mode == "hide":
+            self.curve.setVisible(False)
+        elif mode == "dimmed":
+            c = QColor(color)
+            c.setAlphaF(self._original_dimmed_opacity)
+            self.curve.setPen(pg.mkPen(color=c, width=width))
+            self.curve.setVisible(True)
+        elif mode == "dashed":
+            pen = pg.mkPen(color=color, width=width)
+            if self._original_dash_pattern:
+                pen.setStyle(Qt.PenStyle.CustomDashLine)
+                pen.setDashPattern(self._original_dash_pattern)
+            else:
+                pen.setStyle(Qt.PenStyle.DashLine)
+            self.curve.setPen(pen)
+            self.curve.setVisible(True)
+
+    def set_retrigger_curve(self, time_abs: np.ndarray, data: np.ndarray,
+                             original_display: str = "dimmed",
+                             dimmed_opacity: float = 0.5,
+                             dash_pattern: Optional[list] = None):
         self.clear_retrigger_curve()
-        c = QColor(self._display_color())
-        c.setAlphaF(0.9)
-        pen = pg.mkPen(color=c, width=2.2, style=Qt.PenStyle.DashLine)
+        self._original_display_mode = original_display
+        self._original_dimmed_opacity = max(0.1, min(0.9, dimmed_opacity))
+        self._original_dash_pattern = dash_pattern
+        color = self._display_color()
+        pen = pg.mkPen(color=color, width=2.0)
         self._retrigger_curve = self.plot_item.plot(
             time_abs, data, pen=pen, antialias=False)
         self._retrigger_curve.setZValue(15)
+        self._reapply_original_style()
 
     def clear_retrigger_curve(self):
         if self._retrigger_curve is not None:
@@ -909,6 +983,9 @@ class OverlayTraceVisual:
             except Exception:
                 pass
             self._retrigger_curve = None
+        self._original_display_mode = None
+        self.curve.setVisible(True)
+        self._apply_resolved_style()
 
     def remove(self):
         self.clear_persistence_layers()
@@ -1347,17 +1424,23 @@ class ScopePlotWidget(QWidget):
                 visual.clear_persistence_layers()
 
     def set_retrigger_curve(self, trace_name: str,
-                            time_abs: np.ndarray, data: np.ndarray):
+                            time_abs: np.ndarray, data: np.ndarray,
+                            original_display: str = "dimmed",
+                            dimmed_opacity: float = 0.5,
+                            dash_pattern: Optional[list] = None):
         """Store and display an averaged / interpolated result curve."""
         self._retrigger_curve_state[trace_name] = (time_abs, data)
+        kw = dict(original_display=original_display,
+                  dimmed_opacity=dimmed_opacity,
+                  dash_pattern=dash_pattern)
         if self._mode == "split":
             lane = self._lanes.get(trace_name)
             if lane:
-                lane.set_retrigger_curve(time_abs, data)
+                lane.set_retrigger_curve(time_abs, data, **kw)
         else:
             visual = self._overlay_visuals.get(trace_name)
             if visual:
-                visual.set_retrigger_curve(time_abs, data)
+                visual.set_retrigger_curve(time_abs, data, **kw)
 
     def clear_retrigger_curve(self, trace_name: str = None):
         """Remove retrigger result curve(s)."""

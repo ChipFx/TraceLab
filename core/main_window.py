@@ -1467,6 +1467,16 @@ class MainWindow(QMainWindow):
         if view_span <= 0:
             return
 
+        # Segments must cover from the trigger point to BOTH view edges, not
+        # just half the view width.  When the trigger is near the left edge
+        # (the common case), view_span/2 leaves the right portion undrawn.
+        # Compute a symmetric half-span that reaches the farther edge.
+        left_span  = max(0.0, t_pos - x0)
+        right_span = max(0.0, x1 - t_pos)
+        # seg_span is passed as view_span; apply_mode_with_triggers halves it
+        # internally and adds 10 % margin, so effective half = largest_edge * 1.1
+        seg_span = 2.0 * max(left_span, right_span, view_span / 2.0)
+
         # ── Step 1: find triggers on the selected trigger channel only ─────────
         trig_trace = self._trigger_panel._get_selected_trace()
         if trig_trace is None or len(trig_trace.time_axis) < 2:
@@ -1490,7 +1500,7 @@ class MainWindow(QMainWindow):
 
         # ── Step 2: apply the same trigger times to every visible channel ──────
         self._last_trigger_t_pos  = t_pos
-        self._last_retrigger_span = view_span
+        self._last_retrigger_span = seg_span
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()
@@ -1520,7 +1530,7 @@ class MainWindow(QMainWindow):
                 data=y,
                 trigger_indices=idxs,
                 trigger_times=t_trigs,
-                view_span=view_span,
+                view_span=seg_span,
                 persistence_settings=effective_persist,
                 averaging_settings=self._averaging_settings,
                 interpolation_settings=self._interpolation_settings,

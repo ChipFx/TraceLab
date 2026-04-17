@@ -148,7 +148,7 @@ class ChannelStatusBlock(QWidget):
         painter.setPen(QPen(badge_fg))
         painter.drawText(bx + 4, by + bh - 2, badge_txt)
 
-        # ── APERIODIC warning badge ───────────────────────────────────────
+        # ── APERIODIC warning badge (bottom-right) ───────────────────────
         if (getattr(self._trace, 'period_estimation_attempted', False)
                 and getattr(self._trace, 'period_estimate', 0.0) == 0.0):
             ap_txt = "APERIODIC"
@@ -158,7 +158,7 @@ class ChannelStatusBlock(QWidget):
             aw = fm_ap.horizontalAdvance(ap_txt) + 8
             ah = 14
             ax = w - aw - 4
-            ay = by + bh + 2
+            ay = h - ah - 4
             painter.setBrush(QBrush(QColor("#cc7700")))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(ax, ay, aw, ah, 2, 2)

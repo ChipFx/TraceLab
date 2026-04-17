@@ -213,16 +213,22 @@ def _estimate_autocorr(
         return 0.0, 0.0
 
     # ── Find peak ──────────────────────────────────────────────────────────
-    peak_local = int(np.argmax(search))
-    peak_lag   = peak_local + min_lag
-    peak_val   = float(R[peak_lag])
-
-    # Require a true local maximum — not the first sample of a monotonically
-    # decreasing region (e.g. the autocorrelation of a linear ramp).
-    left_val  = float(R[peak_lag - 1]) if peak_lag > 0   else -1.0
-    right_val = float(R[peak_lag + 1]) if peak_lag < n - 1 else -1.0
-    if left_val >= peak_val or right_val >= peak_val:
+    # Detect genuine local maxima using vectorised numpy comparisons.
+    # This avoids the adjacent-sample floating-point hazard (FFT arithmetic
+    # can make R[k±1] appear microscopically above R[k]) and also correctly
+    # rejects monotonically-decreasing autocorrelations (ramp signals) which
+    # have NO local maxima at all.
+    k_all    = np.arange(min_lag, max_lag)
+    is_local = (R[k_all - 1] < R[k_all]) & (R[k_all] >= R[k_all + 1])
+    peak_lags = k_all[is_local]
+    if len(peak_lags) == 0:
         return 0.0, 0.0
+
+    # Select the strongest local maximum.  For a biased autocorrelation the
+    # envelope decreases with lag, so the first-period peak wins.
+    peak_lag   = int(peak_lags[np.argmax(R[peak_lags])])
+    peak_local = peak_lag - min_lag
+    peak_val   = float(R[peak_lag])
 
     noise = float(np.median(np.abs(search)))
     if peak_val <= 0 or peak_val <= noise:

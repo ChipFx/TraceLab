@@ -11,13 +11,21 @@ estimate_period(samples, dt, method) -> (T_seconds, confidence)
 Methods (in increasing compute cost)
 -------------------------------------
 'none'          — skip estimation; returns (0.0, 0.0) immediately
-'fast'          — zero-crossing rate  (O(N), ~microseconds, rough)
+'fast'          — zero-crossing rate  (O(N), fast, rough)
 'zero_crossing' — sub-sample rising-edge intervals (O(N), good for clean signals)
-'standard'      — FFT autocorrelation, integer-lag peak (O(N log N))
-'precise'       — FFT autocorrelation + parabolic sub-sample refinement (O(N log N))
+'standard'      — FFT autocorrelation on windowed block, integer-lag peak (O(W log W))
+'precise'       — FFT autocorrelation + parabolic sub-sample refinement (O(W log W))
 
-All methods subsample long signals to at most _MAX_FFT_SAMPLES points before
-FFT work so the compute cost stays bounded regardless of recording length.
+For 'standard' and 'precise', long signals are WINDOWED (a centred contiguous
+block of _MAX_FFT_SAMPLES points at the original sample rate), NOT subsampled.
+Windowing preserves dt so short periods (high-frequency signals) stay detectable.
+The tradeoff: periods longer than _MAX_FFT_SAMPLES/2 * dt are not seen by the
+FFT methods — use 'fast' or 'zero_crossing' for those (they scan the full signal).
+
+Scalability tiers (future work — currently all FFT methods share one window size):
+  pretty-good  — _MAX_FFT_SAMPLES = 65536  (~10 Msample captures, ≤ 1 GSPS, ≤ 150 MHz)
+  quality      — _MAX_FFT_SAMPLES = 262144 (~50 Msample captures, ≤ 5 GSPS, ≤ 500 MHz)
+  elite        — _MAX_FFT_SAMPLES = 1M+    (40 GSPS / 250 Msample-class instruments)
 
 Extension
 ---------
@@ -177,12 +185,19 @@ def _estimate_autocorr(
     """
     n = len(y)
 
-    # ── Subsample to _MAX_FFT_SAMPLES ──────────────────────────────────────
+    # ── Window to _MAX_FFT_SAMPLES (centred block, original sample rate) ──
+    # Windowing preserves dt so T_samples stays physically meaningful.
+    # Subsampling (the previous approach) aliased away short periods:
+    # a 150 MHz signal at 1 GSPS has T_samples ≈ 6.7; after ×153
+    # subsampling that collapses to < 1 — undetectable.
+    # Tradeoff: periods longer than max_lag * dt are invisible to this
+    # method; use 'fast' or 'zero_crossing' for those (O(N), full signal).
     if n > _MAX_FFT_SAMPLES:
-        step = int(np.ceil(n / _MAX_FFT_SAMPLES))
-        y = y[::step]
-        dt = dt * step
-        n = len(y)
+        mid  = n // 2
+        half = _MAX_FFT_SAMPLES // 2
+        y    = y[mid - half : mid + half]
+        n    = len(y)
+        # dt is unchanged
 
     # ── Pre-process: remove DC, normalise ──────────────────────────────────
     y = y - float(np.mean(y))
@@ -197,13 +212,14 @@ def _estimate_autocorr(
     R /= R[0] + 1e-12   # normalise: R[0] = 1.0
 
     # ── Search window ──────────────────────────────────────────────────────
-    # Minimum: skip only a tiny prefix to avoid the trivially-high lag-0
-    # self-correlation.  n//2000 keeps the floor well below one period even
-    # for high-frequency signals in long, downsampled captures.  n//20 (the
-    # old value) was 50 ms for a 1 s / 2.2 MHz capture after subsampling —
-    # which completely hid any signal above ~20 Hz.
-    # Maximum: half the record length (need at least two full periods visible).
-    min_lag = max(4, n // 2000)
+    # min_lag = 4: skip only the trivially-high lag-0 main lobe.
+    # A constant floor is safe here because the ramp / monotone-autocorr
+    # case is handled below by requiring a genuine local maximum (no local
+    # maxima → aperiodic), so we don't need a large min_lag as a guard.
+    # 4 samples covers any signal with T_samples > 8, which is roughly the
+    # Nyquist limit anyway.
+    # max_lag = n // 2: need at least two visible periods in the window.
+    min_lag = 4
     max_lag = n // 2
     if max_lag <= min_lag:
         return 0.0, 0.0

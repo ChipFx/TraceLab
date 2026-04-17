@@ -82,6 +82,13 @@ class ChannelStatusBlock(QWidget):
             f"Interpolation: {mode_lbl}\n"
             f"{period_tip}\n"
             f"Click to toggle interpolation")
+        # Force tooltip to a readable dark-on-light or light-on-dark style
+        # regardless of OS/theme — Qt inherits the system palette by default,
+        # which can produce black text on near-black backgrounds in dark themes.
+        self.setStyleSheet(
+            "QToolTip { color: #f0f0f0; background-color: #1e1e1e; "
+            "border: 1px solid #555555; padding: 3px 6px; }"
+        )
 
     def mousePressEvent(self, event):
         self.toggle_interp.emit(self._trace.name)

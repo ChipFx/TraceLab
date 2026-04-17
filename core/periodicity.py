@@ -197,10 +197,13 @@ def _estimate_autocorr(
     R /= R[0] + 1e-12   # normalise: R[0] = 1.0
 
     # ── Search window ──────────────────────────────────────────────────────
-    # Minimum: skip the main lobe (~1/20 of length, at least 2 samples)
-    # Maximum: half the record length (less than one full period in the window
-    #          means we can't see its repetition)
-    min_lag = max(2, n // 20)
+    # Minimum: skip only a tiny prefix to avoid the trivially-high lag-0
+    # self-correlation.  n//2000 keeps the floor well below one period even
+    # for high-frequency signals in long, downsampled captures.  n//20 (the
+    # old value) was 50 ms for a 1 s / 2.2 MHz capture after subsampling —
+    # which completely hid any signal above ~20 Hz.
+    # Maximum: half the record length (need at least two full periods visible).
+    min_lag = max(4, n // 2000)
     max_lag = n // 2
     if max_lag <= min_lag:
         return 0.0, 0.0
@@ -214,24 +217,16 @@ def _estimate_autocorr(
     peak_lag   = peak_local + min_lag
     peak_val   = float(R[peak_lag])
 
+    # Require a true local maximum — not the first sample of a monotonically
+    # decreasing region (e.g. the autocorrelation of a linear ramp).
+    left_val  = float(R[peak_lag - 1]) if peak_lag > 0   else -1.0
+    right_val = float(R[peak_lag + 1]) if peak_lag < n - 1 else -1.0
+    if left_val >= peak_val or right_val >= peak_val:
+        return 0.0, 0.0
+
     noise = float(np.median(np.abs(search)))
     if peak_val <= 0 or peak_val <= noise:
         return 0.0, 0.0
-
-    # ── T/2 disambiguation ─────────────────────────────────────────────────
-    # For signals whose autocorrelation has a spurious peak at half the true
-    # period (common with asymmetric noise or distorted waveforms), argmax
-    # may land at T/2.  Check if doubling the candidate lag also yields a
-    # significant positive peak — if so, 2*peak_lag is a better estimate.
-    # We only promote if the doubled peak is clearly present (> 60 % of the
-    # T/2 peak) so that we don't accidentally double a true short period.
-    doubled_lag = peak_lag * 2
-    if doubled_lag < max_lag:
-        doubled_val = float(R[doubled_lag])
-        if doubled_val > 0 and doubled_val >= peak_val * 0.60:
-            peak_lag = doubled_lag
-            peak_val = doubled_val
-            peak_local = peak_lag - min_lag
 
     # ── Confidence ────────────────────────────────────────────────────────
     raw_conf = float(np.clip(

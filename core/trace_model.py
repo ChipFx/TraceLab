@@ -88,6 +88,7 @@ class TraceModel:
     # with scepticism.  Both fields are read-only to plugins.
     period_estimate:    float = 0.0
     period_confidence:  float = 0.0
+    period_estimation_attempted: bool = False
 
     # Non-destructive filter result (None = no filter active)
     _filter_data: Optional[np.ndarray] = field(default=None, repr=False)

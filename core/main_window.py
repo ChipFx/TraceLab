@@ -1397,8 +1397,9 @@ class MainWindow(QMainWindow):
         """Run estimate_period on *trace* and store the result on the model."""
         T, conf = estimate_period(
             trace.processed_data, trace.dt, self._periodicity_method)
-        trace.period_estimate   = T
-        trace.period_confidence = conf
+        trace.period_estimate             = T
+        trace.period_confidence           = conf
+        trace.period_estimation_attempted = (self._periodicity_method != METHOD_NONE)
 
     def _set_periodicity_method(self, method: str) -> None:
         """Change the active method, re-estimate all loaded traces, save."""

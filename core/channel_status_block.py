@@ -68,9 +68,19 @@ class ChannelStatusBlock(QWidget):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         mode_lbl = {"linear": "Linear", "sinc": "Sinc (sin(x)/x)",
                     "cubic": "Cubic spline"}.get(interp_mode, interp_mode)
+        T   = getattr(trace, 'period_estimate', 0.0)
+        conf = getattr(trace, 'period_confidence', 0.0)
+        attempted = getattr(trace, 'period_estimation_attempted', False)
+        if T > 0:
+            period_tip = f"Period: {_eng(T, 's')}  (confidence {conf:.0%})"
+        elif attempted:
+            period_tip = "Period: Not detected"
+        else:
+            period_tip = "Period: Not estimated"
         self.setToolTip(
             f"Channel: {trace.label}\n"
             f"Interpolation: {mode_lbl}\n"
+            f"{period_tip}\n"
             f"Click to toggle interpolation")
 
     def mousePressEvent(self, event):
@@ -130,6 +140,24 @@ class ChannelStatusBlock(QWidget):
         painter.setFont(f_badge)
         painter.setPen(QPen(badge_fg))
         painter.drawText(bx + 4, by + bh - 2, badge_txt)
+
+        # ── APERIODIC warning badge ───────────────────────────────────────
+        if (getattr(self._trace, 'period_estimation_attempted', False)
+                and getattr(self._trace, 'period_estimate', 0.0) == 0.0):
+            ap_txt = "APERIODIC"
+            f_ap   = QFont("Courier New", 7)
+            f_ap.setBold(True)
+            fm_ap  = QFontMetrics(f_ap)
+            aw = fm_ap.horizontalAdvance(ap_txt) + 8
+            ah = 14
+            ax = w - aw - 4
+            ay = by + bh + 2
+            painter.setBrush(QBrush(QColor("#cc7700")))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(ax, ay, aw, ah, 2, 2)
+            painter.setFont(f_ap)
+            painter.setPen(QPen(QColor("#ffffff")))
+            painter.drawText(ax + 4, ay + ah - 2, ap_txt)
 
         # ── Row 2: V/div (actual major tick spacing) ─────────────────────
         unit = getattr(self._trace, 'unit', '') or ''

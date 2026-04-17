@@ -66,5 +66,5 @@ non-exclusive, free-of-charge license to:
 
 ---
 
-*This license was last updated: [DATE]*  
-*For questions, contact: [YOUR EMAIL or WEBSITE]*
+*This license was last updated: 2026-04-17*  
+*For questions, contact: http://chipfx.com*

@@ -1,7 +1,7 @@
 # ChipFX TraceLab — Notice
 
 **ChipFX TraceLab**  
-Copyright © [YEAR] [YOUR NAME / ChipFX]
+Copyright © 2026, Robert van Leeuwen, ChipFX
 
 ---
 
@@ -14,8 +14,8 @@ If you use, distribute, or build upon this software, the following attribution
 is required:
 
 > *This product includes or is derived from ChipFX TraceLab,
-> developed by [YOUR NAME / ChipFX].
-> https://[YOUR PROJECT URL]*
+> developed by Robert van Leeuwen, ChipFX.
+> https://chipfx.com*
 
 ---
 

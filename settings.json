@@ -1,6 +1,6 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb0003000000000784000000b900000c33000004db00000784000000d800000c33000004db00000000000000000f0000000784000000d800000c33000004db",
+  "geometry": "01d9d0cb00030000000005c10000008d00000a05000004b0000005c1000000ac00000a05000004b000000000000000000f00000005c1000000ac00000a05000004b0",
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 50.0,
@@ -35,7 +35,7 @@
   "last_gain": "2.048/4096",
   "last_offset": "-1.024",
   "last_unit": "V",
-  "retrigger_mode": "averaging",
+  "retrigger_mode": "off",
   "persistence": {
     "count": 10,
     "selection": "first",
@@ -51,12 +51,13 @@
     "count": 20,
     "original_display": "dimmed"
   },
-  "auto_retrigger": true,
+  "auto_retrigger": false,
   "fft_marker_bg_opacity": 0.6,
   "original_dimmed_opacity": 0.35,
   "dashed_line_config": {
     "dash": 8,
     "space": 4
   },
-  "periodicity_estimation_method": "precise"
+  "periodicity_estimation_method": "precise",
+  "import_reset_retrigger": true
 }

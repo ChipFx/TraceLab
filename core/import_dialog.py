@@ -485,6 +485,15 @@ class ImportDialog(QDialog):
         self.chk_reset_view = QCheckBox("Reset view after import")
         self.chk_reset_view.setChecked(self._settings.get("import_reset_view", True))
         og.addWidget(self.chk_reset_view)
+        self.chk_reset_retrigger = QCheckBox("Reset retrigger to Off")
+        self.chk_reset_retrigger.setChecked(
+            self._settings.get("import_reset_retrigger", True))
+        self.chk_reset_retrigger.setToolTip(
+            "Switch the retrigger / persistence mode to Off before loading.\n"
+            "Avoids averaging or persistence from a previous session being\n"
+            "applied immediately to new data before you have had a chance\n"
+            "to configure the trigger for the new file.")
+        og.addWidget(self.chk_reset_retrigger)
         og.addStretch()
         layout.addWidget(opt_box)
 
@@ -665,8 +674,9 @@ class ImportDialog(QDialog):
             return
 
         self.result_traces = traces
-        self.replace_existing = self.chk_replace.isChecked()
-        self.reset_view = self.chk_reset_view.isChecked()
+        self.replace_existing    = self.chk_replace.isChecked()
+        self.reset_view          = self.chk_reset_view.isChecked()
+        self.reset_retrigger     = self.chk_reset_retrigger.isChecked()
         # Persist last-used global scale values
         self._settings["last_gain"]   = self.edit_global_gain.text().strip()
         self._settings["last_offset"] = self.edit_global_offset.text().strip()

@@ -35,10 +35,10 @@ from core.draw_mode import (
 )
 from core.periodicity import (
     estimate_period,
-    ALL_METHODS as PERIODICITY_METHODS,
-    METHOD_NONE, METHOD_FAST, METHOD_ZERO_CROSSING,
-    METHOD_STANDARD, METHOD_PRECISE,
-    METHOD_LABELS as PERIODICITY_METHOD_LABELS,
+    ALL_TIERS as PERIODICITY_TIERS,
+    TIER_DISABLED, TIER_ZERO_CROSS, TIER_STANDARD, TIER_PRECISE, TIER_EXTREME,
+    TIER_LABELS as PERIODICITY_TIER_LABELS,
+    TIER_TOOLTIPS as PERIODICITY_TIER_TOOLTIPS,
 )
 from core.retrigger import (
     MODE_OFF, MODE_PERSIST_FUTURE, MODE_PERSIST_PAST,
@@ -103,8 +103,9 @@ class MainWindow(QMainWindow):
         s["viewport_min_pts"] = self._viewport_min_pts
         s["draw_mode"] = self._draw_mode
         s["density_pen_mapping"] = dict(self._density_pen_mapping)
-        s["import_replace"] = self._import_replace
-        s["import_reset_view"] = self._import_reset_view
+        s["import_replace"]         = self._import_replace
+        s["import_reset_view"]      = self._import_reset_view
+        s["import_reset_retrigger"] = self._import_reset_retrigger
         s["fft_min_freq"] = self._fft_min_freq
         s["retrigger_mode"] = self._retrigger_mode
         s["persistence"] = dict(self._persist_settings)
@@ -139,8 +140,9 @@ class MainWindow(QMainWindow):
     # ── UI Construction ────────────────────────────────────────────────
 
     def _build_ui(self):
-        self._import_replace = self._settings.get("import_replace", True)
-        self._import_reset_view = self._settings.get("import_reset_view", True)
+        self._import_replace          = self._settings.get("import_replace", True)
+        self._import_reset_view       = self._settings.get("import_reset_view", True)
+        self._import_reset_retrigger  = self._settings.get("import_reset_retrigger", True)
         self._y_lock_auto = self._settings.get("y_lock_auto", True)
         self._fft_min_freq = self._settings.get("fft_min_freq", 1.0)
         self._viewport_min_pts = self._settings.get("viewport_min_pts", 1024)
@@ -181,8 +183,14 @@ class MainWindow(QMainWindow):
         self._epoch_anchor_edge:  int   = -1
 
         # ── Periodicity estimation ────────────────────────────────────────────
-        self._periodicity_method: str = self._settings.get(
-            "periodicity_estimation_method", METHOD_PRECISE)
+        # Migrate any old method names that may live in settings.json
+        _tier_migrate = {
+            "none": TIER_DISABLED, "fast": TIER_ZERO_CROSS,
+            "zero_crossing": TIER_ZERO_CROSS, "standard": TIER_STANDARD,
+            "precise": TIER_PRECISE, "extreme": TIER_EXTREME,
+        }
+        _raw = self._settings.get("periodicity_estimation_method", TIER_STANDARD)
+        self._periodicity_method: str = _tier_migrate.get(_raw, TIER_STANDARD)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -517,20 +525,19 @@ class MainWindow(QMainWindow):
 
         settings_menu.addSeparator()
         per_menu = settings_menu.addMenu("Periodicity Estimation")
-        per_menu.setToolTip(
-            "Method used to estimate the dominant period of each trace on load.\n"
-            "Stored as period_estimate / period_confidence on the trace model.")
+        per_menu.setToolTipsVisible(True)
         per_group = QActionGroup(self)
         per_group.setExclusive(True)
         self._periodicity_method_actions: dict = {}
-        for mkey in PERIODICITY_METHODS:
-            act = per_menu.addAction(PERIODICITY_METHOD_LABELS[mkey])
+        for tier in PERIODICITY_TIERS:
+            act = per_menu.addAction(PERIODICITY_TIER_LABELS[tier])
             act.setCheckable(True)
-            act.setChecked(mkey == self._periodicity_method)
+            act.setChecked(tier == self._periodicity_method)
+            act.setToolTip(PERIODICITY_TIER_TOOLTIPS[tier])
             act.triggered.connect(
-                lambda *_, m=mkey: self._set_periodicity_method(m))
+                lambda *_, t=tier: self._set_periodicity_method(t))
             per_group.addAction(act)
-            self._periodicity_method_actions[mkey] = act
+            self._periodicity_method_actions[tier] = act
 
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
@@ -643,10 +650,14 @@ class MainWindow(QMainWindow):
             return
 
         # Save checkbox preferences
-        self._import_replace = dlg.replace_existing
-        self._import_reset_view = dlg.reset_view
-        self._settings["import_replace"] = self._import_replace
-        self._settings["import_reset_view"] = self._import_reset_view
+        self._import_replace       = dlg.replace_existing
+        self._import_reset_view    = dlg.reset_view
+        self._settings["import_replace"]          = self._import_replace
+        self._settings["import_reset_view"]       = self._import_reset_view
+        self._settings["import_reset_retrigger"]  = dlg.reset_retrigger
+
+        if dlg.reset_retrigger:
+            self._set_retrigger_mode(MODE_OFF)
 
         if dlg.replace_existing:
             self._clear_all(confirm=False)
@@ -1399,7 +1410,7 @@ class MainWindow(QMainWindow):
             trace.processed_data, trace.dt, self._periodicity_method)
         trace.period_estimate             = T
         trace.period_confidence           = conf
-        trace.period_estimation_attempted = (self._periodicity_method != METHOD_NONE)
+        trace.period_estimation_attempted = (self._periodicity_method != TIER_DISABLED)
 
     def _set_periodicity_method(self, method: str) -> None:
         """Change the active method, re-estimate all loaded traces, save."""

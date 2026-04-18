@@ -279,7 +279,7 @@ def _estimate_autocorr(
         y0 = R[peak_lag - 1]
         y1 = R[peak_lag]
         y2 = R[peak_lag + 1]
-        denom = 2.0 * (2.0 * y1 - y0 - y2)
+        denom = 2.0 * (y0 + y2 - 2.0 * y1)
         if abs(denom) > 1e-12:
             frac = (y0 - y2) / denom
             peak_lag_f = float(peak_lag) + frac

@@ -1590,8 +1590,6 @@ class MainWindow(QMainWindow):
             conf  = trig_trace.period_confidence
 
             if T_est > 0 and conf >= 0.3 and dt_est > 0:
-                T_samples = max(1, round(T_est / dt_est))
-
                 # Re-anchor when trigger parameters changed or never set
                 anchor_stale = (
                     self._epoch_anchor_idx is None
@@ -1613,22 +1611,33 @@ class MainWindow(QMainWindow):
                         self._epoch_anchor_edge  = edge_idx
 
                 if self._epoch_anchor_idx is not None:
-                    # Walk forward and backward from anchor in integer T steps
-                    n_total = len(trig_y)
+                    # Walk forward and backward from the anchor using
+                    # floating-point period steps so each epoch is independently
+                    # rounded to the nearest sample.  This bounds the phase error
+                    # at any epoch k to ±dt/2 regardless of how far from the
+                    # anchor we walk — integer accumulation (ep += T_samples)
+                    # compounds the fractional error and causes phase drift that
+                    # grows linearly with the number of periods.
+                    n_total  = len(trig_y)
+                    anchor   = self._epoch_anchor_idx
+                    T_float  = T_est / dt_est   # fractional samples per period
                     epoch_idxs: list = []
-                    ep = self._epoch_anchor_idx
-                    while ep < n_total:
+                    k = 0
+                    while True:
+                        ep = int(round(anchor + k * T_float))
+                        if ep >= n_total:
+                            break
                         epoch_idxs.append(ep)
-                        ep += T_samples
-                    ep = self._epoch_anchor_idx - T_samples
-                    while ep >= 0:
+                        k += 1
+                    k = -1
+                    while True:
+                        ep = int(round(anchor + k * T_float))
+                        if ep < 0:
+                            break
                         epoch_idxs.append(ep)
-                        ep -= T_samples
+                        k -= 1
                     epoch_idxs.sort()
 
-                    # Use exact sample-grid times — no sub-sample interpolation.
-                    # trig_t[i] = i*dt + t0: difference is (i-j)*dt (integer
-                    # arithmetic), so segment time offsets have no FP drift.
                     idxs    = epoch_idxs
                     t_trigs = [float(trig_t[i]) for i in idxs]
 
@@ -1646,6 +1655,14 @@ class MainWindow(QMainWindow):
                     # the displayed result stays phase-locked across zoom.
                     t_arr     = np.fromiter(t_trigs, dtype=float)
                     t_display = float(t_arr[np.argmin(np.abs(t_arr - t_pos))])
+
+                    # Epoch drift: integer T_samples accumulates error vs. the
+                    # true period, so t_display can lag t_pos by up to T/2.
+                    # Recompute seg_span from t_display so the segment half-span
+                    # actually reaches both view edges from the snapped anchor.
+                    left_d  = max(0.0, t_display - x0)
+                    right_d = max(0.0, x1 - t_display)
+                    seg_span = 2.0 * max(left_d, right_d, view_span / 2.0)
 
                     return self._apply_retrigger_render(
                         t_display, idxs, t_trigs, trig_t, seg_span, x0, x1)
@@ -1680,9 +1697,9 @@ class MainWindow(QMainWindow):
 
         Each non-trigger trace finds its own anchor crossing near *t_pos*
         (using the trace's mean as the level, rising edge) and steps in
-        integer multiples of its own T_samples.  This lets each channel
-        achieve maximum sub-sample resolution independently of the trigger
-        channel's phase.
+        floating-point multiples of its own period so that each epoch index
+        is independently rounded to ±dt/2.  This lets each channel achieve
+        maximum phase accuracy independently of the trigger channel's phase.
 
         Returns (epoch_idxs, epoch_times, t_display) or (None, None, t_pos)
         on failure (falls back to trigger-channel epochs in the caller).
@@ -1694,7 +1711,7 @@ class MainWindow(QMainWindow):
         if T <= 0 or dt <= 0 or trace.period_confidence < 0.3:
             return None, None, t_pos
 
-        T_samples = max(1, round(T / dt))
+        T_float    = T / dt   # fractional samples per period
         mean_level = float(np.mean(y_arr))
 
         # Find all rising zero-crossings of this trace, pick the one closest
@@ -1708,17 +1725,24 @@ class MainWindow(QMainWindow):
         closest = int(np.argmin(np.abs(t_cross - t_pos)))
         anchor  = raw_idxs[closest]
 
-        # Walk from anchor in integer T_samples steps
+        # Walk using floating-point steps so each epoch index is independently
+        # rounded — bounds phase error to ±dt/2 regardless of distance from anchor.
         n_total = len(y_arr)
         epoch_idxs: list = []
-        ep = anchor
-        while ep < n_total:
+        k = 0
+        while True:
+            ep = int(round(anchor + k * T_float))
+            if ep >= n_total:
+                break
             epoch_idxs.append(ep)
-            ep += T_samples
-        ep = anchor - T_samples
-        while ep >= 0:
+            k += 1
+        k = -1
+        while True:
+            ep = int(round(anchor + k * T_float))
+            if ep < 0:
+                break
             epoch_idxs.append(ep)
-            ep -= T_samples
+            k -= 1
         epoch_idxs.sort()
 
         if not epoch_idxs:

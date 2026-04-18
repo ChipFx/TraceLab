@@ -257,6 +257,7 @@ class MainWindow(QMainWindow):
         self._cursor_panel.place_cursor.connect(self._start_cursor_placement)
         self._cursor_panel.set_t0_at_a.connect(self._cursor_set_t0_at_a)
         self._cursor_panel.jump_to_t0.connect(self._jump_to_t0)
+        self._cursor_panel.remove_cursors.connect(self._plot.clear_cursors)
         right_splitter.addWidget(self._cursor_panel)
 
         self._trigger_panel = TriggerPanel()
@@ -388,63 +389,6 @@ class MainWindow(QMainWindow):
         self._theme_submenu = view_menu.addMenu("Theme")
         self._rebuild_theme_menu()
 
-        # ── Retrigger ──────────────────────────────────────────────────
-        view_menu.addSeparator()
-        rt_menu = view_menu.addMenu("Retrigger")
-
-        persist_menu = rt_menu.addMenu("Persistence")
-        persist_group = QActionGroup(self)
-        persist_group.setExclusive(True)
-
-        self._act_persist_off = persist_menu.addAction("Off")
-        self._act_persist_off.setCheckable(True)
-        self._act_persist_off.setChecked(self._retrigger_mode == MODE_OFF)
-        persist_group.addAction(self._act_persist_off)
-        self._act_persist_off.triggered.connect(
-            lambda: self._set_retrigger_mode(MODE_OFF))
-
-        self._act_persist_future = persist_menu.addAction("Future Persist")
-        self._act_persist_future.setCheckable(True)
-        self._act_persist_future.setChecked(
-            self._retrigger_mode == MODE_PERSIST_FUTURE)
-        self._act_persist_future.setToolTip(
-            "First trigger shown as hard line; later triggers fade into "
-            "the future below it.")
-        persist_group.addAction(self._act_persist_future)
-        self._act_persist_future.triggered.connect(
-            lambda: self._set_retrigger_mode(MODE_PERSIST_FUTURE))
-
-        self._act_persist_past = persist_menu.addAction("Past Persist (Normal)")
-        self._act_persist_past.setCheckable(True)
-        self._act_persist_past.setChecked(
-            self._retrigger_mode == MODE_PERSIST_PAST)
-        self._act_persist_past.setToolTip(
-            "Last trigger shown as hard line; earlier triggers fade into "
-            "history below it.  Classic oscilloscope persistence.")
-        persist_group.addAction(self._act_persist_past)
-        self._act_persist_past.triggered.connect(
-            lambda: self._set_retrigger_mode(MODE_PERSIST_PAST))
-
-        rt_menu.addSeparator()
-
-        self._act_rt_averaging = rt_menu.addAction("Averaging")
-        self._act_rt_averaging.setCheckable(True)
-        self._act_rt_averaging.setChecked(self._retrigger_mode == MODE_AVERAGING)
-        self._act_rt_averaging.setToolTip(
-            "Average multiple trigger-aligned segments to reduce noise.")
-        self._act_rt_averaging.triggered.connect(
-            self._toggle_retrigger_averaging)
-
-        self._act_rt_interp = rt_menu.addAction("Interpolate")
-        self._act_rt_interp.setCheckable(True)
-        self._act_rt_interp.setChecked(
-            self._retrigger_mode == MODE_INTERPOLATION)
-        self._act_rt_interp.setToolTip(
-            "Interleave multiple trigger-aligned segments to increase "
-            "effective sample resolution.")
-        self._act_rt_interp.triggered.connect(
-            self._toggle_retrigger_interpolation)
-
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
         a = analysis_menu.addAction("FFT...")
@@ -465,30 +409,64 @@ class MainWindow(QMainWindow):
         a = analysis_menu.addAction("Clear All Labels")
         a.triggered.connect(self._clear_all_labels)
 
-        # ── Settings ──────────────────────────────────────────────────
-        settings_menu = mb.addMenu("Settings")
-        settings_menu.addAction("Font Scale...").triggered.connect(
-            self._show_font_scale_dialog)
-        settings_menu.addAction("Decimal Separator...").triggered.connect(
-            self._show_decimal_sep_dialog)
-        settings_menu.addSeparator()
-        settings_menu.addAction("Edit Current Theme...").triggered.connect(
-            self._open_theme_editor)
-        settings_menu.addAction("Reload Themes from Disk").triggered.connect(
-            self._reload_themes)
-        settings_menu.addSeparator()
-        self._act_remember_folder = settings_menu.addAction("Remember Last Folder")
-        self._act_remember_folder.setCheckable(True)
-        self._act_remember_folder.setChecked(
-            self._settings.get("remember_folder", True))
-        self._act_remember_folder.setToolTip(
-            "When enabled, open/save dialogs start in the last used folder.")
-        self._act_remember_folder.triggered.connect(self._toggle_remember_folder)
+        # ── Acquire ───────────────────────────────────────────────────
+        acquire_menu = mb.addMenu("Acquire")
 
-        settings_menu.addSeparator()
+        persist_group = QActionGroup(self)
+        persist_group.setExclusive(True)
 
-        # ── Persistence settings ──────────────────────────────────────
-        pm = settings_menu.addMenu("Persistence Settings")
+        self._act_persist_off = acquire_menu.addAction("Off")
+        self._act_persist_off.setCheckable(True)
+        self._act_persist_off.setChecked(self._retrigger_mode == MODE_OFF)
+        persist_group.addAction(self._act_persist_off)
+        self._act_persist_off.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_OFF))
+
+        acquire_menu.addSeparator()
+
+        self._act_persist_past = acquire_menu.addAction("Persistence (Normal)")
+        self._act_persist_past.setCheckable(True)
+        self._act_persist_past.setChecked(
+            self._retrigger_mode == MODE_PERSIST_PAST)
+        self._act_persist_past.setToolTip(
+            "Last trigger shown as hard line; earlier triggers fade into "
+            "history below it.  Classic oscilloscope persistence.")
+        persist_group.addAction(self._act_persist_past)
+        self._act_persist_past.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_PERSIST_PAST))
+
+        self._act_persist_future = acquire_menu.addAction("Persistence (Future)")
+        self._act_persist_future.setCheckable(True)
+        self._act_persist_future.setChecked(
+            self._retrigger_mode == MODE_PERSIST_FUTURE)
+        self._act_persist_future.setToolTip(
+            "First trigger shown as hard line; later triggers fade into "
+            "the future below it.")
+        persist_group.addAction(self._act_persist_future)
+        self._act_persist_future.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_PERSIST_FUTURE))
+
+        self._act_rt_averaging = acquire_menu.addAction("Averaging")
+        self._act_rt_averaging.setCheckable(True)
+        self._act_rt_averaging.setChecked(self._retrigger_mode == MODE_AVERAGING)
+        self._act_rt_averaging.setToolTip(
+            "Average multiple trigger-aligned segments to reduce noise.")
+        self._act_rt_averaging.triggered.connect(
+            self._toggle_retrigger_averaging)
+
+        self._act_rt_interp = acquire_menu.addAction("Interpolate")
+        self._act_rt_interp.setCheckable(True)
+        self._act_rt_interp.setChecked(
+            self._retrigger_mode == MODE_INTERPOLATION)
+        self._act_rt_interp.setToolTip(
+            "Interleave multiple trigger-aligned segments to increase "
+            "effective sample resolution.")
+        self._act_rt_interp.triggered.connect(
+            self._toggle_retrigger_interpolation)
+
+        acquire_menu.addSeparator()
+
+        pm = acquire_menu.addMenu("Persistence Settings")
         pm.addAction("Count…").triggered.connect(self._dlg_persist_count)
         pm.addAction("Selection…").triggered.connect(self._dlg_persist_selection)
         pm.addAction("Emphasis…").triggered.connect(self._dlg_persist_emphasis)
@@ -499,7 +477,7 @@ class MainWindow(QMainWindow):
         pm.addAction("Restore Defaults").triggered.connect(
             self._reset_persist_defaults)
 
-        am = settings_menu.addMenu("Averaging Settings")
+        am = acquire_menu.addMenu("Averaging Settings")
         am.addAction("Count…").triggered.connect(self._dlg_avg_count)
         am.addSeparator()
         avg_orig = am.addMenu("Original Data")
@@ -510,7 +488,7 @@ class MainWindow(QMainWindow):
         am.addAction("Restore Defaults").triggered.connect(
             self._reset_avg_defaults)
 
-        im = settings_menu.addMenu("Interpolation Settings")
+        im = acquire_menu.addMenu("Interpolation Settings")
         im.addAction("Count…").triggered.connect(self._dlg_interp_count)
         im.addSeparator()
         interp_orig = im.addMenu("Original Data")
@@ -521,7 +499,9 @@ class MainWindow(QMainWindow):
         im.addAction("Restore Defaults").triggered.connect(
             self._reset_interp_defaults)
 
-        em = settings_menu.addMenu("Extrapolation Behaviour")
+        acquire_menu.addSeparator()
+
+        em = acquire_menu.addMenu("Extrapolation Behaviour")
         em.setToolTipsVisible(True)
         extrap_group = QActionGroup(self)
         extrap_group.setExclusive(True)
@@ -546,6 +526,26 @@ class MainWindow(QMainWindow):
         self._extrap_clip_act.triggered.connect(
             lambda: self._set_extrap_mode("clip"))
         extrap_group.addAction(self._extrap_clip_act)
+
+        # ── Settings ──────────────────────────────────────────────────
+        settings_menu = mb.addMenu("Settings")
+        settings_menu.addAction("Font Scale...").triggered.connect(
+            self._show_font_scale_dialog)
+        settings_menu.addAction("Decimal Separator...").triggered.connect(
+            self._show_decimal_sep_dialog)
+        settings_menu.addSeparator()
+        settings_menu.addAction("Edit Current Theme...").triggered.connect(
+            self._open_theme_editor)
+        settings_menu.addAction("Reload Themes from Disk").triggered.connect(
+            self._reload_themes)
+        settings_menu.addSeparator()
+        self._act_remember_folder = settings_menu.addAction("Remember Last Folder")
+        self._act_remember_folder.setCheckable(True)
+        self._act_remember_folder.setChecked(
+            self._settings.get("remember_folder", True))
+        self._act_remember_folder.setToolTip(
+            "When enabled, open/save dialogs start in the last used folder.")
+        self._act_remember_folder.triggered.connect(self._toggle_remember_folder)
 
         settings_menu.addSeparator()
         settings_menu.addAction("Dimmed Opacity…").triggered.connect(

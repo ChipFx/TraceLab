@@ -1531,6 +1531,29 @@ class ScopePlotWidget(QWidget):
             self._place_cursors(cursor_id, x_pos)
         self._emit_cursor_values()
 
+    def clear_cursors(self):
+        """Remove both cursors from the plot and reset their positions."""
+        for cid in (0, 1):
+            self._cursors[cid] = None
+            if self._mode == "split":
+                for lane in self._lanes.values():
+                    if cid in lane._cursors:
+                        try:
+                            lane.removeItem(lane._cursors[cid])
+                        except Exception:
+                            pass
+                        lane._cursors.pop(cid, None)
+            else:
+                attr = f"_overlay_cursor_{cid}"
+                if hasattr(self, attr):
+                    try:
+                        self._overlay_widget.getPlotItem().removeItem(
+                            getattr(self, attr))
+                    except Exception:
+                        pass
+                    delattr(self, attr)
+        self._emit_cursor_values()
+
     def _place_cursors(self, cursor_id, x_pos):
         color = self._cursor_colors[cursor_id]
         label = "A" if cursor_id == 0 else "B"

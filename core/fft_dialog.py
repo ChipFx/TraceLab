@@ -224,6 +224,12 @@ class FFTDialog(QDialog):
         tool = QHBoxLayout()
         tool.setSpacing(6)
 
+        # ── Cursors section ───────────────────────────────────────────
+        lbl_sec_cur = QLabel("Cursors")
+        lbl_sec_cur.setStyleSheet(
+            "color: #888; font-size: 8pt; font-weight: bold; padding: 0 4px;")
+        tool.addWidget(lbl_sec_cur)
+
         # Cursor A readout + snap
         self._lbl_cur_a = QLabel("A: —")
         self._lbl_cur_a.setStyleSheet(
@@ -255,6 +261,12 @@ class FFTDialog(QDialog):
 
         tool.addWidget(self._vsep())
 
+        # ── Markers section ───────────────────────────────────────────
+        lbl_sec_mk = QLabel("Markers")
+        lbl_sec_mk.setStyleSheet(
+            "color: #888; font-size: 8pt; font-weight: bold; padding: 0 4px;")
+        tool.addWidget(lbl_sec_mk)
+
         btn_mark = QPushButton(f"Mark Top {_N_MARK_PEAKS} Peaks")
         btn_mark.setToolTip("Mark the highest amplitude peaks on the plot")
         btn_mark.clicked.connect(self._mark_peaks)
@@ -277,6 +289,12 @@ class FFTDialog(QDialog):
         tool.addWidget(btn_clear)
 
         tool.addWidget(self._vsep())
+
+        # ── View section ──────────────────────────────────────────────
+        lbl_sec_vw = QLabel("View")
+        lbl_sec_vw.setStyleSheet(
+            "color: #888; font-size: 8pt; font-weight: bold; padding: 0 4px;")
+        tool.addWidget(lbl_sec_vw)
 
         btn_fit_x = QPushButton("Fit Frequency")
         btn_fit_x.setToolTip("Auto-range X axis to the full FFT frequency span")

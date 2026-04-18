@@ -82,6 +82,10 @@ class TraceModel:
     # Each label is drawn as a text annotation anchored to that time point.
     trace_labels: list = field(default_factory=list)
 
+    # Set by retrigger pipeline when the averaged/interpolated curve
+    # extends outside the original capture's time bounds.
+    retrigger_extrapolating: bool = False
+
     # Periodicity estimate — computed on load by core/periodicity.py.
     # 0.0 means unknown (estimation disabled, failed, or not yet run).
     # period_confidence is 0.0–1.0; values below ~0.3 should be treated

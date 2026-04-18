@@ -166,6 +166,23 @@ class ChannelStatusBlock(QWidget):
             painter.setPen(QPen(QColor("#ffffff")))
             painter.drawText(ax + 4, ay + ah - 2, ap_txt)
 
+        # ── EXTRAP badge (bottom-left) ────────────────────────────────────
+        if getattr(self._trace, 'retrigger_extrapolating', False):
+            ex_txt = "EXTRAP"
+            f_ex   = QFont("Courier New", 7)
+            f_ex.setBold(True)
+            fm_ex  = QFontMetrics(f_ex)
+            ew = fm_ex.horizontalAdvance(ex_txt) + 8
+            eh = 14
+            ex = 4
+            ey = h - eh - 4
+            painter.setBrush(QBrush(QColor("#006699")))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(ex, ey, ew, eh, 2, 2)
+            painter.setFont(f_ex)
+            painter.setPen(QPen(QColor("#ffffff")))
+            painter.drawText(ex + 4, ey + eh - 2, ex_txt)
+
         # ── Row 2: V/div (actual major tick spacing) ─────────────────────
         unit = getattr(self._trace, 'unit', '') or ''
         if self._y_major_div > 0 and unit and unit != 'raw':

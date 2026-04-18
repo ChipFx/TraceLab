@@ -115,6 +115,7 @@ class MainWindow(QMainWindow):
         s["dashed_line_config"] = dict(self._dashed_line_config)
         s["auto_retrigger"] = self._trigger_panel.chk_auto_retrigger.isChecked()
         s["periodicity_estimation_method"] = self._periodicity_method
+        s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
         try:
             with open(SETTINGS_PATH, "w") as f:
                 json.dump(s, f, indent=2)
@@ -173,6 +174,9 @@ class MainWindow(QMainWindow):
         self._last_trigger_t_pos: Optional[float] = None
         self._last_retrigger_results: dict = {}
         self._last_retrigger_span: float = 0.0   # tracks view_span at last calc
+        # "warn" = show EXTRAP badge; "clip" = mask curve to signal bounds
+        self._retrigger_extrap_mode: str = self._settings.get(
+            "retrigger_extrap_mode", "warn")
 
         # Epoch anchor for averaging / interpolation modes.
         # Set ONCE when the user places a trigger, then kept fixed across zoom.
@@ -516,6 +520,32 @@ class MainWindow(QMainWindow):
         im.addSeparator()
         im.addAction("Restore Defaults").triggered.connect(
             self._reset_interp_defaults)
+
+        em = settings_menu.addMenu("Extrapolation Behaviour")
+        em.setToolTipsVisible(True)
+        extrap_group = QActionGroup(self)
+        extrap_group.setExclusive(True)
+        self._extrap_warn_act = em.addAction("Warn (show EXTRAP badge)")
+        self._extrap_warn_act.setCheckable(True)
+        self._extrap_warn_act.setChecked(self._retrigger_extrap_mode == "warn")
+        self._extrap_warn_act.setToolTip(
+            "Show the full averaged/interpolated curve even when it extends\n"
+            "beyond the original capture window.\n"
+            "An EXTRAP badge appears on the channel status block.")
+        self._extrap_warn_act.triggered.connect(
+            lambda: self._set_extrap_mode("warn"))
+        extrap_group.addAction(self._extrap_warn_act)
+        self._extrap_clip_act = em.addAction("Clip to capture window")
+        self._extrap_clip_act.setCheckable(True)
+        self._extrap_clip_act.setChecked(self._retrigger_extrap_mode == "clip")
+        self._extrap_clip_act.setToolTip(
+            "Mask the averaged/interpolated curve so it never extends\n"
+            "beyond the original capture's time bounds.\n"
+            "No EXTRAP badge is shown; the curve may appear shorter at\n"
+            "zoom levels where the trigger is near the edge of the data.")
+        self._extrap_clip_act.triggered.connect(
+            lambda: self._set_extrap_mode("clip"))
+        extrap_group.addAction(self._extrap_clip_act)
 
         settings_menu.addSeparator()
         settings_menu.addAction("Dimmed Opacity…").triggered.connect(
@@ -1423,6 +1453,19 @@ class MainWindow(QMainWindow):
         for trace in self._traces:
             self._estimate_and_store_period(trace)
 
+    def _set_extrap_mode(self, mode: str) -> None:
+        """Switch extrapolation behaviour and re-render."""
+        self._retrigger_extrap_mode = mode
+        self._settings["retrigger_extrap_mode"] = mode
+        self._reapply_retrigger()
+
+    def _clear_extrap_flags(self):
+        """Clear extrapolation badges on all traces and repaint status blocks."""
+        for t in self._traces:
+            t.retrigger_extrapolating = False
+        if hasattr(self, '_scope_status'):
+            self._scope_status.repaint_channel_blocks()
+
     def _set_draw_mode(self, mode: str):
         self._draw_mode = mode
         if hasattr(self, "_draw_mode_actions") and mode in self._draw_mode_actions:
@@ -1484,6 +1527,7 @@ class MainWindow(QMainWindow):
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()
+        self._clear_extrap_flags()
         self._update_retrigger_controls()
         if mode != MODE_OFF:
             self._reapply_retrigger()
@@ -1504,6 +1548,7 @@ class MainWindow(QMainWindow):
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()
+        self._clear_extrap_flags()
         self._update_retrigger_controls()
         if checked:
             self._reapply_retrigger()
@@ -1524,6 +1569,7 @@ class MainWindow(QMainWindow):
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()
+        self._clear_extrap_flags()
         self._update_retrigger_controls()
         if checked:
             self._reapply_retrigger()
@@ -1782,6 +1828,10 @@ class MainWindow(QMainWindow):
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()
+        # Clear extrapolation flags before re-rendering so stale badges
+        # don't persist if a trace produces no output this cycle.
+        for _t in self._traces:
+            _t.retrigger_extrapolating = False
 
         trig_ch = self._trigger_panel.combo_ch.currentText()
 
@@ -1831,34 +1881,71 @@ class MainWindow(QMainWindow):
             self._last_retrigger_results[trace.name] = result
             self._render_retrigger(trace.name, result, use_display)
 
+        # Repaint channel status blocks so EXTRAP badges reflect current state.
+        if hasattr(self, '_scope_status'):
+            self._scope_status.repaint_channel_blocks()
+
     def _render_retrigger(self, trace_name: str, result, t_ref: float):
         """Dispatch a RetriggerResult to the appropriate plot calls."""
         mode = result.mode
+        trace_obj = next((t for t in self._traces if t.name == trace_name), None)
+
+        def _apply_extrap(abs_time: np.ndarray, data: np.ndarray):
+            """Detect extrapolation; clip or warn per _retrigger_extrap_mode.
+            Returns (abs_time, data, is_extrapolating)."""
+            if trace_obj is None or len(abs_time) == 0:
+                return abs_time, data, False
+            t_lo = float(trace_obj.time_axis[0])
+            t_hi = float(trace_obj.time_axis[-1])
+            is_extrap = (abs_time[0] < t_lo - 1e-12) or (abs_time[-1] > t_hi + 1e-12)
+            if is_extrap and self._retrigger_extrap_mode == "clip":
+                mask = (abs_time >= t_lo) & (abs_time <= t_hi)
+                if mask.any():
+                    abs_time, data = abs_time[mask], data[mask]
+                return abs_time, data, False   # clipped → no longer extrapolating
+            return abs_time, data, is_extrap
+
         if mode in PERSIST_MODES:
             if result.layers:
                 self._plot.set_persistence_layers(trace_name, result.layers, t_ref)
             else:
                 self._plot.clear_persistence_layers(trace_name)
             self._plot.clear_retrigger_curve(trace_name)
+            if trace_obj:
+                trace_obj.retrigger_extrapolating = False
         elif mode == MODE_AVERAGING:
             self._plot.clear_persistence_layers(trace_name)
             if result.avg_time is not None and result.avg_data is not None:
+                abs_t, abs_d, is_extrap = _apply_extrap(
+                    result.avg_time + t_ref, result.avg_data)
+                if trace_obj:
+                    trace_obj.retrigger_extrapolating = is_extrap
                 self._plot.set_retrigger_curve(
-                    trace_name, result.avg_time + t_ref, result.avg_data,
+                    trace_name, abs_t, abs_d,
                     **self._retrigger_display_kwargs(self._averaging_settings))
             else:
                 self._plot.clear_retrigger_curve(trace_name)
+                if trace_obj:
+                    trace_obj.retrigger_extrapolating = False
         elif mode == MODE_INTERPOLATION:
             self._plot.clear_persistence_layers(trace_name)
             if result.interp_time is not None and result.interp_data is not None:
+                abs_t, abs_d, is_extrap = _apply_extrap(
+                    result.interp_time + t_ref, result.interp_data)
+                if trace_obj:
+                    trace_obj.retrigger_extrapolating = is_extrap
                 self._plot.set_retrigger_curve(
-                    trace_name, result.interp_time + t_ref, result.interp_data,
+                    trace_name, abs_t, abs_d,
                     **self._retrigger_display_kwargs(self._interpolation_settings))
             else:
                 self._plot.clear_retrigger_curve(trace_name)
+                if trace_obj:
+                    trace_obj.retrigger_extrapolating = False
         else:
             self._plot.clear_persistence_layers(trace_name)
             self._plot.clear_retrigger_curve(trace_name)
+            if trace_obj:
+                trace_obj.retrigger_extrapolating = False
 
     def _retrigger_display_kwargs(self, mode_settings: dict) -> dict:
         """Build keyword args for set_retrigger_curve from current display settings."""

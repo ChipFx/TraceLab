@@ -248,3 +248,10 @@ class ScopeStatusBar(QWidget):
         n = len(visible)
         self._ch_container.setFixedWidth(max(n * (BLOCK_W + SEP_W) + 4, BLOCK_W))
         self._ch_container.setFixedHeight(BAR_H)
+
+    def repaint_channel_blocks(self):
+        """Repaint all channel status blocks without rebuilding them.
+        Used to reflect model state changes (e.g. extrapolation flags)
+        that don't require a full status bar rebuild."""
+        for block in self._ch_blocks:
+            block.update()

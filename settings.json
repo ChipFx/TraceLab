@@ -1,6 +1,6 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb00030000000003c7000000c8000007c200000421000003c7000000e7000007c20000042100000000000000000f00000003c7000000e7000007c200000421",
+  "geometry": "01d9d0cb00030000000003c7000000c800000a4700000538000003c7000000e700000a470000053800000000000000000f00000003c7000000e700000a4700000538",
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 10.0,
@@ -21,7 +21,7 @@
   "color_overrides": {},
   "max_display_points": 50000,
   "default_sample_rate": 2200000.0,
-  "last_open_folder": "E:\\Asmyldof\\002 - Tools\\501 - PyScope\\CLaudeAI Init\\pyscope.tar\\pyscope\\oscilloscope",
+  "last_open_folder": "./",
   "last_save_folder": "./",
   "remember_folder": true,
   "interp_mode": "linear",

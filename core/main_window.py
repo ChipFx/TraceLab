@@ -44,6 +44,7 @@ from core.retrigger import (
     MODE_OFF, MODE_PERSIST_FUTURE, MODE_PERSIST_PAST,
     MODE_AVERAGING, MODE_INTERPOLATION, PERSIST_MODES,
     PERSISTENCE_DEFAULTS, AVERAGING_DEFAULTS, INTERPOLATION_DEFAULTS,
+    PersistenceLayer,
     apply_mode_with_triggers as retrigger_apply_with_triggers,
     find_all_triggers,
     find_all_triggers_with_times,
@@ -1906,13 +1907,44 @@ class MainWindow(QMainWindow):
             return abs_time, data, is_extrap
 
         if mode in PERSIST_MODES:
-            if result.layers:
+            if result.layers and trace_obj is not None:
+                t_lo = float(trace_obj.time_axis[0])
+                t_hi = float(trace_obj.time_axis[-1])
+                is_extrap = any(
+                    len(lyr.time) > 0 and (
+                        (lyr.time[0]  + t_ref) < t_lo - 1e-12 or
+                        (lyr.time[-1] + t_ref) > t_hi + 1e-12
+                    )
+                    for lyr in result.layers
+                )
+                if is_extrap and self._retrigger_extrap_mode == "clip":
+                    clipped = []
+                    for lyr in result.layers:
+                        abs_t = lyr.time + t_ref
+                        mask  = (abs_t >= t_lo) & (abs_t <= t_hi)
+                        if mask.any():
+                            clipped.append(PersistenceLayer(
+                                time=lyr.time[mask],
+                                data=lyr.data[mask],
+                                opacity=lyr.opacity,
+                                width_multiplier=lyr.width_multiplier,
+                                z_order=lyr.z_order,
+                                is_emphasis=lyr.is_emphasis,
+                            ))
+                    self._plot.set_persistence_layers(
+                        trace_name, clipped, t_ref)
+                    is_extrap = False
+                else:
+                    self._plot.set_persistence_layers(
+                        trace_name, result.layers, t_ref)
+                trace_obj.retrigger_extrapolating = is_extrap
+            elif result.layers:
                 self._plot.set_persistence_layers(trace_name, result.layers, t_ref)
             else:
                 self._plot.clear_persistence_layers(trace_name)
+                if trace_obj:
+                    trace_obj.retrigger_extrapolating = False
             self._plot.clear_retrigger_curve(trace_name)
-            if trace_obj:
-                trace_obj.retrigger_extrapolating = False
         elif mode == MODE_AVERAGING:
             self._plot.clear_persistence_layers(trace_name)
             if result.avg_time is not None and result.avg_data is not None:

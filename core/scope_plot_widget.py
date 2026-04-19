@@ -1846,11 +1846,8 @@ class ScopePlotWidget(QWidget):
         self.zoom_y_range(y0, y1)
 
     def zoom_full(self):
-        if self._mode == "split":
-            for lane in self._lanes.values():
-                lane.getPlotItem().enableAutoRange()
-        else:
-            self._overlay_widget.getPlotItem().enableAutoRange()
+        self.zoom_fit_x()
+        self.zoom_fit_y()
 
     def zoom_fit_x(self):
         if self._mode == "split":

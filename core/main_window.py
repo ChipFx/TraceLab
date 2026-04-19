@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
     def _save_settings(self):
         s = self._settings.copy()
         s["theme"] = self.theme.theme_name
+        s["display_mode"] = self._display_mode
         s["geometry"] = self.saveGeometry().toHex().data().decode()
         s["y_lock_auto"] = self._plot.y_lock_auto
         s["interp_mode"] = self._interp_mode
@@ -120,6 +121,7 @@ class MainWindow(QMainWindow):
         s["lane_label_size"] = self._lane_label_size
         s["show_lane_labels"] = self._show_lane_labels
         s["allow_theme_force_labels"] = self._allow_theme_force_labels
+        s["lane_label_spacing"] = self._lane_label_spacing
         try:
             with open(SETTINGS_PATH, "w") as f:
                 json.dump(s, f, indent=2)
@@ -139,12 +141,15 @@ class MainWindow(QMainWindow):
         # Apply saved font scale
         if "font_scale" in self._settings:
             self._apply_font_scale(self._settings["font_scale"])
+        # Restore last view mode
+        self._set_display_mode(self._display_mode, save=False)
         # Set branding on status bar
         self._scope_status.set_branding(self._get_branding_path())
 
     # ── UI Construction ────────────────────────────────────────────────
 
     def _build_ui(self):
+        self._display_mode: str = self._settings.get("display_mode", "split")
         self._import_replace          = self._settings.get("import_replace", True)
         self._import_reset_view       = self._settings.get("import_reset_view", True)
         self._import_reset_retrigger  = self._settings.get("import_reset_retrigger", True)
@@ -222,13 +227,16 @@ class MainWindow(QMainWindow):
         self._show_lane_labels: bool = bool(self._settings.get("show_lane_labels", True))
         self._allow_theme_force_labels: bool = bool(
             self._settings.get("allow_theme_force_labels", False))
+        self._lane_label_spacing: float = float(
+            self._settings.get("lane_label_spacing", 0.3))
         self._plot = ScopePlotWidget(
             self.theme, self._y_lock_auto,
             self._interp_mode, self._viewport_min_pts,
             self._draw_mode, self._density_pen_mapping,
             lane_label_size=self._lane_label_size,
             show_lane_labels=self._show_lane_labels,
-            allow_theme_force_labels=self._allow_theme_force_labels)
+            allow_theme_force_labels=self._allow_theme_force_labels,
+            lane_label_spacing=self._lane_label_spacing)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
@@ -317,10 +325,18 @@ class MainWindow(QMainWindow):
 
         # ── View ──────────────────────────────────────────────────────
         view_menu = mb.addMenu("View")
-        a = view_menu.addAction("Split Lanes (LeCroy Style)")
-        a.triggered.connect(lambda: self._set_display_mode("split"))
-        a = view_menu.addAction("Overlay All Traces")
-        a.triggered.connect(lambda: self._set_display_mode("overlay"))
+        view_mode_group = QActionGroup(self)
+        view_mode_group.setExclusive(True)
+        self._act_view_split = view_menu.addAction("Split Lanes (LeCroy Style)")
+        self._act_view_split.setCheckable(True)
+        self._act_view_split.setChecked(self._display_mode == "split")
+        self._act_view_split.triggered.connect(lambda: self._set_display_mode("split"))
+        view_mode_group.addAction(self._act_view_split)
+        self._act_view_overlay = view_menu.addAction("Overlay All Traces")
+        self._act_view_overlay.setCheckable(True)
+        self._act_view_overlay.setChecked(self._display_mode == "overlay")
+        self._act_view_overlay.triggered.connect(lambda: self._set_display_mode("overlay"))
+        view_mode_group.addAction(self._act_view_overlay)
 
         view_menu.addSeparator()
         a = view_menu.addAction("Zoom to Fit")
@@ -585,6 +601,8 @@ class MainWindow(QMainWindow):
         lane_lbl_menu.setToolTipsVisible(True)
         lane_lbl_menu.addAction("Label Size…").triggered.connect(
             self._dlg_lane_label_size)
+        lane_lbl_menu.addAction("Label Spacing…").triggered.connect(
+            self._dlg_lane_label_spacing)
         self._act_show_lane_labels = lane_lbl_menu.addAction("Show Names")
         self._act_show_lane_labels.setCheckable(True)
         self._act_show_lane_labels.setChecked(self._show_lane_labels)
@@ -910,8 +928,15 @@ class MainWindow(QMainWindow):
 
     # ── Display / Theme ────────────────────────────────────────────────
 
-    def _set_display_mode(self, mode: str):
+    def _set_display_mode(self, mode: str, save: bool = True):
+        self._display_mode = mode
         self._plot.set_mode(mode)
+        # Sync menu checkmarks
+        if hasattr(self, '_act_view_split'):
+            self._act_view_split.setChecked(mode == "split")
+            self._act_view_overlay.setChecked(mode == "overlay")
+        if save:
+            self._settings["display_mode"] = mode
 
     def _set_theme(self, file_id: str, save: bool = True):
         from PyQt6.QtWidgets import QApplication
@@ -929,7 +954,8 @@ class MainWindow(QMainWindow):
             self._plot.apply_lane_label_settings(
                 self._lane_label_size,
                 self._show_lane_labels,
-                self._allow_theme_force_labels)
+                self._allow_theme_force_labels,
+                self._lane_label_spacing)
         if save:
             self._settings["theme"] = file_id
 
@@ -953,19 +979,34 @@ class MainWindow(QMainWindow):
         if ok:
             self._lane_label_size = val
             self._plot.apply_lane_label_settings(
-                val, self._show_lane_labels, self._allow_theme_force_labels)
+                val, self._show_lane_labels, self._allow_theme_force_labels,
+                self._lane_label_spacing)
+            self._save_settings()
+
+    def _dlg_lane_label_spacing(self):
+        val, ok = QInputDialog.getDouble(
+            self, "Label Spacing",
+            "Gap between overlay labels (fraction of text height, 0.1 – 1.5):",
+            self._lane_label_spacing, 0.1, 1.5, 2)
+        if ok:
+            self._lane_label_spacing = val
+            self._plot.apply_lane_label_settings(
+                self._lane_label_size, self._show_lane_labels,
+                self._allow_theme_force_labels, val)
             self._save_settings()
 
     def _toggle_show_lane_labels(self, checked: bool):
         self._show_lane_labels = checked
         self._plot.apply_lane_label_settings(
-            self._lane_label_size, checked, self._allow_theme_force_labels)
+            self._lane_label_size, checked, self._allow_theme_force_labels,
+            self._lane_label_spacing)
         self._save_settings()
 
     def _toggle_allow_theme_force_labels(self, checked: bool):
         self._allow_theme_force_labels = checked
         self._plot.apply_lane_label_settings(
-            self._lane_label_size, self._show_lane_labels, checked)
+            self._lane_label_size, self._show_lane_labels, checked,
+            self._lane_label_spacing)
         self._save_settings()
 
     # ── Cursors ────────────────────────────────────────────────────────

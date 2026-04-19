@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QMenu, QColorDialog, QInputDialog,
                                QLineEdit, QPushButton, QFrame, QSizePolicy)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QFont, QAction
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QAction
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from core.trace_model import TraceModel
@@ -1110,6 +1110,7 @@ class ScopePlotWidget(QWidget):
                  lane_label_size: int = 8,
                  show_lane_labels: bool = True,
                  allow_theme_force_labels: bool = False,
+                 lane_label_spacing: float = 0.3,
                  parent=None):
         super().__init__(parent)
         self._theme_manager = theme_manager
@@ -1126,6 +1127,8 @@ class ScopePlotWidget(QWidget):
         self._lane_label_size: int = lane_label_size
         self._show_lane_labels: bool = show_lane_labels
         self._allow_theme_force_labels: bool = allow_theme_force_labels
+        self._lane_label_spacing: float = lane_label_spacing
+        self._overlay_legend_items: list = []
         self._last_sinc_active = False
         self.traces: List[TraceModel] = []
         self._lanes: Dict[str, TraceLane] = {}
@@ -1191,9 +1194,9 @@ class ScopePlotWidget(QWidget):
             pen = pg.mkPen(color=self._style_context.plot_colors["text"], width=1)
             ax.setPen(pen)
             ax.setTextPen(pen)
-        pi.addLegend(offset=(10, 10))
         pi.sigRangeChanged.connect(lambda: self._range_timer.start())
         pi.sigRangeChanged.connect(self._on_overlay_range_changed)
+        pi.sigRangeChanged.connect(self._reposition_overlay_legend)
         self._overlay_widget.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._overlay_widget.customContextMenuRequested.connect(
@@ -1229,6 +1232,7 @@ class ScopePlotWidget(QWidget):
             lane.apply_theme(theme)
         for visual in self._overlay_visuals.values():
             visual.apply_theme(theme)
+        self._rebuild_overlay_legend()
         self._refresh_cursor_styles()
         self._overlay_widget.update()
         self.update()
@@ -1424,13 +1428,119 @@ class ScopePlotWidget(QWidget):
 
         self._range_timer.start()
 
-    def apply_lane_label_settings(self, size: int, show: bool, allow_force: bool):
-        """Update lane label settings and propagate to all existing lanes."""
+    def apply_lane_label_settings(self, size: int, show: bool, allow_force: bool,
+                                   spacing: float = None):
+        """Update lane label settings and propagate to all existing lanes/legend."""
         self._lane_label_size = size
         self._show_lane_labels = show
         self._allow_theme_force_labels = allow_force
+        if spacing is not None:
+            self._lane_label_spacing = spacing
         for lane in self._lanes.values():
             lane.set_lane_label_settings(size, show, allow_force)
+        self._rebuild_overlay_legend()
+
+    # ── Overlay legend ────────────────────────────────────────────────
+
+    def _overlay_label_visible(self) -> bool:
+        """True when the overlay legend should be shown."""
+        if self._show_lane_labels:
+            return True
+        if self._allow_theme_force_labels:
+            return bool(getattr(self._active_theme, 'force_labels', False))
+        return False
+
+    def _clear_overlay_legend(self):
+        """Remove all legend TextItems from the overlay PlotItem."""
+        pi = self._overlay_widget.getPlotItem()
+        for item in self._overlay_legend_items:
+            try:
+                pi.removeItem(item)
+            except Exception:
+                pass
+        self._overlay_legend_items.clear()
+
+    def _rebuild_overlay_legend(self):
+        """Create fresh legend TextItems for all visible traces (top-right)."""
+        self._clear_overlay_legend()
+        if not self._overlay_z_order or not self._overlay_label_visible():
+            return
+        pi = self._overlay_widget.getPlotItem()
+        bg_color = QColor(
+            self._style_context.plot_colors.get("background", "#0d0d0d"))
+        bg_color.setAlpha(210)
+        font = QFont()
+        font.setPointSize(self._lane_label_size)
+        font.setBold(True)
+        for name in self._overlay_z_order:
+            trace = next((t for t in self.traces if t.name == name), None)
+            if trace is None:
+                continue
+            color = trace.sync_theme_color(self._active_theme)
+            color = _effective_color(color, self._style_context.theme_name)
+            item = pg.TextItem(
+                text=trace.label,
+                color=color,
+                fill=pg.mkBrush(bg_color),
+                anchor=(1.0, 0.0),  # top-right corner of box at setPos point
+            )
+            item.setFont(font)
+            pi.addItem(item, ignoreBounds=True)
+            self._overlay_legend_items.append(item)
+        self._reposition_overlay_legend()
+
+    def _reposition_overlay_legend(self):
+        """Restack legend items in the top-right corner using screen-pixel spacing."""
+        if not self._overlay_legend_items:
+            return
+        try:
+            pi = self._overlay_widget.getPlotItem()
+            vr = pi.viewRange()
+            x_max = vr[0][1]
+            y_max = vr[1][1]
+            y_min = vr[1][0]
+            h_px = max(1.0, float(pi.vb.height()))
+            y_span = max(1e-12, y_max - y_min)
+            # Measure actual line height from font metrics
+            font = QFont()
+            font.setPointSize(self._lane_label_size)
+            font.setBold(True)
+            font_h_px = float(QFontMetrics(font).height())
+            # line slot = text height + gap (spacing_factor × text height)
+            line_slot_px = font_h_px * (1.0 + self._lane_label_spacing)
+            line_slot_data = line_slot_px * y_span / h_px
+            for i, item in enumerate(self._overlay_legend_items):
+                item.setPos(x_max, y_max - i * line_slot_data)
+        except Exception:
+            pass
+
+    def _update_overlay_legend_items(self):
+        """Refresh text/colors of existing items; rebuilds if count changed."""
+        if len(self._overlay_legend_items) != len(self._overlay_z_order):
+            self._rebuild_overlay_legend()
+            return
+        if not self._overlay_label_visible():
+            for item in self._overlay_legend_items:
+                item.setVisible(False)
+            return
+        bg_color = QColor(
+            self._style_context.plot_colors.get("background", "#0d0d0d"))
+        bg_color.setAlpha(210)
+        font = QFont()
+        font.setPointSize(self._lane_label_size)
+        font.setBold(True)
+        for item, name in zip(self._overlay_legend_items, self._overlay_z_order):
+            trace = next((t for t in self.traces if t.name == name), None)
+            if trace is None:
+                continue
+            color = trace.sync_theme_color(self._active_theme)
+            color = _effective_color(color, self._style_context.theme_name)
+            item.setColor(color)
+            item.fill = pg.mkBrush(bg_color)
+            item.setText(trace.label)
+            item.setFont(font)
+            item.setVisible(True)
+        self._reposition_overlay_legend()
 
     def _refresh_overlay_visuals(self):
         visible = [t for t in self.traces if t.visible]
@@ -1457,6 +1567,7 @@ class ScopePlotWidget(QWidget):
 
         if self.y_lock_auto:
             self._overlay_widget.getPlotItem().enableAutoRange(axis="y")
+        self._update_overlay_legend_items()
         self._range_timer.start()
 
     def _rebuild_overlay(self):
@@ -1509,6 +1620,7 @@ class ScopePlotWidget(QWidget):
             if visual:
                 visual.set_retrigger_curve(t_abs, data)
 
+        self._rebuild_overlay_legend()
         self._range_timer.start()
 
     # ── Persistence / retrigger public API ────────────────────────────────────

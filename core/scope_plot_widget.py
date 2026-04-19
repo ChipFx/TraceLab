@@ -292,7 +292,11 @@ class TraceLane(pg.PlotWidget):
 
     def __init__(self, trace: TraceModel, style_context: TraceStyleContext,
                  y_lock_auto: bool = True,
-                 interp_mode: str = "linear", parent=None):
+                 interp_mode: str = "linear",
+                 lane_label_size: int = 8,
+                 show_lane_labels: bool = True,
+                 allow_theme_force_labels: bool = False,
+                 parent=None):
         self._y_axis = EngineeringAxisItem(orientation="left")
         self._x_axis = EngineeringTimeAxisItem(orientation="bottom")
         unit = getattr(trace, 'unit', '') or ''
@@ -306,6 +310,9 @@ class TraceLane(pg.PlotWidget):
         self.y_lock_auto = y_lock_auto
         self.interp_mode = interp_mode   # "linear" or "sinc"
         self.viewport_min_pts = 1024      # minimum display points; set from settings
+        self._lane_label_size: int = lane_label_size
+        self._show_lane_labels: bool = show_lane_labels
+        self._allow_theme_force_labels: bool = allow_theme_force_labels
         self._curve = None
         self._persist_curves: list = []   # ghost curves for persistence layers
         self._retrigger_curve = None      # averaged / interpolated override curve
@@ -330,6 +337,9 @@ class TraceLane(pg.PlotWidget):
         self.getPlotItem().sigRangeChanged.connect(
             lambda: self.view_range_changed.emit(self))
 
+        # Floating trace name label pinned to top-right of canvas
+        self._setup_trace_label_item()
+
     def _on_view_changed(self):
         """Re-draw curve when zoomed in enough that sinc/cubic would kick in."""
         if self.interp_mode in ("sinc", "cubic"):
@@ -337,6 +347,7 @@ class TraceLane(pg.PlotWidget):
         else:
             self._apply_resolved_style()
             self._reapply_original_style()
+        self._reposition_trace_label()
 
     def _setup_plot(self):
         pi = self.getPlotItem()
@@ -360,9 +371,11 @@ class TraceLane(pg.PlotWidget):
         plot_colors = style_context.plot_colors
         pi = self.getPlotItem()
         self.setBackground(plot_colors["background"])
-        disp_color = self._display_color()
-        ylabel = f"<span style='color:{disp_color}'>{self.trace.label}</span>"
-        pi.setLabel("left", ylabel, color=plot_colors["text"])
+        pi.setLabel("left", "")                    # trace name lives in overlay, not axis
+        try:
+            pi.getAxis("left").showLabel(False)     # suppress label area and (x0.001) clutter
+        except Exception:
+            pass
         for ax_name in ("left", "bottom", "top", "right"):
             ax = pi.getAxis(ax_name)
             pen = pg.mkPen(color=plot_colors["text"], width=1)
@@ -371,6 +384,7 @@ class TraceLane(pg.PlotWidget):
         self._last_style_key = None
         self._apply_resolved_style()
         self._redraw_labels()
+        self._update_trace_label_item()
         self.update()
         self.repaint()
 
@@ -379,6 +393,74 @@ class TraceLane(pg.PlotWidget):
             theme,
             self._style_context.draw_mode,
             self._style_context.density_pen_mapping))
+
+    # ── Floating trace label overlay ──────────────────────────────────
+
+    def _label_visible(self) -> bool:
+        """True when the overlay label should be shown."""
+        if self._show_lane_labels:
+            return True
+        if self._allow_theme_force_labels:
+            return bool(getattr(self._style_context.theme, 'force_labels', False))
+        return False
+
+    def _setup_trace_label_item(self):
+        """Create a TextItem pinned to the top-right corner of the plot canvas."""
+        disp_color = self._display_color()
+        bg_color = QColor(
+            self._style_context.plot_colors.get("background", "#0d0d0d"))
+        bg_color.setAlpha(210)
+        self._trace_label_item = pg.TextItem(
+            text=self.trace.label,
+            color=disp_color,
+            fill=pg.mkBrush(bg_color),
+            anchor=(1.0, 0.0),   # top-right corner of text box at setPos point
+        )
+        font = QFont()
+        font.setPointSize(self._lane_label_size)
+        font.setBold(True)
+        self._trace_label_item.setFont(font)
+        self.getPlotItem().addItem(self._trace_label_item, ignoreBounds=True)
+        self._trace_label_item.setVisible(self._label_visible())
+        self._reposition_trace_label()
+
+    def _update_trace_label_item(self):
+        """Update text, colour and visibility of the floating label; no-op until item exists."""
+        if not hasattr(self, '_trace_label_item'):
+            return
+        disp_color = self._display_color()
+        bg_color = QColor(
+            self._style_context.plot_colors.get("background", "#0d0d0d"))
+        bg_color.setAlpha(210)
+        self._trace_label_item.fill = pg.mkBrush(bg_color)
+        self._trace_label_item.setColor(disp_color)
+        self._trace_label_item.setVisible(self._label_visible())
+        self._trace_label_item.setText(self.trace.label)  # triggers repaint
+        self._reposition_trace_label()
+
+    def _reposition_trace_label(self):
+        """Move the label to the top-right of the current viewport."""
+        if not hasattr(self, '_trace_label_item'):
+            return
+        try:
+            vr = self.getPlotItem().viewRange()
+            self._trace_label_item.setPos(vr[0][1], vr[1][1])
+        except Exception:
+            pass
+
+    def set_lane_label_settings(self, size: int, show: bool, allow_force: bool):
+        """Update label size and visibility; safe to call at any time."""
+        self._lane_label_size = size
+        self._show_lane_labels = show
+        self._allow_theme_force_labels = allow_force
+        if not hasattr(self, '_trace_label_item'):
+            return
+        font = QFont()
+        font.setPointSize(size)
+        font.setBold(True)
+        self._trace_label_item.setFont(font)
+        self._trace_label_item.setVisible(self._label_visible())
+        self._trace_label_item.setText(self.trace.label)  # trigger repaint
 
     def _current_viewport(self) -> RenderViewport:
         x_range, y_range = self.getPlotItem().viewRange()
@@ -700,20 +782,14 @@ class TraceLane(pg.PlotWidget):
         if c.isValid():
             self.trace.set_user_color(c.name())
             self.refresh_curve()
-            color = self._display_color()
-            self.getPlotItem().setLabel(
-                "left",
-                f"<span style='color:{color}'>{self.trace.label}</span>")
+            self._update_trace_label_item()
 
     def _rename(self):
         text, ok = QInputDialog.getText(
             self, "Rename", "New label:", text=self.trace.label)
         if ok and text:
             self.trace.label = text
-            color = self._display_color()
-            self.getPlotItem().setLabel(
-                "left",
-                f"<span style='color:{color}'>{self.trace.label}</span>")
+            self._update_trace_label_item()
 
 
 def _composite_branding(img: "QImage", svg_path: str) -> "QImage":
@@ -1031,6 +1107,9 @@ class ScopePlotWidget(QWidget):
                  viewport_min_pts: int = 1024,
                  draw_mode: str = DEFAULT_DRAW_MODE,
                  density_pen_mapping: Optional[dict] = None,
+                 lane_label_size: int = 8,
+                 show_lane_labels: bool = True,
+                 allow_theme_force_labels: bool = False,
                  parent=None):
         super().__init__(parent)
         self._theme_manager = theme_manager
@@ -1044,6 +1123,9 @@ class ScopePlotWidget(QWidget):
         self.y_lock_auto = y_lock_auto
         self.interp_mode = interp_mode
         self.viewport_min_pts = viewport_min_pts
+        self._lane_label_size: int = lane_label_size
+        self._show_lane_labels: bool = show_lane_labels
+        self._allow_theme_force_labels: bool = allow_theme_force_labels
         self._last_sinc_active = False
         self.traces: List[TraceModel] = []
         self._lanes: Dict[str, TraceLane] = {}
@@ -1311,7 +1393,10 @@ class ScopePlotWidget(QWidget):
             lane = TraceLane(trace, self._style_context,
                               self.y_lock_auto,
                               getattr(trace, '_interp_mode_override',
-                                      self.interp_mode))
+                                      self.interp_mode),
+                              lane_label_size=self._lane_label_size,
+                              show_lane_labels=self._show_lane_labels,
+                              allow_theme_force_labels=self._allow_theme_force_labels)
             lane.viewport_min_pts = self.viewport_min_pts
             lane.setMinimumHeight(80)
             if first_lane is None:
@@ -1338,6 +1423,14 @@ class ScopePlotWidget(QWidget):
                 lane.set_retrigger_curve(t_abs, data)
 
         self._range_timer.start()
+
+    def apply_lane_label_settings(self, size: int, show: bool, allow_force: bool):
+        """Update lane label settings and propagate to all existing lanes."""
+        self._lane_label_size = size
+        self._show_lane_labels = show
+        self._allow_theme_force_labels = allow_force
+        for lane in self._lanes.values():
+            lane.set_lane_label_settings(size, show, allow_force)
 
     def _refresh_overlay_visuals(self):
         visible = [t for t in self.traces if t.visible]

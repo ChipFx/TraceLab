@@ -117,6 +117,9 @@ class MainWindow(QMainWindow):
         s["auto_retrigger"] = self._trigger_panel.chk_auto_retrigger.isChecked()
         s["periodicity_estimation_method"] = self._periodicity_method
         s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
+        s["lane_label_size"] = self._lane_label_size
+        s["show_lane_labels"] = self._show_lane_labels
+        s["allow_theme_force_labels"] = self._allow_theme_force_labels
         try:
             with open(SETTINGS_PATH, "w") as f:
                 json.dump(s, f, indent=2)
@@ -215,10 +218,17 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(self._channel_panel)
 
         self._interp_mode = self._settings.get("interp_mode", "linear")
+        self._lane_label_size: int = int(self._settings.get("lane_label_size", 8))
+        self._show_lane_labels: bool = bool(self._settings.get("show_lane_labels", True))
+        self._allow_theme_force_labels: bool = bool(
+            self._settings.get("allow_theme_force_labels", False))
         self._plot = ScopePlotWidget(
             self.theme, self._y_lock_auto,
             self._interp_mode, self._viewport_min_pts,
-            self._draw_mode, self._density_pen_mapping)
+            self._draw_mode, self._density_pen_mapping,
+            lane_label_size=self._lane_label_size,
+            show_lane_labels=self._show_lane_labels,
+            allow_theme_force_labels=self._allow_theme_force_labels)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
@@ -570,6 +580,27 @@ class MainWindow(QMainWindow):
             per_group.addAction(act)
             self._periodicity_method_actions[tier] = act
 
+        settings_menu.addSeparator()
+        lane_lbl_menu = settings_menu.addMenu("Lane Labels")
+        lane_lbl_menu.setToolTipsVisible(True)
+        lane_lbl_menu.addAction("Label Size…").triggered.connect(
+            self._dlg_lane_label_size)
+        self._act_show_lane_labels = lane_lbl_menu.addAction("Show Names")
+        self._act_show_lane_labels.setCheckable(True)
+        self._act_show_lane_labels.setChecked(self._show_lane_labels)
+        self._act_show_lane_labels.setToolTip(
+            "Show/hide the floating channel name in each split-lane panel.")
+        self._act_show_lane_labels.triggered.connect(self._toggle_show_lane_labels)
+        self._act_allow_force_labels = lane_lbl_menu.addAction("Allow Theme Override")
+        self._act_allow_force_labels.setCheckable(True)
+        self._act_allow_force_labels.setChecked(self._allow_theme_force_labels)
+        self._act_allow_force_labels.setToolTip(
+            "When enabled, a theme that has force_labels=true will always show\n"
+            "lane labels regardless of the Show Names toggle.\n"
+            "Useful for monochromatic themes where colour alone is ambiguous.")
+        self._act_allow_force_labels.triggered.connect(
+            self._toggle_allow_theme_force_labels)
+
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Reload Plugins").triggered.connect(
@@ -893,6 +924,12 @@ class MainWindow(QMainWindow):
             self._scope_status.set_palette(self.theme.statusbar_palette())
             self._scope_status.set_branding(self._get_branding_path())
         self._refresh_status_bar()
+        # Re-evaluate force_labels in case the new theme has a different value
+        if hasattr(self, '_plot'):
+            self._plot.apply_lane_label_settings(
+                self._lane_label_size,
+                self._show_lane_labels,
+                self._allow_theme_force_labels)
         if save:
             self._settings["theme"] = file_id
 
@@ -906,6 +943,30 @@ class MainWindow(QMainWindow):
         self._act_y_lock.blockSignals(True)
         self._act_y_lock.setChecked(checked)
         self._act_y_lock.blockSignals(False)
+
+    # ── Lane label settings ───────────────────────────────────────────
+
+    def _dlg_lane_label_size(self):
+        val, ok = QInputDialog.getInt(
+            self, "Label Size", "Font size (pt) for in-panel trace names:",
+            self._lane_label_size, 4, 32, 1)
+        if ok:
+            self._lane_label_size = val
+            self._plot.apply_lane_label_settings(
+                val, self._show_lane_labels, self._allow_theme_force_labels)
+            self._save_settings()
+
+    def _toggle_show_lane_labels(self, checked: bool):
+        self._show_lane_labels = checked
+        self._plot.apply_lane_label_settings(
+            self._lane_label_size, checked, self._allow_theme_force_labels)
+        self._save_settings()
+
+    def _toggle_allow_theme_force_labels(self, checked: bool):
+        self._allow_theme_force_labels = checked
+        self._plot.apply_lane_label_settings(
+            self._lane_label_size, self._show_lane_labels, checked)
+        self._save_settings()
 
     # ── Cursors ────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 """
-PyScope Plugin: RMS Calculator
+TraceLab Plugin: RMS Calculator
 Type: analyzer
 
 Shows RMS, peak-to-peak, mean, and std dev for all visible traces

@@ -949,6 +949,8 @@ class MainWindow(QMainWindow):
             self._scope_status.set_palette(self.theme.statusbar_palette())
             self._scope_status.set_branding(self._get_branding_path())
         self._refresh_status_bar()
+        if hasattr(self, '_theme_submenu'):
+            self._rebuild_theme_menu()
         # Re-evaluate force_labels in case the new theme has a different value
         if hasattr(self, '_plot'):
             self._plot.apply_lane_label_settings(
@@ -1485,7 +1487,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(grp)
 
         layout.addWidget(QLabel(
-            "<i>Note: PyScope input fields always accept both '.' and ','\n"
+            "<i>Note: TraceLab input fields always accept both '.' and ','\n"
             "as decimal when 'Both' is selected, regardless of system locale.\n"
             "The numpad dot will always work.</i>"))
 

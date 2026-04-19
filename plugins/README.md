@@ -1,4 +1,4 @@
-# PyScope Plugin Guide
+# TraceLab Plugin Guide
 
 Drop `.py` files into this folder — they appear automatically in the **Plugins** menu.
 Use **Plugins → Reload Plugins** to pick up changes without restarting.

@@ -1,1 +1,1 @@
-# PyScope core package
+# TraceLab core package

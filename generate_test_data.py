@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 generate_test_data.py
-Generates a sample CSV file for testing PyScope.
+Generates a sample CSV file for testing TraceLab.
 Run: python generate_test_data.py
 """
 
@@ -45,6 +45,6 @@ print("  Ch4: 200 Hz sine + noise")
 print("  Ch5: ADC ramp 0-4095 (try scaling to -1.25V..+1.25V)")
 print("  Ch6: Mixed (Ch1+Ch2)/2")
 print()
-print("Load into PyScope with: python main.py")
+print("Load into TraceLab with: python main.py")
 print("  - Use the time column for time axis, or set SPS=10000")
 print("  - For Ch5, enable scaling: 0→4095 maps to -1.25V→+1.25V")

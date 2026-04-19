@@ -69,7 +69,7 @@ class PluginManager:
         module_name = os.path.splitext(os.path.basename(filepath))[0]
         try:
             spec = importlib.util.spec_from_file_location(
-                f"pyscope_plugin_{module_name}", filepath)
+                f"tracelab_plugin_{module_name}", filepath)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
 

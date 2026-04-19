@@ -1,6 +1,6 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb000300000000062d000003c900000a36000007320000062d000003e800000a360000073200000000000000000f000000062d000003e800000a3600000732",
+  "geometry": "01d9d0cb00030000000003c7000000c8000007c200000421000003c7000000e7000007c20000042100000000000000000f00000003c7000000e7000007c200000421",
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 10.0,
@@ -20,8 +20,8 @@
   ],
   "color_overrides": {},
   "max_display_points": 50000,
-  "default_sample_rate": 1000,
-  "last_open_folder": "./",
+  "default_sample_rate": 2200000.0,
+  "last_open_folder": "E:\\Asmyldof\\002 - Tools\\501 - PyScope\\CLaudeAI Init\\pyscope.tar\\pyscope\\oscilloscope",
   "last_save_folder": "./",
   "remember_folder": true,
   "interp_mode": "linear",
@@ -63,5 +63,7 @@
   "retrigger_extrap_mode": "clip",
   "lane_label_size": 10,
   "show_lane_labels": true,
-  "allow_theme_force_labels": false
+  "allow_theme_force_labels": false,
+  "lane_label_spacing": 0.3,
+  "display_mode": "split"
 }

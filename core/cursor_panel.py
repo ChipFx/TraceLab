@@ -5,7 +5,7 @@ Shows cursor time positions and delta measurements.
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QGridLayout, QSizePolicy, QScrollArea, QTableWidget,
+    QFrame, QGridLayout, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -70,10 +70,11 @@ class CursorPanel(QWidget):
     place_cursor   = pyqtSignal(int)   # emits cursor_id
     set_t0_at_a    = pyqtSignal()      # request: set time-zero at cursor A
     jump_to_t0     = pyqtSignal()      # request: center t=0 in current viewport
+    remove_cursors = pyqtSignal()      # request: clear both cursors from plot
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumWidth(200)
+        self.setMinimumWidth(160)
         self._cursor_times = {0: None, 1: None}
         self._trace_values: Dict[int, Dict] = {}  # cursor_id -> {name: value}
         self._trace_display_order: List[str] = []  # set by main window
@@ -81,79 +82,95 @@ class CursorPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
 
-        # Cursor A
-        grp_a = QGroupBox("Cursor A")
-        grp_a.setStyleSheet("QGroupBox::title { color: #ffcc00; }")
-        ga = QGridLayout(grp_a)
-        self.lbl_a_time = QLabel("---")
-        self.lbl_a_time.setFont(QFont("Courier New", 10))
-        ga.addWidget(QLabel("Time:"), 0, 0)
-        ga.addWidget(self.lbl_a_time, 0, 1)
+        # ── Row 1: placement + remove ──────────────────────────────────
+        row1 = QHBoxLayout()
+        row1.setSpacing(3)
         btn_place_a = QPushButton("Place A")
         btn_place_a.clicked.connect(lambda: self.place_cursor.emit(0))
-        ga.addWidget(btn_place_a, 1, 0)
-        btn_t0 = QPushButton("Set t=0 here")
+        row1.addWidget(btn_place_a)
+        btn_place_b = QPushButton("Place B")
+        btn_place_b.clicked.connect(lambda: self.place_cursor.emit(1))
+        row1.addWidget(btn_place_b)
+        btn_remove = QPushButton("Remove")
+        btn_remove.setToolTip("Remove both cursors from the plot")
+        btn_remove.clicked.connect(self.remove_cursors)
+        row1.addWidget(btn_remove)
+        layout.addLayout(row1)
+
+        # ── Row 2: t=0 controls ────────────────────────────────────────
+        row2 = QHBoxLayout()
+        row2.setSpacing(3)
+        btn_t0 = QPushButton("Set t=0 @ A")
         btn_t0.setToolTip(
             "Shift all traces so Cursor A position becomes t=0.\n"
             "Points before it get negative time.")
-        btn_t0.setStyleSheet("font-size: 9px;")
         btn_t0.clicked.connect(self.set_t0_at_a)
-        ga.addWidget(btn_t0, 1, 1)
+        row2.addWidget(btn_t0)
         btn_jump_t0 = QPushButton("Jump to t=0")
         btn_jump_t0.setToolTip(
             "Keep the current zoom span and move t=0 to the middle of the viewport.")
-        btn_jump_t0.setStyleSheet("font-size: 9px;")
         btn_jump_t0.clicked.connect(self.jump_to_t0)
-        ga.addWidget(btn_jump_t0, 2, 0, 1, 2)
-        layout.addWidget(grp_a)
+        row2.addWidget(btn_jump_t0)
+        layout.addLayout(row2)
 
-        # Cursor B
-        grp_b = QGroupBox("Cursor B")
-        grp_b.setStyleSheet("QGroupBox::title { color: #00ccff; }")
-        gb = QGridLayout(grp_b)
+        # ── Separator ──────────────────────────────────────────────────
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setStyleSheet("color: #444;")
+        layout.addWidget(sep1)
+
+        # ── Time + delta readout ───────────────────────────────────────
+        grid = QGridLayout()
+        grid.setSpacing(2)
+        grid.setContentsMargins(2, 2, 2, 2)
+
+        lbl_a_key = QLabel("A:")
+        lbl_a_key.setStyleSheet("color: #ffcc00; font-weight: bold;")
+        grid.addWidget(lbl_a_key, 0, 0)
+        self.lbl_a_time = QLabel("---")
+        self.lbl_a_time.setFont(QFont("Courier New", 9))
+        grid.addWidget(self.lbl_a_time, 0, 1)
+
+        lbl_b_key = QLabel("B:")
+        lbl_b_key.setStyleSheet("color: #00ccff; font-weight: bold;")
+        grid.addWidget(lbl_b_key, 1, 0)
         self.lbl_b_time = QLabel("---")
-        self.lbl_b_time.setFont(QFont("Courier New", 10))
-        gb.addWidget(QLabel("Time:"), 0, 0)
-        gb.addWidget(self.lbl_b_time, 0, 1)
-        btn_place_b = QPushButton("Place B")
-        btn_place_b.clicked.connect(lambda: self.place_cursor.emit(1))
-        gb.addWidget(btn_place_b, 1, 0, 1, 2)
-        layout.addWidget(grp_b)
+        self.lbl_b_time.setFont(QFont("Courier New", 9))
+        grid.addWidget(self.lbl_b_time, 1, 1)
 
-        # Delta
-        grp_d = QGroupBox("ΔT  (B − A)")
-        gd = QGridLayout(grp_d)
+        grid.addWidget(QLabel("Δt:"), 2, 0)
         self.lbl_dt = QLabel("---")
-        self.lbl_dt.setFont(QFont("Courier New", 10))
+        self.lbl_dt.setFont(QFont("Courier New", 9))
+        grid.addWidget(self.lbl_dt, 2, 1)
+
+        grid.addWidget(QLabel("1/Δt:"), 3, 0)
         self.lbl_freq = QLabel("---")
         self.lbl_freq.setFont(QFont("Courier New", 9))
-        gd.addWidget(QLabel("Δt:"), 0, 0)
-        gd.addWidget(self.lbl_dt, 0, 1)
-        gd.addWidget(QLabel("1/Δt:"), 1, 0)
-        gd.addWidget(self.lbl_freq, 1, 1)
-        layout.addWidget(grp_d)
+        grid.addWidget(self.lbl_freq, 3, 1)
 
-        # Per-trace values
-        grp_vals = QGroupBox("Values at Cursors")
-        gv = QVBoxLayout(grp_vals)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
 
+        # ── Separator ──────────────────────────────────────────────────
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color: #444;")
+        layout.addWidget(sep2)
+
+        # ── Values table ───────────────────────────────────────────────
         self.table = QTableWidget()
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["Trace", "@ A", "@ B"])
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
-        self.table.setMaximumHeight(200)
-        gv.addWidget(self.table)
+        layout.addWidget(self.table, stretch=1)
 
         btn_export = QPushButton("Export CSV")
         btn_export.clicked.connect(self._export_csv)
-        gv.addWidget(btn_export)
-        layout.addWidget(grp_vals)
-
-        layout.addStretch()
+        layout.addWidget(btn_export)
 
     def update_cursors(self, cursor_data: dict):
         """Called when cursor positions/values change."""

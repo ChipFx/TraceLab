@@ -1,9 +1,9 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb00030000000005c10000008d00000a05000004b0000005c1000000ac00000a05000004b000000000000000000f00000005c1000000ac00000a05000004b0",
+  "geometry": "01d9d0cb00030000000003c7000000c800000a4700000538000003c7000000e700000a470000053800000000000000000f00000003c7000000e700000a4700000538",
   "import_replace": true,
   "import_reset_view": true,
-  "fft_min_freq": 50.0,
+  "fft_min_freq": 10.0,
   "y_lock_auto": true,
   "font_scale": 1.2500000000000002,
   "trace_colors": [
@@ -20,7 +20,7 @@
   ],
   "color_overrides": {},
   "max_display_points": 50000,
-  "default_sample_rate": 1000,
+  "default_sample_rate": 2200000.0,
   "last_open_folder": "./",
   "last_save_folder": "./",
   "remember_folder": true,
@@ -38,8 +38,8 @@
   "retrigger_mode": "off",
   "persistence": {
     "count": 10,
-    "selection": "first",
-    "emphasis": "first",
+    "selection": "last",
+    "emphasis": "last",
     "opacity_decay": 0.7,
     "width_growth": 1.4
   },
@@ -51,7 +51,7 @@
     "count": 20,
     "original_display": "dimmed"
   },
-  "auto_retrigger": false,
+  "auto_retrigger": true,
   "fft_marker_bg_opacity": 0.6,
   "original_dimmed_opacity": 0.35,
   "dashed_line_config": {
@@ -59,5 +59,11 @@
     "space": 4
   },
   "periodicity_estimation_method": "precise",
-  "import_reset_retrigger": true
+  "import_reset_retrigger": true,
+  "retrigger_extrap_mode": "clip",
+  "lane_label_size": 10,
+  "show_lane_labels": true,
+  "allow_theme_force_labels": false,
+  "lane_label_spacing": 0.3,
+  "display_mode": "split"
 }

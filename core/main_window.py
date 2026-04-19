@@ -44,6 +44,7 @@ from core.retrigger import (
     MODE_OFF, MODE_PERSIST_FUTURE, MODE_PERSIST_PAST,
     MODE_AVERAGING, MODE_INTERPOLATION, PERSIST_MODES,
     PERSISTENCE_DEFAULTS, AVERAGING_DEFAULTS, INTERPOLATION_DEFAULTS,
+    PersistenceLayer,
     apply_mode_with_triggers as retrigger_apply_with_triggers,
     find_all_triggers,
     find_all_triggers_with_times,
@@ -97,6 +98,7 @@ class MainWindow(QMainWindow):
     def _save_settings(self):
         s = self._settings.copy()
         s["theme"] = self.theme.theme_name
+        s["display_mode"] = self._display_mode
         s["geometry"] = self.saveGeometry().toHex().data().decode()
         s["y_lock_auto"] = self._plot.y_lock_auto
         s["interp_mode"] = self._interp_mode
@@ -116,6 +118,10 @@ class MainWindow(QMainWindow):
         s["auto_retrigger"] = self._trigger_panel.chk_auto_retrigger.isChecked()
         s["periodicity_estimation_method"] = self._periodicity_method
         s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
+        s["lane_label_size"] = self._lane_label_size
+        s["show_lane_labels"] = self._show_lane_labels
+        s["allow_theme_force_labels"] = self._allow_theme_force_labels
+        s["lane_label_spacing"] = self._lane_label_spacing
         try:
             with open(SETTINGS_PATH, "w") as f:
                 json.dump(s, f, indent=2)
@@ -135,12 +141,15 @@ class MainWindow(QMainWindow):
         # Apply saved font scale
         if "font_scale" in self._settings:
             self._apply_font_scale(self._settings["font_scale"])
+        # Restore last view mode
+        self._set_display_mode(self._display_mode, save=False)
         # Set branding on status bar
         self._scope_status.set_branding(self._get_branding_path())
 
     # ── UI Construction ────────────────────────────────────────────────
 
     def _build_ui(self):
+        self._display_mode: str = self._settings.get("display_mode", "split")
         self._import_replace          = self._settings.get("import_replace", True)
         self._import_reset_view       = self._settings.get("import_reset_view", True)
         self._import_reset_retrigger  = self._settings.get("import_reset_retrigger", True)
@@ -214,10 +223,20 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(self._channel_panel)
 
         self._interp_mode = self._settings.get("interp_mode", "linear")
+        self._lane_label_size: int = int(self._settings.get("lane_label_size", 8))
+        self._show_lane_labels: bool = bool(self._settings.get("show_lane_labels", True))
+        self._allow_theme_force_labels: bool = bool(
+            self._settings.get("allow_theme_force_labels", False))
+        self._lane_label_spacing: float = float(
+            self._settings.get("lane_label_spacing", 0.3))
         self._plot = ScopePlotWidget(
             self.theme, self._y_lock_auto,
             self._interp_mode, self._viewport_min_pts,
-            self._draw_mode, self._density_pen_mapping)
+            self._draw_mode, self._density_pen_mapping,
+            lane_label_size=self._lane_label_size,
+            show_lane_labels=self._show_lane_labels,
+            allow_theme_force_labels=self._allow_theme_force_labels,
+            lane_label_spacing=self._lane_label_spacing)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
@@ -257,6 +276,7 @@ class MainWindow(QMainWindow):
         self._cursor_panel.place_cursor.connect(self._start_cursor_placement)
         self._cursor_panel.set_t0_at_a.connect(self._cursor_set_t0_at_a)
         self._cursor_panel.jump_to_t0.connect(self._jump_to_t0)
+        self._cursor_panel.remove_cursors.connect(self._plot.clear_cursors)
         right_splitter.addWidget(self._cursor_panel)
 
         self._trigger_panel = TriggerPanel()
@@ -305,10 +325,18 @@ class MainWindow(QMainWindow):
 
         # ── View ──────────────────────────────────────────────────────
         view_menu = mb.addMenu("View")
-        a = view_menu.addAction("Split Lanes (LeCroy Style)")
-        a.triggered.connect(lambda: self._set_display_mode("split"))
-        a = view_menu.addAction("Overlay All Traces")
-        a.triggered.connect(lambda: self._set_display_mode("overlay"))
+        view_mode_group = QActionGroup(self)
+        view_mode_group.setExclusive(True)
+        self._act_view_split = view_menu.addAction("Split Lanes (LeCroy Style)")
+        self._act_view_split.setCheckable(True)
+        self._act_view_split.setChecked(self._display_mode == "split")
+        self._act_view_split.triggered.connect(lambda: self._set_display_mode("split"))
+        view_mode_group.addAction(self._act_view_split)
+        self._act_view_overlay = view_menu.addAction("Overlay All Traces")
+        self._act_view_overlay.setCheckable(True)
+        self._act_view_overlay.setChecked(self._display_mode == "overlay")
+        self._act_view_overlay.triggered.connect(lambda: self._set_display_mode("overlay"))
+        view_mode_group.addAction(self._act_view_overlay)
 
         view_menu.addSeparator()
         a = view_menu.addAction("Zoom to Fit")
@@ -388,63 +416,6 @@ class MainWindow(QMainWindow):
         self._theme_submenu = view_menu.addMenu("Theme")
         self._rebuild_theme_menu()
 
-        # ── Retrigger ──────────────────────────────────────────────────
-        view_menu.addSeparator()
-        rt_menu = view_menu.addMenu("Retrigger")
-
-        persist_menu = rt_menu.addMenu("Persistence")
-        persist_group = QActionGroup(self)
-        persist_group.setExclusive(True)
-
-        self._act_persist_off = persist_menu.addAction("Off")
-        self._act_persist_off.setCheckable(True)
-        self._act_persist_off.setChecked(self._retrigger_mode == MODE_OFF)
-        persist_group.addAction(self._act_persist_off)
-        self._act_persist_off.triggered.connect(
-            lambda: self._set_retrigger_mode(MODE_OFF))
-
-        self._act_persist_future = persist_menu.addAction("Future Persist")
-        self._act_persist_future.setCheckable(True)
-        self._act_persist_future.setChecked(
-            self._retrigger_mode == MODE_PERSIST_FUTURE)
-        self._act_persist_future.setToolTip(
-            "First trigger shown as hard line; later triggers fade into "
-            "the future below it.")
-        persist_group.addAction(self._act_persist_future)
-        self._act_persist_future.triggered.connect(
-            lambda: self._set_retrigger_mode(MODE_PERSIST_FUTURE))
-
-        self._act_persist_past = persist_menu.addAction("Past Persist (Normal)")
-        self._act_persist_past.setCheckable(True)
-        self._act_persist_past.setChecked(
-            self._retrigger_mode == MODE_PERSIST_PAST)
-        self._act_persist_past.setToolTip(
-            "Last trigger shown as hard line; earlier triggers fade into "
-            "history below it.  Classic oscilloscope persistence.")
-        persist_group.addAction(self._act_persist_past)
-        self._act_persist_past.triggered.connect(
-            lambda: self._set_retrigger_mode(MODE_PERSIST_PAST))
-
-        rt_menu.addSeparator()
-
-        self._act_rt_averaging = rt_menu.addAction("Averaging")
-        self._act_rt_averaging.setCheckable(True)
-        self._act_rt_averaging.setChecked(self._retrigger_mode == MODE_AVERAGING)
-        self._act_rt_averaging.setToolTip(
-            "Average multiple trigger-aligned segments to reduce noise.")
-        self._act_rt_averaging.triggered.connect(
-            self._toggle_retrigger_averaging)
-
-        self._act_rt_interp = rt_menu.addAction("Interpolate")
-        self._act_rt_interp.setCheckable(True)
-        self._act_rt_interp.setChecked(
-            self._retrigger_mode == MODE_INTERPOLATION)
-        self._act_rt_interp.setToolTip(
-            "Interleave multiple trigger-aligned segments to increase "
-            "effective sample resolution.")
-        self._act_rt_interp.triggered.connect(
-            self._toggle_retrigger_interpolation)
-
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
         a = analysis_menu.addAction("FFT...")
@@ -465,30 +436,64 @@ class MainWindow(QMainWindow):
         a = analysis_menu.addAction("Clear All Labels")
         a.triggered.connect(self._clear_all_labels)
 
-        # ── Settings ──────────────────────────────────────────────────
-        settings_menu = mb.addMenu("Settings")
-        settings_menu.addAction("Font Scale...").triggered.connect(
-            self._show_font_scale_dialog)
-        settings_menu.addAction("Decimal Separator...").triggered.connect(
-            self._show_decimal_sep_dialog)
-        settings_menu.addSeparator()
-        settings_menu.addAction("Edit Current Theme...").triggered.connect(
-            self._open_theme_editor)
-        settings_menu.addAction("Reload Themes from Disk").triggered.connect(
-            self._reload_themes)
-        settings_menu.addSeparator()
-        self._act_remember_folder = settings_menu.addAction("Remember Last Folder")
-        self._act_remember_folder.setCheckable(True)
-        self._act_remember_folder.setChecked(
-            self._settings.get("remember_folder", True))
-        self._act_remember_folder.setToolTip(
-            "When enabled, open/save dialogs start in the last used folder.")
-        self._act_remember_folder.triggered.connect(self._toggle_remember_folder)
+        # ── Acquire ───────────────────────────────────────────────────
+        acquire_menu = mb.addMenu("Acquire")
 
-        settings_menu.addSeparator()
+        persist_group = QActionGroup(self)
+        persist_group.setExclusive(True)
 
-        # ── Persistence settings ──────────────────────────────────────
-        pm = settings_menu.addMenu("Persistence Settings")
+        self._act_persist_off = acquire_menu.addAction("Off")
+        self._act_persist_off.setCheckable(True)
+        self._act_persist_off.setChecked(self._retrigger_mode == MODE_OFF)
+        persist_group.addAction(self._act_persist_off)
+        self._act_persist_off.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_OFF))
+
+        acquire_menu.addSeparator()
+
+        self._act_persist_past = acquire_menu.addAction("Persistence (Normal)")
+        self._act_persist_past.setCheckable(True)
+        self._act_persist_past.setChecked(
+            self._retrigger_mode == MODE_PERSIST_PAST)
+        self._act_persist_past.setToolTip(
+            "Last trigger shown as hard line; earlier triggers fade into "
+            "history below it.  Classic oscilloscope persistence.")
+        persist_group.addAction(self._act_persist_past)
+        self._act_persist_past.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_PERSIST_PAST))
+
+        self._act_persist_future = acquire_menu.addAction("Persistence (Future)")
+        self._act_persist_future.setCheckable(True)
+        self._act_persist_future.setChecked(
+            self._retrigger_mode == MODE_PERSIST_FUTURE)
+        self._act_persist_future.setToolTip(
+            "First trigger shown as hard line; later triggers fade into "
+            "the future below it.")
+        persist_group.addAction(self._act_persist_future)
+        self._act_persist_future.triggered.connect(
+            lambda: self._set_retrigger_mode(MODE_PERSIST_FUTURE))
+
+        self._act_rt_averaging = acquire_menu.addAction("Averaging")
+        self._act_rt_averaging.setCheckable(True)
+        self._act_rt_averaging.setChecked(self._retrigger_mode == MODE_AVERAGING)
+        self._act_rt_averaging.setToolTip(
+            "Average multiple trigger-aligned segments to reduce noise.")
+        self._act_rt_averaging.triggered.connect(
+            self._toggle_retrigger_averaging)
+
+        self._act_rt_interp = acquire_menu.addAction("Interpolate")
+        self._act_rt_interp.setCheckable(True)
+        self._act_rt_interp.setChecked(
+            self._retrigger_mode == MODE_INTERPOLATION)
+        self._act_rt_interp.setToolTip(
+            "Interleave multiple trigger-aligned segments to increase "
+            "effective sample resolution.")
+        self._act_rt_interp.triggered.connect(
+            self._toggle_retrigger_interpolation)
+
+        acquire_menu.addSeparator()
+
+        pm = acquire_menu.addMenu("Persistence Settings")
         pm.addAction("Count…").triggered.connect(self._dlg_persist_count)
         pm.addAction("Selection…").triggered.connect(self._dlg_persist_selection)
         pm.addAction("Emphasis…").triggered.connect(self._dlg_persist_emphasis)
@@ -499,7 +504,7 @@ class MainWindow(QMainWindow):
         pm.addAction("Restore Defaults").triggered.connect(
             self._reset_persist_defaults)
 
-        am = settings_menu.addMenu("Averaging Settings")
+        am = acquire_menu.addMenu("Averaging Settings")
         am.addAction("Count…").triggered.connect(self._dlg_avg_count)
         am.addSeparator()
         avg_orig = am.addMenu("Original Data")
@@ -510,7 +515,7 @@ class MainWindow(QMainWindow):
         am.addAction("Restore Defaults").triggered.connect(
             self._reset_avg_defaults)
 
-        im = settings_menu.addMenu("Interpolation Settings")
+        im = acquire_menu.addMenu("Interpolation Settings")
         im.addAction("Count…").triggered.connect(self._dlg_interp_count)
         im.addSeparator()
         interp_orig = im.addMenu("Original Data")
@@ -521,7 +526,9 @@ class MainWindow(QMainWindow):
         im.addAction("Restore Defaults").triggered.connect(
             self._reset_interp_defaults)
 
-        em = settings_menu.addMenu("Extrapolation Behaviour")
+        acquire_menu.addSeparator()
+
+        em = acquire_menu.addMenu("Extrapolation Behaviour")
         em.setToolTipsVisible(True)
         extrap_group = QActionGroup(self)
         extrap_group.setExclusive(True)
@@ -547,6 +554,26 @@ class MainWindow(QMainWindow):
             lambda: self._set_extrap_mode("clip"))
         extrap_group.addAction(self._extrap_clip_act)
 
+        # ── Settings ──────────────────────────────────────────────────
+        settings_menu = mb.addMenu("Settings")
+        settings_menu.addAction("Font Scale...").triggered.connect(
+            self._show_font_scale_dialog)
+        settings_menu.addAction("Decimal Separator...").triggered.connect(
+            self._show_decimal_sep_dialog)
+        settings_menu.addSeparator()
+        settings_menu.addAction("Edit Current Theme...").triggered.connect(
+            self._open_theme_editor)
+        settings_menu.addAction("Reload Themes from Disk").triggered.connect(
+            self._reload_themes)
+        settings_menu.addSeparator()
+        self._act_remember_folder = settings_menu.addAction("Remember Last Folder")
+        self._act_remember_folder.setCheckable(True)
+        self._act_remember_folder.setChecked(
+            self._settings.get("remember_folder", True))
+        self._act_remember_folder.setToolTip(
+            "When enabled, open/save dialogs start in the last used folder.")
+        self._act_remember_folder.triggered.connect(self._toggle_remember_folder)
+
         settings_menu.addSeparator()
         settings_menu.addAction("Dimmed Opacity…").triggered.connect(
             self._dlg_dimmed_opacity)
@@ -568,6 +595,29 @@ class MainWindow(QMainWindow):
                 lambda *_, t=tier: self._set_periodicity_method(t))
             per_group.addAction(act)
             self._periodicity_method_actions[tier] = act
+
+        settings_menu.addSeparator()
+        lane_lbl_menu = settings_menu.addMenu("Lane Labels")
+        lane_lbl_menu.setToolTipsVisible(True)
+        lane_lbl_menu.addAction("Label Size…").triggered.connect(
+            self._dlg_lane_label_size)
+        lane_lbl_menu.addAction("Label Spacing…").triggered.connect(
+            self._dlg_lane_label_spacing)
+        self._act_show_lane_labels = lane_lbl_menu.addAction("Show Names")
+        self._act_show_lane_labels.setCheckable(True)
+        self._act_show_lane_labels.setChecked(self._show_lane_labels)
+        self._act_show_lane_labels.setToolTip(
+            "Show/hide the floating channel name in each split-lane panel.")
+        self._act_show_lane_labels.triggered.connect(self._toggle_show_lane_labels)
+        self._act_allow_force_labels = lane_lbl_menu.addAction("Allow Theme Override")
+        self._act_allow_force_labels.setCheckable(True)
+        self._act_allow_force_labels.setChecked(self._allow_theme_force_labels)
+        self._act_allow_force_labels.setToolTip(
+            "When enabled, a theme that has force_labels=true will always show\n"
+            "lane labels regardless of the Show Names toggle.\n"
+            "Useful for monochromatic themes where colour alone is ambiguous.")
+        self._act_allow_force_labels.triggered.connect(
+            self._toggle_allow_theme_force_labels)
 
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
@@ -878,8 +928,15 @@ class MainWindow(QMainWindow):
 
     # ── Display / Theme ────────────────────────────────────────────────
 
-    def _set_display_mode(self, mode: str):
+    def _set_display_mode(self, mode: str, save: bool = True):
+        self._display_mode = mode
         self._plot.set_mode(mode)
+        # Sync menu checkmarks
+        if hasattr(self, '_act_view_split'):
+            self._act_view_split.setChecked(mode == "split")
+            self._act_view_overlay.setChecked(mode == "overlay")
+        if save:
+            self._settings["display_mode"] = mode
 
     def _set_theme(self, file_id: str, save: bool = True):
         from PyQt6.QtWidgets import QApplication
@@ -892,6 +949,15 @@ class MainWindow(QMainWindow):
             self._scope_status.set_palette(self.theme.statusbar_palette())
             self._scope_status.set_branding(self._get_branding_path())
         self._refresh_status_bar()
+        if hasattr(self, '_theme_submenu'):
+            self._rebuild_theme_menu()
+        # Re-evaluate force_labels in case the new theme has a different value
+        if hasattr(self, '_plot'):
+            self._plot.apply_lane_label_settings(
+                self._lane_label_size,
+                self._show_lane_labels,
+                self._allow_theme_force_labels,
+                self._lane_label_spacing)
         if save:
             self._settings["theme"] = file_id
 
@@ -905,6 +971,45 @@ class MainWindow(QMainWindow):
         self._act_y_lock.blockSignals(True)
         self._act_y_lock.setChecked(checked)
         self._act_y_lock.blockSignals(False)
+
+    # ── Lane label settings ───────────────────────────────────────────
+
+    def _dlg_lane_label_size(self):
+        val, ok = QInputDialog.getInt(
+            self, "Label Size", "Font size (pt) for in-panel trace names:",
+            self._lane_label_size, 4, 32, 1)
+        if ok:
+            self._lane_label_size = val
+            self._plot.apply_lane_label_settings(
+                val, self._show_lane_labels, self._allow_theme_force_labels,
+                self._lane_label_spacing)
+            self._save_settings()
+
+    def _dlg_lane_label_spacing(self):
+        val, ok = QInputDialog.getDouble(
+            self, "Label Spacing",
+            "Gap between overlay labels (fraction of text height, 0.1 – 1.5):",
+            self._lane_label_spacing, 0.1, 1.5, 2)
+        if ok:
+            self._lane_label_spacing = val
+            self._plot.apply_lane_label_settings(
+                self._lane_label_size, self._show_lane_labels,
+                self._allow_theme_force_labels, val)
+            self._save_settings()
+
+    def _toggle_show_lane_labels(self, checked: bool):
+        self._show_lane_labels = checked
+        self._plot.apply_lane_label_settings(
+            self._lane_label_size, checked, self._allow_theme_force_labels,
+            self._lane_label_spacing)
+        self._save_settings()
+
+    def _toggle_allow_theme_force_labels(self, checked: bool):
+        self._allow_theme_force_labels = checked
+        self._plot.apply_lane_label_settings(
+            self._lane_label_size, self._show_lane_labels, checked,
+            self._lane_label_spacing)
+        self._save_settings()
 
     # ── Cursors ────────────────────────────────────────────────────────
 
@@ -1382,7 +1487,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(grp)
 
         layout.addWidget(QLabel(
-            "<i>Note: PyScope input fields always accept both '.' and ','\n"
+            "<i>Note: TraceLab input fields always accept both '.' and ','\n"
             "as decimal when 'Both' is selected, regardless of system locale.\n"
             "The numpad dot will always work.</i>"))
 
@@ -1906,13 +2011,44 @@ class MainWindow(QMainWindow):
             return abs_time, data, is_extrap
 
         if mode in PERSIST_MODES:
-            if result.layers:
+            if result.layers and trace_obj is not None:
+                t_lo = float(trace_obj.time_axis[0])
+                t_hi = float(trace_obj.time_axis[-1])
+                is_extrap = any(
+                    len(lyr.time) > 0 and (
+                        (lyr.time[0]  + t_ref) < t_lo - 1e-12 or
+                        (lyr.time[-1] + t_ref) > t_hi + 1e-12
+                    )
+                    for lyr in result.layers
+                )
+                if is_extrap and self._retrigger_extrap_mode == "clip":
+                    clipped = []
+                    for lyr in result.layers:
+                        abs_t = lyr.time + t_ref
+                        mask  = (abs_t >= t_lo) & (abs_t <= t_hi)
+                        if mask.any():
+                            clipped.append(PersistenceLayer(
+                                time=lyr.time[mask],
+                                data=lyr.data[mask],
+                                opacity=lyr.opacity,
+                                width_multiplier=lyr.width_multiplier,
+                                z_order=lyr.z_order,
+                                is_emphasis=lyr.is_emphasis,
+                            ))
+                    self._plot.set_persistence_layers(
+                        trace_name, clipped, t_ref)
+                    is_extrap = False
+                else:
+                    self._plot.set_persistence_layers(
+                        trace_name, result.layers, t_ref)
+                trace_obj.retrigger_extrapolating = is_extrap
+            elif result.layers:
                 self._plot.set_persistence_layers(trace_name, result.layers, t_ref)
             else:
                 self._plot.clear_persistence_layers(trace_name)
+                if trace_obj:
+                    trace_obj.retrigger_extrapolating = False
             self._plot.clear_retrigger_curve(trace_name)
-            if trace_obj:
-                trace_obj.retrigger_extrapolating = False
         elif mode == MODE_AVERAGING:
             self._plot.clear_persistence_layers(trace_name)
             if result.avg_time is not None and result.avg_data is not None:

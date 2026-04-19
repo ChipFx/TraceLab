@@ -1,4 +1,4 @@
-# PyScope 🔭
+# TraceLab 🔭
 
 A modular oscilloscope data viewer built with Python, PyQt6, and PyQtGraph.
 

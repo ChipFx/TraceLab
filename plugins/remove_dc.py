@@ -1,5 +1,5 @@
 """
-PyScope Plugin: Remove DC Offset
+TraceLab Plugin: Remove DC Offset
 Type: processor
 
 Subtracts the mean value from each selected trace, removing DC offset.

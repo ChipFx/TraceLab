@@ -54,21 +54,23 @@ class ThemeData:
     """Loaded and validated theme from a JSON file."""
 
     def __init__(self, path: str):
-        self.path       = path
-        self.file_id    = os.path.splitext(os.path.basename(path))[0]
-        self.name       = self.file_id
-        self.tooltip    = ""
-        self._plotview  = dict(_FALLBACK_PLOTVIEW)
-        self._statusbar = dict(_FALLBACK_STATUSBAR)
-        self._traces    = list(_FALLBACK_TRACES)
+        self.path         = path
+        self.file_id      = os.path.splitext(os.path.basename(path))[0]
+        self.name         = self.file_id
+        self.tooltip      = ""
+        self.force_labels = False
+        self._plotview    = dict(_FALLBACK_PLOTVIEW)
+        self._statusbar   = dict(_FALLBACK_STATUSBAR)
+        self._traces      = list(_FALLBACK_TRACES)
         self._load(path)
 
     def _load(self, path: str):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            self.name    = data.get("name",    self.file_id)
-            self.tooltip = data.get("tooltip", "")
+            self.name         = data.get("name",         self.file_id)
+            self.tooltip      = data.get("tooltip",      "")
+            self.force_labels = bool(data.get("force_labels", False))
             if "plotview" in data:
                 self._plotview.update(data["plotview"])
             if "statusbar" in data:
@@ -120,12 +122,13 @@ class ThemeManager(QObject):
         self._themes: Dict[str, ThemeData] = {}
         self._active: ThemeData = ThemeData.__new__(ThemeData)
         # Bootstrap fallback theme (no file needed)
-        self._active.file_id    = "dark"
-        self._active.name       = "Dark"
-        self._active.tooltip    = ""
-        self._active._plotview  = dict(_FALLBACK_PLOTVIEW)
-        self._active._statusbar = dict(_FALLBACK_STATUSBAR)
-        self._active._traces    = list(_FALLBACK_TRACES)
+        self._active.file_id      = "dark"
+        self._active.name         = "Dark"
+        self._active.tooltip      = ""
+        self._active.force_labels = False
+        self._active._plotview    = dict(_FALLBACK_PLOTVIEW)
+        self._active._statusbar   = dict(_FALLBACK_STATUSBAR)
+        self._active._traces      = list(_FALLBACK_TRACES)
 
         self.discover()
         self.set_theme(active_id)

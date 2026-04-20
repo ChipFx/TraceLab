@@ -14,4 +14,4 @@ including front-matter fields, admonition syntax, and how topic ordering works.
 
 ## Viewing help in TraceLab
 
-Open **Help → Help Contents** from the main menu bar.
+Open **Help → Help** from the main menu bar.

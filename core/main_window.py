@@ -632,7 +632,7 @@ class MainWindow(QMainWindow):
 
         # ── Help ──────────────────────────────────────────────────────
         help_menu = mb.addMenu("Help")
-        act_help_contents = QAction("Help Contents", self)
+        act_help_contents = QAction("Help", self)
         act_help_contents.setShortcut(QKeySequence(Qt.Key.Key_F1))
         act_help_contents.triggered.connect(self._show_help)
         help_menu.addAction(act_help_contents)

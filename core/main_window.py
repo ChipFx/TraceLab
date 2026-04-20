@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QToolBar, QFileDialog, QMessageBox, QLabel, QPushButton,
     QCheckBox, QMenu, QInputDialog, QDialog
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QIcon, QPixmap, QColor
 from typing import List, Optional
 
@@ -18,7 +18,7 @@ from core.trace_model import TraceModel
 from core.theme_manager import ThemeManager
 from core.data_loader import load_csv
 from core.import_dialog import ImportDialog
-from core.scope_plot_widget import ScopePlotWidget
+from core.scope_plot_widget import ScopePlotWidget, DEFAULT_LIMITS_CONFIG
 from core.channel_panel import ChannelPanel
 from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
@@ -51,6 +51,24 @@ from core.retrigger import (
 )
 
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
+
+
+class _PeriodEstimateWorker(QThread):
+    """Background thread for one period-estimation call.
+    Emits result_ready(trace_name, T_seconds, confidence) when done."""
+    result_ready = pyqtSignal(str, float, float)
+
+    def __init__(self, trace_name: str, samples: np.ndarray,
+                 dt: float, method: str, parent=None):
+        super().__init__(parent)
+        self._trace_name = trace_name
+        self._samples = samples   # already a copy — safe to read from another thread
+        self._dt = dt
+        self._method = method
+
+    def run(self):
+        T, conf = estimate_period(self._samples, self._dt, self._method)
+        self.result_ready.emit(self._trace_name, T, conf)
 
 
 def _hex_perceived_luminance(hex_color: str) -> float:
@@ -117,6 +135,13 @@ class MainWindow(QMainWindow):
         s["dashed_line_config"] = dict(self._dashed_line_config)
         s["auto_retrigger"] = self._trigger_panel.chk_auto_retrigger.isChecked()
         s["periodicity_estimation_method"] = self._periodicity_method
+        s["periodicity_estimation_timeout"] = self._settings.get(
+            "periodicity_estimation_timeout", 5)
+        s["viewport_limits_mode"]    = self._limits_config.get("mode", "window")
+        s["viewport_scale_min_px"]   = self._limits_config.get("scale_min_px", 2)
+        s["viewport_scale_max_px"]   = self._limits_config.get("scale_max_px", 12)
+        s["viewport_preset_min"]     = self._limits_config.get("preset_min", 2048)
+        s["viewport_preset_max"]     = self._limits_config.get("preset_max", 50_000)
         s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
         s["lane_label_size"] = self._lane_label_size
         s["show_lane_labels"] = self._show_lane_labels
@@ -229,6 +254,22 @@ class MainWindow(QMainWindow):
             self._settings.get("allow_theme_force_labels", False))
         self._lane_label_spacing: float = float(
             self._settings.get("lane_label_spacing", 0.3))
+        # Viewport limits config — merged over defaults so unknown keys stay safe
+        self._limits_config: dict = {
+            **DEFAULT_LIMITS_CONFIG,
+            **{k: v for k, v in {
+                "mode":         self._settings.get("viewport_limits_mode",
+                                                   DEFAULT_LIMITS_CONFIG["mode"]),
+                "scale_min_px": int(self._settings.get("viewport_scale_min_px",
+                                                        DEFAULT_LIMITS_CONFIG["scale_min_px"])),
+                "scale_max_px": int(self._settings.get("viewport_scale_max_px",
+                                                        DEFAULT_LIMITS_CONFIG["scale_max_px"])),
+                "preset_min":   int(self._settings.get("viewport_preset_min",
+                                                        DEFAULT_LIMITS_CONFIG["preset_min"])),
+                "preset_max":   int(self._settings.get("viewport_preset_max",
+                                                        DEFAULT_LIMITS_CONFIG["preset_max"])),
+            }.items()},
+        }
         self._plot = ScopePlotWidget(
             self.theme, self._y_lock_auto,
             self._interp_mode, self._viewport_min_pts,
@@ -236,7 +277,8 @@ class MainWindow(QMainWindow):
             lane_label_size=self._lane_label_size,
             show_lane_labels=self._show_lane_labels,
             allow_theme_force_labels=self._allow_theme_force_labels,
-            lane_label_spacing=self._lane_label_spacing)
+            lane_label_spacing=self._lane_label_spacing,
+            limits_config=self._limits_config)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
@@ -595,6 +637,52 @@ class MainWindow(QMainWindow):
                 lambda *_, t=tier: self._set_periodicity_method(t))
             per_group.addAction(act)
             self._periodicity_method_actions[tier] = act
+        per_menu.addSeparator()
+        adv_per_menu = per_menu.addMenu("Advanced Settings")
+        adv_per_menu.addAction("Set Time Out…").triggered.connect(
+            self._dlg_period_timeout)
+
+        settings_menu.addSeparator()
+        vp_menu = settings_menu.addMenu("Viewport Limits")
+        vp_menu.setToolTipsVisible(True)
+        vp_group = QActionGroup(self)
+        vp_group.setExclusive(True)
+        self._act_vp_window = vp_menu.addAction("Use window size")
+        self._act_vp_window.setCheckable(True)
+        self._act_vp_window.setChecked(self._limits_config.get("mode") == "window")
+        self._act_vp_window.setToolTip(
+            "Scale the display point budget with the plot pixel width.\n"
+            "Wider windows get more points; narrow windows are automatically lighter.")
+        self._act_vp_preset = vp_menu.addAction("Use preset limits")
+        self._act_vp_preset.setCheckable(True)
+        self._act_vp_preset.setChecked(self._limits_config.get("mode") == "preset")
+        self._act_vp_preset.setToolTip(
+            "Use a fixed min/max point budget regardless of window size.\n"
+            "Reproduces the classic fixed-limit behaviour.")
+        vp_group.addAction(self._act_vp_window)
+        vp_group.addAction(self._act_vp_preset)
+        self._act_vp_window.triggered.connect(
+            lambda: self._set_viewport_limits_mode("window"))
+        self._act_vp_preset.triggered.connect(
+            lambda: self._set_viewport_limits_mode("preset"))
+        vp_menu.addSeparator()
+        vp_menu.addAction("Scale min points/px…").triggered.connect(
+            lambda: self._dlg_vp_int("scale_min_px", "Scale min points/px",
+                                     "Minimum rendered points per display pixel\n"
+                                     "(window-size mode):", 1, 200))
+        vp_menu.addAction("Scale max points/px…").triggered.connect(
+            lambda: self._dlg_vp_int("scale_max_px", "Scale max points/px",
+                                     "Maximum rendered points per display pixel\n"
+                                     "(window-size mode):", 2, 200))
+        vp_menu.addSeparator()
+        vp_menu.addAction("Preset min points…").triggered.connect(
+            lambda: self._dlg_vp_int("preset_min", "Preset min points",
+                                     "Absolute floor — never downsample below this\n"
+                                     "many points (both modes):", 64, 10_000_000))
+        vp_menu.addAction("Preset max points…").triggered.connect(
+            lambda: self._dlg_vp_int("preset_max", "Preset max points",
+                                     "Fixed point ceiling\n"
+                                     "(preset mode):", 64, 10_000_000))
 
         settings_menu.addSeparator()
         lane_lbl_menu = settings_menu.addMenu("Lane Labels")
@@ -742,8 +830,7 @@ class MainWindow(QMainWindow):
         if dlg.replace_existing:
             self._clear_all(confirm=False)
 
-        for trace in dlg.result_traces:
-            self._add_trace(trace)
+        self._batch_import_traces(dlg.result_traces)
 
         if dlg.reset_view:
             meta = result.metadata
@@ -751,14 +838,39 @@ class MainWindow(QMainWindow):
                     meta.view_sample_start is not None):
                 QTimer.singleShot(80, lambda: self._apply_viewport_from_metadata(meta))
             else:
-                QTimer.singleShot(50, self._plot.zoom_full)
+                QTimer.singleShot(50, self._zoom_full_safe)
 
         self._update_status()
 
-    def _add_trace(self, trace: TraceModel):
-        # Estimate periodicity before adding to the UI
-        self._estimate_and_store_period(trace)
+    def _batch_import_traces(self, traces: List[TraceModel]) -> None:
+        """Add/replace multiple traces in a single plot rebuild.
+        Used by _open_csv so 8 traces cause one rebuild, not eight."""
+        for trace in traces:
+            existing_names = [t.name for t in self._traces]
+            if trace.name in existing_names:
+                idx = existing_names.index(trace.name)
+                old_trace = self._traces[idx]
+                trace.color = old_trace.color
+                trace.theme_color_index = old_trace.theme_color_index
+                trace.use_theme_color = old_trace.use_theme_color
+                self._traces[idx] = trace
+                self._channel_panel.refresh_all()
+            else:
+                n = len(self._traces)
+                trace.reset_color_to_theme(n)
+                trace.sync_theme_color(self.theme.active_theme)
+                self._traces.append(trace)
+                self._channel_panel.add_trace(trace)
+        # Single plot rebuild for the whole batch
+        self._plot.batch_add_traces(traces)
+        self._refresh_trigger_channels()
+        self._refresh_status_bar()
+        # Start async period estimation for every trace (after UI is live)
+        for trace in traces:
+            self._estimate_period_async(trace)
 
+    def _add_trace(self, trace: TraceModel):
+        """Add or replace a single trace (used by plugins/retrigger; not import)."""
         # If a trace with this name already exists, replace it
         existing_names = [t.name for t in self._traces]
         if trace.name in existing_names:
@@ -770,6 +882,7 @@ class MainWindow(QMainWindow):
             self._traces[idx] = trace
             self._channel_panel.refresh_all()
             self._plot.add_trace(trace)  # add_trace handles overwrite
+            self._estimate_period_async(trace)
             return
 
         # Assign color from active theme via ThemeManager
@@ -780,6 +893,7 @@ class MainWindow(QMainWindow):
         self._traces.append(trace)
         self._channel_panel.add_trace(trace)
         self._plot.add_trace(trace)
+        self._estimate_period_async(trace)
         self._refresh_trigger_channels()
         self._refresh_status_bar()
 
@@ -1095,7 +1209,9 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
 
     def _zoom_full_safe(self):
-        """Zoom to fit all data — forces a range reset even after manual zoom."""
+        """Zoom to fit all data — forces a range reset even after manual zoom.
+        Suppresses intermediate per-lane redraws and issues one clean refresh
+        after all ranges are applied, avoiding N × M redundant draw calls."""
         if not self._traces:
             return
         # Find global data extents
@@ -1118,18 +1234,23 @@ class MainWindow(QMainWindow):
         t0, t1 = min(t_mins), max(t_maxs)
         y0, y1 = min(y_mins), max(y_maxs)
         pad_y = (y1 - y0) * 0.05 or 0.1
-        # Disable then re-enable to clear any stale range lock
-        if self._plot._mode == "split":
-            for lane in self._plot._lanes.values():
-                pi = lane.getPlotItem()
+        # Suppress per-lane redraws while setting ranges — one clean refresh at end
+        self._plot._set_lanes_suppress(True)
+        try:
+            if self._plot._mode == "split":
+                for lane in self._plot._lanes.values():
+                    pi = lane.getPlotItem()
+                    pi.disableAutoRange()
+                    pi.setXRange(t0, t1, padding=0.02)
+                    pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
+            else:
+                pi = self._plot._overlay_widget.getPlotItem()
                 pi.disableAutoRange()
                 pi.setXRange(t0, t1, padding=0.02)
                 pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
-        else:
-            pi = self._plot._overlay_widget.getPlotItem()
-            pi.disableAutoRange()
-            pi.setXRange(t0, t1, padding=0.02)
-            pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
+        finally:
+            self._plot._set_lanes_suppress(False)
+            self._plot.refresh_all()
         self._refresh_status_bar()
 
     # ── Trace Events ──────────────────────────────────────────────────
@@ -1539,13 +1660,74 @@ class MainWindow(QMainWindow):
 
     # ── Periodicity estimation ─────────────────────────────────────────────
 
-    def _estimate_and_store_period(self, trace: TraceModel) -> None:
-        """Run estimate_period on *trace* and store the result on the model."""
-        T, conf = estimate_period(
-            trace.processed_data, trace.dt, self._periodicity_method)
+    def _estimate_period_async(self, trace: TraceModel) -> None:
+        """Start a background period estimation for *trace*.
+        Returns immediately; result arrives via _on_period_result.
+        If the worker exceeds the configured timeout the trace keeps its
+        current (unknown) period and a status-bar notice is shown."""
+        if self._periodicity_method == TIER_DISABLED:
+            trace.period_estimate             = 0.0
+            trace.period_confidence           = 0.0
+            trace.period_estimation_attempted = False
+            return
+
+        timeout_ms = int(
+            self._settings.get("periodicity_estimation_timeout", 5) * 1000)
+
+        # Mark as in-progress (unknown until the worker returns)
+        trace.period_estimate             = 0.0
+        trace.period_confidence           = 0.0
+        trace.period_estimation_attempted = True
+        trace._period_timed_out           = False
+
+        worker = _PeriodEstimateWorker(
+            trace.name,
+            trace.processed_data.copy(),   # copy: numpy arrays are not thread-safe for writing
+            trace.dt,
+            self._periodicity_method,
+            parent=self,
+        )
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(timeout_ms)
+
+        trace_name = trace.name   # capture for lambdas
+
+        worker.result_ready.connect(self._on_period_result)
+        worker.result_ready.connect(lambda *_: timer.stop())
+        timer.timeout.connect(lambda: self._on_period_timeout(trace_name))
+        worker.finished.connect(timer.stop)
+        worker.finished.connect(worker.deleteLater)
+
+        timer.start()
+        worker.start()
+
+    def _on_period_result(self, trace_name: str, T: float, conf: float) -> None:
+        """Receive a completed period estimate from the background worker."""
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return   # trace removed while estimating
+        if getattr(trace, '_period_timed_out', False):
+            return   # timeout already handled this trace; discard late result
         trace.period_estimate             = T
         trace.period_confidence           = conf
-        trace.period_estimation_attempted = (self._periodicity_method != TIER_DISABLED)
+        trace.period_estimation_attempted = True
+        self._refresh_status_bar()
+        if hasattr(self, '_scope_status'):
+            self._scope_status.repaint_channel_blocks()
+
+    def _on_period_timeout(self, trace_name: str) -> None:
+        """Called when period estimation for *trace_name* exceeded the timeout."""
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is not None:
+            trace._period_timed_out   = True
+            trace.period_estimate     = 0.0   # remains unknown
+            trace.period_confidence   = 0.0
+        timeout_s = self._settings.get("periodicity_estimation_timeout", 5)
+        self._status_lbl.setText(
+            f"Periodicity estimation timed out for '{trace_name}' "
+            f"({timeout_s} s) — use a faster tier or increase the timeout.")
 
     def _set_periodicity_method(self, method: str) -> None:
         """Change the active method, re-estimate all loaded traces, save."""
@@ -1556,7 +1738,34 @@ class MainWindow(QMainWindow):
             if act:
                 act.setChecked(True)
         for trace in self._traces:
-            self._estimate_and_store_period(trace)
+            self._estimate_period_async(trace)
+
+    # ── Viewport limits ────────────────────────────────────────────────
+
+    def _set_viewport_limits_mode(self, mode: str) -> None:
+        self._limits_config["mode"] = mode
+        self._plot.set_limits_config(self._limits_config)
+
+    def _dlg_vp_int(self, key: str, title: str, prompt: str,
+                    lo: int, hi: int) -> None:
+        current = int(self._limits_config.get(key, DEFAULT_LIMITS_CONFIG[key]))
+        val, ok = QInputDialog.getInt(self, title, prompt, current, lo, hi, 1)
+        if ok:
+            self._limits_config[key] = val
+            self._plot.set_limits_config(self._limits_config)
+
+    def _dlg_period_timeout(self) -> None:
+        """Settings > Periodicity Estimation > Advanced Settings > Set Time Out."""
+        current = float(self._settings.get("periodicity_estimation_timeout", 5))
+        val, ok = QInputDialog.getDouble(
+            self, "Periodicity Estimation — Time Out",
+            "Maximum time allowed per trace (seconds).\n"
+            "If estimation takes longer the period is left unknown.\n"
+            "Increase for Precise/Extreme tiers on very large files.\n\n"
+            "Time out (1 – 300 s):",
+            current, 1.0, 300.0, 1)
+        if ok:
+            self._settings["periodicity_estimation_timeout"] = val
 
     def _set_extrap_mode(self, mode: str) -> None:
         """Switch extrapolation behaviour and re-render."""

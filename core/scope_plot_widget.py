@@ -22,7 +22,37 @@ from core.draw_mode import (
     resolve_pen_width,
 )
 
-MAX_DISPLAY_POINTS = 50_000
+MAX_DISPLAY_POINTS = 50_000   # kept for any external references; internal logic uses _limits_config
+
+# Default viewport-limits configuration.  Loaded from settings.json at startup
+# and propagated to ScopePlotWidget → TraceLane / OverlayTraceVisual.
+DEFAULT_LIMITS_CONFIG: dict = {
+    "mode":          "window",  # "window" or "preset"
+    "scale_min_px":  2,         # window mode — floor: pts = max(preset_min, scale_min * width)
+    "scale_max_px":  12,        # window mode — ceiling: pts = scale_max * width
+    "preset_min":    2048,      # absolute floor in both modes
+    "preset_max":    50_000,    # preset mode limit (was MAX_DISPLAY_POINTS)
+}
+
+
+def _resolve_display_limit(limits_config: dict, width_px: float) -> int:
+    """Return the max-points cap to pass to downsample_for_display.
+
+    window mode : max_pts = max(preset_min, scale_max_px × width_px)
+    preset mode : max_pts = preset_max
+    width_px < 1: widget not yet shown — fall back to preset_max.
+    """
+    preset_max = int(limits_config.get("preset_max", 50_000))
+    preset_min = int(limits_config.get("preset_min", 2_048))
+    if width_px < 1:
+        return preset_max
+    if limits_config.get("mode", "window") != "window":
+        return preset_max
+    scale_max = int(limits_config.get("scale_max_px", 12))
+    scale_min = int(limits_config.get("scale_min_px", 2))
+    lo = max(preset_min, int(width_px * scale_min))
+    hi = max(lo, int(width_px * scale_max))
+    return hi
 
 
 def downsample_for_display(t, y, max_pts=MAX_DISPLAY_POINTS):
@@ -31,18 +61,23 @@ def downsample_for_display(t, y, max_pts=MAX_DISPLAY_POINTS):
         return t, y
     window = max(1, n // (max_pts // 2))
     n_windows = n // window
+    n_use = n_windows * window
+    # Reshape into (n_windows, window) blocks — all argmin/argmax in one numpy call
+    t_w = t[:n_use].reshape(n_windows, window)
+    y_w = y[:n_use].reshape(n_windows, window)
+    imin = np.argmin(y_w, axis=1)
+    imax = np.argmax(y_w, axis=1)
+    row = np.arange(n_windows)
+    t_min = t_w[row, imin];  y_min = y_w[row, imin]
+    t_max = t_w[row, imax];  y_max = y_w[row, imax]
+    # Interleave: emit min first when it comes before max in time, else swap
+    swap = imin > imax
     t_out = np.empty(n_windows * 2)
     y_out = np.empty(n_windows * 2)
-    for i in range(n_windows):
-        sl = slice(i * window, (i + 1) * window)
-        yw = y[sl]; tw = t[sl]
-        imin = np.argmin(yw); imax = np.argmax(yw)
-        if imin <= imax:
-            t_out[i*2] = tw[imin]; y_out[i*2] = yw[imin]
-            t_out[i*2+1] = tw[imax]; y_out[i*2+1] = yw[imax]
-        else:
-            t_out[i*2] = tw[imax]; y_out[i*2] = yw[imax]
-            t_out[i*2+1] = tw[imin]; y_out[i*2+1] = yw[imin]
+    t_out[0::2] = np.where(swap, t_max, t_min)
+    y_out[0::2] = np.where(swap, y_max, y_min)
+    t_out[1::2] = np.where(swap, t_min, t_max)
+    y_out[1::2] = np.where(swap, y_min, y_max)
     return t_out, y_out
 
 
@@ -296,6 +331,7 @@ class TraceLane(pg.PlotWidget):
                  lane_label_size: int = 8,
                  show_lane_labels: bool = True,
                  allow_theme_force_labels: bool = False,
+                 limits_config: Optional[dict] = None,
                  parent=None):
         self._y_axis = EngineeringAxisItem(orientation="left")
         self._x_axis = EngineeringTimeAxisItem(orientation="bottom")
@@ -321,6 +357,8 @@ class TraceLane(pg.PlotWidget):
         self._original_dash_pattern: Optional[list] = None
         self._cursors: Dict[int, InfiniteLine] = {}
         self._labels: list = []          # TextItem labels anchored to time positions
+        self._limits_config: dict = dict(limits_config) if limits_config else dict(DEFAULT_LIMITS_CONFIG)
+        self._suppress_view_redraws = False   # set True by ScopePlotWidget during batch zoom
         self._sinc_active = False         # True when sinc was actually used this draw
         self._render_t = np.array([])
         self._render_y = np.array([])
@@ -341,12 +379,10 @@ class TraceLane(pg.PlotWidget):
         self._setup_trace_label_item()
 
     def _on_view_changed(self):
-        """Re-draw curve when zoomed in enough that sinc/cubic would kick in."""
-        if self.interp_mode in ("sinc", "cubic"):
-            self._add_trace_curve()
-        else:
-            self._apply_resolved_style()
-            self._reapply_original_style()
+        """Re-draw curve on every pan/zoom so viewport windowing + downsampling stay correct."""
+        if self._suppress_view_redraws:
+            return
+        self._add_trace_curve()
         self._reposition_trace_label()
 
     def _setup_plot(self):
@@ -554,34 +590,35 @@ class TraceLane(pg.PlotWidget):
         y_full = self.trace.processed_data
         self._sinc_active = False
 
-        if self.interp_mode in ("sinc", "cubic"):
-            # Get current view window to know how many raw samples are visible
-            vr = self.getPlotItem().viewRange()
-            x0, x1 = vr[0]
-            mask = (t_full >= x0) & (t_full <= x1)
-            n_visible = int(mask.sum())
-            if n_visible < 2:
-                n_visible = len(t_full)   # not yet zoomed, use full length
+        # Window to the currently visible x-range FIRST — for all interp modes.
+        # Downsampling must operate on visible samples only; applying it to the
+        # full dataset then clipping wastes resolution when zoomed in.
+        vr = self.getPlotItem().viewRange()
+        x0, x1 = vr[0]
+        mask = (t_full >= x0) & (t_full <= x1)
+        n_vis = int(mask.sum())
+        if n_vis >= 2:
+            t_full = t_full[mask]
+            y_full = y_full[mask]
+        # n_vis < 2: widget created before the view range is set — keep full
+        # data as fallback; the first real sigRangeChanged redraws correctly.
 
-            if n_visible < self.viewport_min_pts:
-                # Interpolate just the visible slice to viewport_min_pts
-                t_vis = t_full[mask] if n_visible < len(t_full) else t_full
-                y_vis = y_full[mask] if n_visible < len(y_full) else y_full
-                if len(t_vis) >= 4:
-                    if self.interp_mode == "cubic":
-                        t_vis, y_vis = cubic_interpolate_to_n(
-                            t_vis, y_vis, self.viewport_min_pts)
-                    else:
-                        t_vis, y_vis = sinc_interpolate_to_n(
-                            t_vis, y_vis, self.viewport_min_pts)
-                    self._sinc_active = True
-                # Replace visible window portion
-                t_full = t_vis
-                y_full = y_vis
+        if self.interp_mode in ("sinc", "cubic"):
+            n_vis = len(t_full)
+            if n_vis < self.viewport_min_pts and n_vis >= 4:
+                if self.interp_mode == "cubic":
+                    t_full, y_full = cubic_interpolate_to_n(
+                        t_full, y_full, self.viewport_min_pts)
+                else:
+                    t_full, y_full = sinc_interpolate_to_n(
+                        t_full, y_full, self.viewport_min_pts)
+                self._sinc_active = True
 
         self._update_visible_samples()
 
-        t, y = downsample_for_display(t_full, y_full)
+        width_px = float(self.getPlotItem().vb.width())
+        max_pts = _resolve_display_limit(self._limits_config, width_px)
+        t, y = downsample_for_display(t_full, y_full, max_pts)
         self._render_t = t
         self._render_y = y
         self._last_style_key = None
@@ -843,12 +880,14 @@ class OverlayTraceVisual:
     def __init__(self, plot_item, trace: TraceModel,
                  style_context: TraceStyleContext,
                  interp_mode: str = "linear",
-                 viewport_min_pts: int = 1024):
+                 viewport_min_pts: int = 1024,
+                 limits_config: Optional[dict] = None):
         self.plot_item = plot_item
         self.trace = trace
         self._style_context = style_context
         self.interp_mode = interp_mode
         self.viewport_min_pts = viewport_min_pts
+        self._limits_config: dict = dict(limits_config) if limits_config else dict(DEFAULT_LIMITS_CONFIG)
         self._density_estimator = create_density_estimator(style_context.draw_mode)
         self._render_t = np.array([])
         self._render_y = np.array([])
@@ -978,22 +1017,28 @@ class OverlayTraceVisual:
             visible_samples=self._visible_samples,
         ))
 
+        # Window to visible range first — for all modes.
+        mask = (t_full >= x0) & (t_full <= x1)
+        n_vis = int(mask.sum())
+        if n_vis >= 2:
+            t_full = t_full[mask]
+            y_full = y_full[mask]
+        # n_vis < 2: widget not yet laid out — keep full data as fallback
+
         if self.interp_mode in ("sinc", "cubic"):
-            mask = (t_full >= x0) & (t_full <= x1)
-            n_vis = int(mask.sum()) or len(t_full)
+            n_vis = len(t_full)
             if n_vis < self.viewport_min_pts and n_vis >= 4:
-                t_s = t_full[mask] if n_vis < len(t_full) else t_full
-                y_s = y_full[mask] if n_vis < len(y_full) else y_full
                 if self.interp_mode == "cubic":
-                    t_s, y_s = cubic_interpolate_to_n(
-                        t_s, y_s, self.viewport_min_pts)
+                    t_full, y_full = cubic_interpolate_to_n(
+                        t_full, y_full, self.viewport_min_pts)
                 else:
-                    t_s, y_s = sinc_interpolate_to_n(
-                        t_s, y_s, self.viewport_min_pts)
-                t_full, y_full = t_s, y_s
+                    t_full, y_full = sinc_interpolate_to_n(
+                        t_full, y_full, self.viewport_min_pts)
                 self._interpolated_view = True
 
-        t_data, y_data = downsample_for_display(t_full, y_full)
+        width_px = max(1.0, float(self.plot_item.vb.width()))
+        max_pts = _resolve_display_limit(self._limits_config, width_px)
+        t_data, y_data = downsample_for_display(t_full, y_full, max_pts)
         self._render_t = t_data
         self._render_y = y_data
         self._last_style_key = None
@@ -1111,6 +1156,7 @@ class ScopePlotWidget(QWidget):
                  show_lane_labels: bool = True,
                  allow_theme_force_labels: bool = False,
                  lane_label_spacing: float = 0.3,
+                 limits_config: Optional[dict] = None,
                  parent=None):
         super().__init__(parent)
         self._theme_manager = theme_manager
@@ -1124,6 +1170,7 @@ class ScopePlotWidget(QWidget):
         self.y_lock_auto = y_lock_auto
         self.interp_mode = interp_mode
         self.viewport_min_pts = viewport_min_pts
+        self._limits_config: dict = dict(limits_config) if limits_config else dict(DEFAULT_LIMITS_CONFIG)
         self._lane_label_size: int = lane_label_size
         self._show_lane_labels: bool = show_lane_labels
         self._allow_theme_force_labels: bool = allow_theme_force_labels
@@ -1260,14 +1307,8 @@ class ScopePlotWidget(QWidget):
         self.set_draw_mode(self._draw_mode)
 
     def _on_overlay_range_changed(self):
-        """Re-render overlay curves when zoomed in (viewport sinc)."""
-        if self.interp_mode == "sinc" or any(
-                getattr(t, '_interp_mode_override', '') == 'sinc'
-                for t in self.traces):
-            self._refresh_overlay_visuals()
-        else:
-            for visual in self._overlay_visuals.values():
-                visual.update_render_style()
+        """Re-render overlay curves on every pan/zoom so viewport windowing stays correct."""
+        self._refresh_overlay_visuals()
 
     def set_mode(self, mode: str):
         self._mode = mode
@@ -1317,6 +1358,20 @@ class ScopePlotWidget(QWidget):
                     break
         else:
             self.traces.append(trace)
+        self._rebuild()
+
+    def batch_add_traces(self, new_traces: list):
+        """Add or replace multiple traces with a single plot rebuild.
+        Caller is responsible for all per-trace bookkeeping (colors, channel
+        panel, etc.) before calling this — this method only updates self.traces
+        and triggers one _rebuild() instead of one per trace."""
+        for trace in new_traces:
+            existing = [t.name for t in self.traces]
+            if trace.name in existing:
+                idx = existing.index(trace.name)
+                self.traces[idx] = trace
+            else:
+                self.traces.append(trace)
         self._rebuild()
 
     def reorder_traces(self, name_order: list):
@@ -1376,6 +1431,20 @@ class ScopePlotWidget(QWidget):
         else:
             self._refresh_overlay_visuals()
 
+    def set_limits_config(self, cfg: dict) -> None:
+        """Hot-update the display-limit config and refresh all curves."""
+        self._limits_config = dict(cfg)
+        for lane in self._lanes.values():
+            lane._limits_config = dict(cfg)
+        for visual in self._overlay_visuals.values():
+            visual._limits_config = dict(cfg)
+        self.refresh_all()
+
+    def _set_lanes_suppress(self, suppress: bool) -> None:
+        """Block or unblock per-lane view-change redraws (used during batch zoom)."""
+        for lane in self._lanes.values():
+            lane._suppress_view_redraws = suppress
+
     def _rebuild(self):
         if self._mode == "split":
             self._rebuild_split()
@@ -1400,7 +1469,8 @@ class ScopePlotWidget(QWidget):
                                       self.interp_mode),
                               lane_label_size=self._lane_label_size,
                               show_lane_labels=self._show_lane_labels,
-                              allow_theme_force_labels=self._allow_theme_force_labels)
+                              allow_theme_force_labels=self._allow_theme_force_labels,
+                              limits_config=self._limits_config)
             lane.viewport_min_pts = self.viewport_min_pts
             lane.setMinimumHeight(80)
             if first_lane is None:
@@ -1593,7 +1663,8 @@ class ScopePlotWidget(QWidget):
             mode = getattr(trace, '_interp_mode_override',
                            self.interp_mode)
             visual = OverlayTraceVisual(
-                pi, trace, self._style_context, mode, self.viewport_min_pts)
+                pi, trace, self._style_context, mode, self.viewport_min_pts,
+                limits_config=self._limits_config)
             visual.refresh_curve((x0, x1))
             self._overlay_visuals[trace.name] = visual
 

@@ -51,6 +51,7 @@ from core.retrigger import (
 )
 
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
+_APP_ROOT     = os.path.dirname(os.path.dirname(__file__))
 
 
 def _hex_perceived_luminance(hex_color: str) -> float:
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._update_plugin_menu()
         self._restore_geometry()
+        self._init_help()
 
     # ── Settings helpers ───────────────────────────────────────────────
 
@@ -630,6 +632,8 @@ class MainWindow(QMainWindow):
 
         # ── Help ──────────────────────────────────────────────────────
         help_menu = mb.addMenu("Help")
+        help_menu.addAction("Help Contents").triggered.connect(self._show_help)
+        help_menu.addSeparator()
         help_menu.addAction("About TraceLab").triggered.connect(self._show_about)
 
     def _build_toolbar(self):
@@ -958,6 +962,8 @@ class MainWindow(QMainWindow):
                 self._show_lane_labels,
                 self._allow_theme_force_labels,
                 self._lane_label_spacing)
+        if hasattr(self, '_help_window'):
+            self._help_window.apply_theme(self._build_help_theme_dict())
         if save:
             self._settings["theme"] = file_id
 
@@ -1257,6 +1263,38 @@ class MainWindow(QMainWindow):
                 parts.append(f"{filt} filtered")
             self._status_lbl.setText("  |  ".join(parts))
 
+    # ── Help ──────────────────────────────────────────────────────────
+
+    def _build_help_theme_dict(self) -> dict:
+        """Build the theme dict passed to HelpWindow (full app theme + font sizes)."""
+        td = self.theme.active_theme
+        scale = self._settings.get("font_scale", 1.0)
+        font_size = max(7, int(10 * scale))
+        hw = dict(td.helpwindow_dict)
+        hw["font_size"]       = font_size
+        hw["font_size_logo"]  = max(8, font_size + 2)
+        hw["font_size_small"] = max(7, font_size - 2)
+        return {"name": td.name, "helpwindow": hw}
+
+    def _init_help(self):
+        from pyhelp import HelpRegistry, HelpWindow
+        _help_dir    = os.path.join(_APP_ROOT, "help")
+        _assets_dir  = os.path.join(_APP_ROOT, "assets")
+        self._help_registry = HelpRegistry(_help_dir)
+        self._help_window   = HelpWindow(
+            self._help_registry,
+            parent=self,
+            theme=self._build_help_theme_dict(),
+            font_size=max(7, int(10 * self._settings.get("font_scale", 1.0))),
+            assets_dir=_assets_dir,
+        )
+
+    def _show_help(self):
+        if hasattr(self, '_help_window'):
+            self._help_window.show()
+            self._help_window.raise_()
+            self._help_window.activateWindow()
+
     # ── About ─────────────────────────────────────────────────────────
 
     def _show_about(self):
@@ -1452,6 +1490,9 @@ class MainWindow(QMainWindow):
         app.setFont(f)
         # Re-apply stylesheet with scaled font-size
         app.setStyleSheet(self.theme.get_stylesheet(font_scale=scale))
+        if hasattr(self, '_help_window'):
+            self._help_window.set_font_size(max(7, int(base_size * scale)))
+            self._help_window.apply_theme(self._build_help_theme_dict())
 
     def _show_decimal_sep_dialog(self):
         from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,

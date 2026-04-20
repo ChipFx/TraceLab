@@ -33,6 +33,46 @@
     "ch_bar": "#ffaa00",
     "filt_text": "#ffcc44"
   },
+  "helpwindow": {
+    "bg":                   "#120800",
+    "bg_content":           "#080400",
+    "bg_tree":              "#0e0500",
+    "bg_tree_selected":     "#332200",
+    "bg_toolbar":           "#120800",
+    "bg_statusbar":         "#100600",
+    "bg_tooltip":           "#180c00",
+    "bg_button":            "#1a0a00",
+    "bg_button_hover":      "#221000",
+    "bg_button_pressed":    "#0a0400",
+    "bg_splitter":          "#120800",
+
+    "text":                 "#ffaa00",
+    "text_dim":             "#664400",
+    "text_tree":            "#ee9900",
+    "text_tree_selected":   "#ffcc44",
+    "text_statusbar":       "#664400",
+    "text_tooltip":         "#ffaa00",
+    "text_button":          "#ee9900",
+    "text_button_hover":    "#ffaa00",
+
+    "logo_text":            "#ffaa00",
+    "logo_sub":             "#664400",
+
+    "accent":               "#cc8800",
+    "link":                 "#cc8800",
+    "link_visited":         "#aa6600",
+
+    "border":               "#332200",
+    "border_button":        "#442800",
+    "border_button_bottom": "#110800",
+    "border_focus":         "#cc8800",
+    "border_splitter":      "#1a1000",
+
+    "admonition_note_bg":     "#1a1000",
+    "admonition_note_border": "#664400",
+    "admonition_warn_bg":     "#2a1400",
+    "admonition_warn_border": "#aa5500"
+  },
   "trace_colors": [
     "#ffaa00",
     "#ffcc44",

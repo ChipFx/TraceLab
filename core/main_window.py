@@ -23,7 +23,7 @@ from core.channel_panel import ChannelPanel
 from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
 from core.plugin_manager import PluginManager
-from core.scope_status_bar import ScopeStatusBar
+from core.scope_status_bar import ScopeStatusBar, BAR_H
 from core.draw_mode import (
     DEFAULT_DENSITY_PEN_MAPPING,
     DEFAULT_DRAW_MODE,
@@ -1327,9 +1327,26 @@ class MainWindow(QMainWindow):
         print(f"[TraceLab Help] _show_help context: {context}")
 
         if hasattr(self, '_help_window'):
-            self._help_window.show()
-            self._help_window.raise_()
-            self._help_window.activateWindow()
+            if self._help_window.isVisible():
+                self._help_window.raise_()
+                self._help_window.activateWindow()
+            else:
+                hw = self._settings.get("help_window", {})
+                self._help_window.show(
+                    size=(hw.get("width", 900), hw.get("height", 600)),
+                    splitter=hw.get("splitter", 220),
+                    logo={"max_h": int(BAR_H * 0.65)},
+                    on_close=self._on_help_closed,
+                )
+
+    def _on_help_closed(self, layout: dict):
+        """Persist help window geometry for the next session."""
+        self._settings["help_window"] = {
+            "width":    layout.get("width",   900),
+            "height":   layout.get("height",  600),
+            "splitter": layout.get("splitter_tree_width", 220),
+        }
+        self._save_settings()
 
     # ── About ─────────────────────────────────────────────────────────
 

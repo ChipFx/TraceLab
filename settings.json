@@ -1,6 +1,6 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb00030000000003c7000000c800000a4700000538000003c7000000e700000a470000053800000000000000000f00000003c7000000e700000a4700000538",
+  "geometry": "01d9d0cb000300000000050600000210000009490000055d000005060000022f000009490000055d00000000000000000f00000005060000022f000009490000055d",
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 10.0,
@@ -20,7 +20,7 @@
   ],
   "color_overrides": {},
   "max_display_points": 50000,
-  "default_sample_rate": 2200000.0,
+  "default_sample_rate": 1000.0,
   "last_open_folder": "./",
   "last_save_folder": "./",
   "remember_folder": true,
@@ -65,5 +65,10 @@
   "show_lane_labels": true,
   "allow_theme_force_labels": false,
   "lane_label_spacing": 0.3,
-  "display_mode": "split"
+  "display_mode": "split",
+  "help_window": {
+    "width": 900,
+    "height": 600,
+    "splitter": 220
+  }
 }

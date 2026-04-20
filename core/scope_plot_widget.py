@@ -31,18 +31,23 @@ def downsample_for_display(t, y, max_pts=MAX_DISPLAY_POINTS):
         return t, y
     window = max(1, n // (max_pts // 2))
     n_windows = n // window
+    n_use = n_windows * window
+    # Reshape into (n_windows, window) blocks — all argmin/argmax in one numpy call
+    t_w = t[:n_use].reshape(n_windows, window)
+    y_w = y[:n_use].reshape(n_windows, window)
+    imin = np.argmin(y_w, axis=1)
+    imax = np.argmax(y_w, axis=1)
+    row = np.arange(n_windows)
+    t_min = t_w[row, imin];  y_min = y_w[row, imin]
+    t_max = t_w[row, imax];  y_max = y_w[row, imax]
+    # Interleave: emit min first when it comes before max in time, else swap
+    swap = imin > imax
     t_out = np.empty(n_windows * 2)
     y_out = np.empty(n_windows * 2)
-    for i in range(n_windows):
-        sl = slice(i * window, (i + 1) * window)
-        yw = y[sl]; tw = t[sl]
-        imin = np.argmin(yw); imax = np.argmax(yw)
-        if imin <= imax:
-            t_out[i*2] = tw[imin]; y_out[i*2] = yw[imin]
-            t_out[i*2+1] = tw[imax]; y_out[i*2+1] = yw[imax]
-        else:
-            t_out[i*2] = tw[imax]; y_out[i*2] = yw[imax]
-            t_out[i*2+1] = tw[imin]; y_out[i*2+1] = yw[imin]
+    t_out[0::2] = np.where(swap, t_max, t_min)
+    y_out[0::2] = np.where(swap, y_max, y_min)
+    t_out[1::2] = np.where(swap, t_min, t_max)
+    y_out[1::2] = np.where(swap, y_min, y_max)
     return t_out, y_out
 
 
@@ -321,6 +326,7 @@ class TraceLane(pg.PlotWidget):
         self._original_dash_pattern: Optional[list] = None
         self._cursors: Dict[int, InfiniteLine] = {}
         self._labels: list = []          # TextItem labels anchored to time positions
+        self._suppress_view_redraws = False   # set True by ScopePlotWidget during batch zoom
         self._sinc_active = False         # True when sinc was actually used this draw
         self._render_t = np.array([])
         self._render_y = np.array([])
@@ -342,6 +348,8 @@ class TraceLane(pg.PlotWidget):
 
     def _on_view_changed(self):
         """Re-draw curve when zoomed in enough that sinc/cubic would kick in."""
+        if self._suppress_view_redraws:
+            return
         if self.interp_mode in ("sinc", "cubic"):
             self._add_trace_curve()
         else:
@@ -1319,6 +1327,20 @@ class ScopePlotWidget(QWidget):
             self.traces.append(trace)
         self._rebuild()
 
+    def batch_add_traces(self, new_traces: list):
+        """Add or replace multiple traces with a single plot rebuild.
+        Caller is responsible for all per-trace bookkeeping (colors, channel
+        panel, etc.) before calling this — this method only updates self.traces
+        and triggers one _rebuild() instead of one per trace."""
+        for trace in new_traces:
+            existing = [t.name for t in self.traces]
+            if trace.name in existing:
+                idx = existing.index(trace.name)
+                self.traces[idx] = trace
+            else:
+                self.traces.append(trace)
+        self._rebuild()
+
     def reorder_traces(self, name_order: list):
         """Reorder traces list to match channel panel order."""
         name_idx = {n: i for i, n in enumerate(name_order)}
@@ -1375,6 +1397,11 @@ class ScopePlotWidget(QWidget):
                 self.sinc_active_changed.emit(sinc_now)
         else:
             self._refresh_overlay_visuals()
+
+    def _set_lanes_suppress(self, suppress: bool) -> None:
+        """Block or unblock per-lane view-change redraws (used during batch zoom)."""
+        for lane in self._lanes.values():
+            lane._suppress_view_redraws = suppress
 
     def _rebuild(self):
         if self._mode == "split":

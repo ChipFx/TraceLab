@@ -1,0 +1,3 @@
+[submodule "pyhelp"]
+	path = pyhelp
+	url = https://github.com/ChipFx/pyhelp.git

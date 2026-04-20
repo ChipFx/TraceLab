@@ -30,6 +30,46 @@
     "logo_sub": "#8888aa",
     "filt_text": "#884400"
   },
+  "helpwindow": {
+    "bg":                   "#f0f0f0",
+    "bg_content":           "#ffffff",
+    "bg_tree":              "#e4e4e4",
+    "bg_tree_selected":     "#c8d8f0",
+    "bg_toolbar":           "#e0e0e0",
+    "bg_statusbar":         "#d8d8d8",
+    "bg_tooltip":           "#e8e8f8",
+    "bg_button":            "#e0e0e0",
+    "bg_button_hover":      "#d0d0e8",
+    "bg_button_pressed":    "#c8c8d8",
+    "bg_splitter":          "#f0f0f0",
+
+    "text":                 "#101010",
+    "text_dim":             "#888888",
+    "text_tree":            "#202020",
+    "text_tree_selected":   "#000000",
+    "text_statusbar":       "#888888",
+    "text_tooltip":         "#101010",
+    "text_button":          "#202020",
+    "text_button_hover":    "#000000",
+
+    "logo_text":            "#2244aa",
+    "logo_sub":             "#8888aa",
+
+    "accent":               "#1565c0",
+    "link":                 "#1565c0",
+    "link_visited":         "#660099",
+
+    "border":               "#cccccc",
+    "border_button":        "#bbbbbb",
+    "border_button_bottom": "#dddddd",
+    "border_focus":         "#1565c0",
+    "border_splitter":      "#d8d8d8",
+
+    "admonition_note_bg":     "#d8e8f8",
+    "admonition_note_border": "#1565c0",
+    "admonition_warn_bg":     "#fdf0d0",
+    "admonition_warn_border": "#cc8800"
+  },
   "trace_colors": [
     "#C07000",
     "#0055CC",

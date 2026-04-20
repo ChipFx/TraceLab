@@ -4,9 +4,24 @@ A modular oscilloscope data viewer built with Python, PyQt6, and PyQtGraph.
 
 ---
 
+## Beware submodules!
+
+This project uses submodules, at the very least for the help-menu.
+
+Clone this project including submodules (--recurse-submodules)
+
+You could separately get the pyhelp project and install it.
+But...
+Then you do not get release version pinning between TraceLab and
+pyhelp, which wou will get (if I do my job right) if you clone
+TraceLab with its submodules.
+
 ## Quick Start
 
 ```bash
+# Clone the project (fill in the URL, this project will likely live in multiple places)
+git clone --recurse-submodules [url]/TraceLab.git
+
 # Install dependencies
 pip install -r requirements.txt
 

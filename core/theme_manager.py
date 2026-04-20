@@ -62,6 +62,7 @@ class ThemeData:
         self._plotview    = dict(_FALLBACK_PLOTVIEW)
         self._statusbar   = dict(_FALLBACK_STATUSBAR)
         self._traces      = list(_FALLBACK_TRACES)
+        self._helpwindow: dict = {}
         self._load(path)
 
     def _load(self, path: str):
@@ -77,6 +78,8 @@ class ThemeData:
                 self._statusbar.update(data["statusbar"])
             if "trace_colors" in data and data["trace_colors"]:
                 self._traces = [str(c) for c in data["trace_colors"]]
+            if "helpwindow" in data:
+                self._helpwindow = dict(data["helpwindow"])
         except Exception as e:
             print(f"[ThemeManager] Warning: could not load {path}: {e}")
 
@@ -95,14 +98,21 @@ class ThemeData:
     def trace_colors(self) -> List[str]:
         return list(self._traces)
 
+    @property
+    def helpwindow_dict(self) -> dict:
+        return dict(self._helpwindow)
+
     def to_json(self) -> dict:
-        return {
+        d = {
             "name":         self.name,
             "tooltip":      self.tooltip,
             "plotview":     dict(self._plotview),
             "statusbar":    dict(self._statusbar),
             "trace_colors": list(self._traces),
         }
+        if self._helpwindow:
+            d["helpwindow"] = dict(self._helpwindow)
+        return d
 
     def save(self):
         with open(self.path, "w", encoding="utf-8") as f:

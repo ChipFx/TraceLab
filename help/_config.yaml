@@ -1,0 +1,6 @@
+app_name: "ChipFX TraceLab"                   # Shown in window title and toolbar
+#chapter_order:                      # Explicit chapter display order
+#  - getting-started
+#  - view
+#  - tools
+#default_topic: "getting-started/overview"  # Opened on first launch

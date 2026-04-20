@@ -639,6 +639,11 @@ class MainWindow(QMainWindow):
         help_menu.addSeparator()
         help_menu.addAction("About TraceLab").triggered.connect(self._show_about)
 
+        # ── Window-level keyboard shortcuts ───────────────────────────
+        from PyQt6.QtGui import QShortcut
+        QShortcut(QKeySequence(Qt.Key.Key_F5), self).activated.connect(
+            self._reapply_retrigger)
+
     def _build_toolbar(self):
         tb = self.addToolBar("Main")
         tb.setMovable(False)
@@ -1281,6 +1286,7 @@ class MainWindow(QMainWindow):
 
     def _init_help(self):
         from pyhelp import HelpRegistry, HelpWindow
+        from PyQt6.QtGui import QShortcut
         _help_dir    = os.path.join(_APP_ROOT, "help")
         _assets_dir  = os.path.join(_APP_ROOT, "assets")
         self._help_registry = HelpRegistry(_help_dir)
@@ -1290,6 +1296,9 @@ class MainWindow(QMainWindow):
             theme=self._build_help_theme_dict(),
             font_size=max(7, int(10 * self._settings.get("font_scale", 1.0))),
             assets_dir=_assets_dir,
+        )
+        QShortcut(QKeySequence(Qt.Key.Key_F5), self._help_window).activated.connect(
+            self._help_window.reload
         )
 
     def _show_help(self, context: dict | None = None):

@@ -18,7 +18,7 @@ from core.trace_model import TraceModel
 from core.theme_manager import ThemeManager
 from core.data_loader import load_csv
 from core.import_dialog import ImportDialog
-from core.scope_plot_widget import ScopePlotWidget
+from core.scope_plot_widget import ScopePlotWidget, DEFAULT_LIMITS_CONFIG
 from core.channel_panel import ChannelPanel
 from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
@@ -137,6 +137,11 @@ class MainWindow(QMainWindow):
         s["periodicity_estimation_method"] = self._periodicity_method
         s["periodicity_estimation_timeout"] = self._settings.get(
             "periodicity_estimation_timeout", 5)
+        s["viewport_limits_mode"]    = self._limits_config.get("mode", "window")
+        s["viewport_scale_min_px"]   = self._limits_config.get("scale_min_px", 2)
+        s["viewport_scale_max_px"]   = self._limits_config.get("scale_max_px", 12)
+        s["viewport_preset_min"]     = self._limits_config.get("preset_min", 2048)
+        s["viewport_preset_max"]     = self._limits_config.get("preset_max", 50_000)
         s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
         s["lane_label_size"] = self._lane_label_size
         s["show_lane_labels"] = self._show_lane_labels
@@ -249,6 +254,22 @@ class MainWindow(QMainWindow):
             self._settings.get("allow_theme_force_labels", False))
         self._lane_label_spacing: float = float(
             self._settings.get("lane_label_spacing", 0.3))
+        # Viewport limits config — merged over defaults so unknown keys stay safe
+        self._limits_config: dict = {
+            **DEFAULT_LIMITS_CONFIG,
+            **{k: v for k, v in {
+                "mode":         self._settings.get("viewport_limits_mode",
+                                                   DEFAULT_LIMITS_CONFIG["mode"]),
+                "scale_min_px": int(self._settings.get("viewport_scale_min_px",
+                                                        DEFAULT_LIMITS_CONFIG["scale_min_px"])),
+                "scale_max_px": int(self._settings.get("viewport_scale_max_px",
+                                                        DEFAULT_LIMITS_CONFIG["scale_max_px"])),
+                "preset_min":   int(self._settings.get("viewport_preset_min",
+                                                        DEFAULT_LIMITS_CONFIG["preset_min"])),
+                "preset_max":   int(self._settings.get("viewport_preset_max",
+                                                        DEFAULT_LIMITS_CONFIG["preset_max"])),
+            }.items()},
+        }
         self._plot = ScopePlotWidget(
             self.theme, self._y_lock_auto,
             self._interp_mode, self._viewport_min_pts,
@@ -256,7 +277,8 @@ class MainWindow(QMainWindow):
             lane_label_size=self._lane_label_size,
             show_lane_labels=self._show_lane_labels,
             allow_theme_force_labels=self._allow_theme_force_labels,
-            lane_label_spacing=self._lane_label_spacing)
+            lane_label_spacing=self._lane_label_spacing,
+            limits_config=self._limits_config)
         self._plot.cursor_values_changed.connect(self._on_cursor_values)
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
@@ -619,6 +641,48 @@ class MainWindow(QMainWindow):
         adv_per_menu = per_menu.addMenu("Advanced Settings")
         adv_per_menu.addAction("Set Time Out…").triggered.connect(
             self._dlg_period_timeout)
+
+        settings_menu.addSeparator()
+        vp_menu = settings_menu.addMenu("Viewport Limits")
+        vp_menu.setToolTipsVisible(True)
+        vp_group = QActionGroup(self)
+        vp_group.setExclusive(True)
+        self._act_vp_window = vp_menu.addAction("Use window size")
+        self._act_vp_window.setCheckable(True)
+        self._act_vp_window.setChecked(self._limits_config.get("mode") == "window")
+        self._act_vp_window.setToolTip(
+            "Scale the display point budget with the plot pixel width.\n"
+            "Wider windows get more points; narrow windows are automatically lighter.")
+        self._act_vp_preset = vp_menu.addAction("Use preset limits")
+        self._act_vp_preset.setCheckable(True)
+        self._act_vp_preset.setChecked(self._limits_config.get("mode") == "preset")
+        self._act_vp_preset.setToolTip(
+            "Use a fixed min/max point budget regardless of window size.\n"
+            "Reproduces the classic fixed-limit behaviour.")
+        vp_group.addAction(self._act_vp_window)
+        vp_group.addAction(self._act_vp_preset)
+        self._act_vp_window.triggered.connect(
+            lambda: self._set_viewport_limits_mode("window"))
+        self._act_vp_preset.triggered.connect(
+            lambda: self._set_viewport_limits_mode("preset"))
+        vp_menu.addSeparator()
+        vp_menu.addAction("Scale min points/px…").triggered.connect(
+            lambda: self._dlg_vp_int("scale_min_px", "Scale min points/px",
+                                     "Minimum rendered points per display pixel\n"
+                                     "(window-size mode):", 1, 200))
+        vp_menu.addAction("Scale max points/px…").triggered.connect(
+            lambda: self._dlg_vp_int("scale_max_px", "Scale max points/px",
+                                     "Maximum rendered points per display pixel\n"
+                                     "(window-size mode):", 2, 200))
+        vp_menu.addSeparator()
+        vp_menu.addAction("Preset min points…").triggered.connect(
+            lambda: self._dlg_vp_int("preset_min", "Preset min points",
+                                     "Absolute floor — never downsample below this\n"
+                                     "many points (both modes):", 64, 10_000_000))
+        vp_menu.addAction("Preset max points…").triggered.connect(
+            lambda: self._dlg_vp_int("preset_max", "Preset max points",
+                                     "Fixed point ceiling\n"
+                                     "(preset mode):", 64, 10_000_000))
 
         settings_menu.addSeparator()
         lane_lbl_menu = settings_menu.addMenu("Lane Labels")
@@ -1675,6 +1739,20 @@ class MainWindow(QMainWindow):
                 act.setChecked(True)
         for trace in self._traces:
             self._estimate_period_async(trace)
+
+    # ── Viewport limits ────────────────────────────────────────────────
+
+    def _set_viewport_limits_mode(self, mode: str) -> None:
+        self._limits_config["mode"] = mode
+        self._plot.set_limits_config(self._limits_config)
+
+    def _dlg_vp_int(self, key: str, title: str, prompt: str,
+                    lo: int, hi: int) -> None:
+        current = int(self._limits_config.get(key, DEFAULT_LIMITS_CONFIG[key]))
+        val, ok = QInputDialog.getInt(self, title, prompt, current, lo, hi, 1)
+        if ok:
+            self._limits_config[key] = val
+            self._plot.set_limits_config(self._limits_config)
 
     def _dlg_period_timeout(self) -> None:
         """Settings > Periodicity Estimation > Advanced Settings > Set Time Out."""

@@ -632,7 +632,10 @@ class MainWindow(QMainWindow):
 
         # ── Help ──────────────────────────────────────────────────────
         help_menu = mb.addMenu("Help")
-        help_menu.addAction("Help Contents").triggered.connect(self._show_help)
+        act_help_contents = QAction("Help Contents", self)
+        act_help_contents.setShortcut(QKeySequence(Qt.Key.Key_F1))
+        act_help_contents.triggered.connect(self._show_help)
+        help_menu.addAction(act_help_contents)
         help_menu.addSeparator()
         help_menu.addAction("About TraceLab").triggered.connect(self._show_about)
 
@@ -1289,7 +1292,40 @@ class MainWindow(QMainWindow):
             assets_dir=_assets_dir,
         )
 
-    def _show_help(self):
+    def _show_help(self, context: dict | None = None):
+        """Open the help window, optionally pre-seeded with a focus context.
+
+        ``context`` is a dict describing the UI element that was active when
+        help was requested.  Pass ``None`` (default) to auto-capture the
+        current focused widget — that path is taken both by the F1 shortcut
+        and the menu action.
+
+        Once pyhelp gains search / topic-routing support, this context will be
+        forwarded so the help browser can open directly at the relevant topic.
+        """
+        from PyQt6.QtWidgets import QApplication
+
+        if context is None:
+            context = {}
+            fw = QApplication.focusWidget()
+            if fw is not None:
+                context["widget_class"] = type(fw).__name__
+                context["object_name"]  = fw.objectName() or ""
+                context["tooltip"]      = fw.toolTip() or ""
+                context["whats_this"]   = fw.whatsThis() or ""
+                if hasattr(fw, "text"):
+                    try:
+                        context["text"] = fw.text()
+                    except Exception:
+                        pass
+                win = fw.window()
+                if win is not None and win is not self:
+                    context["window_title"] = win.windowTitle() or ""
+            else:
+                context["widget_class"] = None
+
+        print(f"[TraceLab Help] _show_help context: {context}")
+
         if hasattr(self, '_help_window'):
             self._help_window.show()
             self._help_window.raise_()

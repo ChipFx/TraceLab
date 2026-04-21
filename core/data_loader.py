@@ -167,7 +167,9 @@ class LoadResult:
 
 # ── Main load function ────────────────────────────────────────────────────────
 
-def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
+def load_csv(filepath: str, delimiter: str = None,
+             rejection_enabled: bool = False,
+             rejection_max_lines: int = 10) -> LoadResult:
     result = LoadResult()
     result.filename = os.path.basename(filepath)
     try:
@@ -217,13 +219,29 @@ def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
             return result
 
         # ── Delimiter sniff ───────────────────────────────────────────
+        # Try the header row first: it reliably contains the delimiter even
+        # when following lines are garbage (which confuses the sniffer).
         data_sample = "".join(data_lines[:20])
         if delimiter is None:
-            try:
-                dialect = csv.Sniffer().sniff(data_sample, delimiters=",;\t |")
-                delimiter = dialect.delimiter
-            except csv.Error:
+            for _sniff_src in (data_lines[0], data_sample):
+                try:
+                    dialect = csv.Sniffer().sniff(_sniff_src, delimiters=",;\t |")
+                    delimiter = dialect.delimiter
+                    break
+                except csv.Error:
+                    pass
+            if delimiter is None:
                 delimiter = ","
+
+        # ── Pre-data garbage rejection ────────────────────────────────
+        # If enabled, scan lines after the header and silently drop any
+        # that look non-numeric (no delimiter, wrong column count, no
+        # parseable numbers), up to rejection_max_lines.  Once the first
+        # valid data row is found the scan stops; after that, bad lines
+        # are the parser's problem (normal errors).
+        if rejection_enabled and len(data_lines) > 1:
+            data_lines = _skip_preamble_garbage(
+                data_lines, delimiter, rejection_max_lines)
 
         # ── CSV parsing ───────────────────────────────────────────────
         reader = csv.DictReader(io.StringIO("".join(data_lines)),
@@ -238,7 +256,8 @@ def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
         raw: Dict[str, List[str]] = {clean: [] for clean in fieldnames_clean}
         for row in reader:
             for orig, clean in name_map.items():
-                raw[clean].append(row.get(orig, "").strip())
+                val = row.get(orig)
+                raw[clean].append(val.strip() if val is not None else "")
 
         for col_name, values in raw.items():
             result.columns[col_name] = _try_parse_numeric(values)
@@ -425,3 +444,72 @@ def _detect_time_column(columns):
 
 def is_numeric_column(arr: np.ndarray) -> bool:
     return arr.dtype.kind in ("f", "i", "u")
+
+
+# ── Pre-data garbage rejection ────────────────────────────────────────────────
+
+def _is_valid_data_line(line: str, delimiter: str, expected_cols: int) -> bool:
+    """
+    Return True if line looks like a row of data values.
+    Requires:
+      - At least expected_cols fields when split by delimiter
+      - At least one field parseable as a float
+    """
+    if delimiter in line:
+        fields = [f.strip() for f in line.split(delimiter)]
+    else:
+        if expected_cols > 1:
+            return False
+        fields = [line.strip()]
+
+    if len(fields) < expected_cols:
+        return False
+
+    for f in fields:
+        if f:
+            try:
+                float(f)
+                return True
+            except ValueError:
+                pass
+    return False
+
+
+def _skip_preamble_garbage(data_lines: list, delimiter: str,
+                           max_skip: int) -> list:
+    """
+    data_lines[0] is the column-header row.  Scan lines[1..] and silently
+    drop any that fail _is_valid_data_line, up to max_skip lines.
+    Stops (keeps everything from) the first line that looks like real data.
+    If max_skip is exhausted without finding valid data, the remaining lines
+    are passed through unchanged so the normal parser can handle them.
+    """
+    if not data_lines or max_skip <= 0:
+        return data_lines
+
+    header = data_lines[0]
+    try:
+        expected_cols = len(next(csv.reader(
+            [header.strip()], delimiter=delimiter)))
+    except StopIteration:
+        expected_cols = 1
+
+    rest = data_lines[1:]
+    skipped = 0
+    kept_from = 0          # index in rest where kept data starts
+
+    for i, line in enumerate(rest):
+        stripped = line.strip()
+        if not stripped:   # blank lines: skip without counting against budget
+            continue
+        if _is_valid_data_line(stripped, delimiter, expected_cols):
+            kept_from = i
+            break
+        skipped += 1
+        if skipped >= max_skip:
+            kept_from = i + 1   # skip this line too, proceed from next
+            break
+    else:
+        return data_lines   # no valid data found at all; leave untouched
+
+    return [header] + rest[kept_from:]

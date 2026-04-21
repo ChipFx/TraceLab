@@ -178,6 +178,8 @@ class MainWindow(QMainWindow):
         self._import_replace          = self._settings.get("import_replace", True)
         self._import_reset_view       = self._settings.get("import_reset_view", True)
         self._import_reset_retrigger  = self._settings.get("import_reset_retrigger", True)
+        self._rejection_enabled       = self._settings.get("rejection_enabled", False)
+        self._rejection_max_lines     = self._settings.get("rejection_max_lines", 10)
         self._y_lock_auto = self._settings.get("y_lock_auto", True)
         self._fft_min_freq = self._settings.get("fft_min_freq", 1.0)
         self._viewport_min_pts = self._settings.get("viewport_min_pts", 1024)
@@ -707,6 +709,29 @@ class MainWindow(QMainWindow):
         self._act_allow_force_labels.triggered.connect(
             self._toggle_allow_theme_force_labels)
 
+        settings_menu.addSeparator()
+        import_menu = settings_menu.addMenu("Import")
+        import_menu.setToolTipsVisible(True)
+        rejection_menu = import_menu.addMenu("Rejection")
+        rejection_menu.setToolTipsVisible(True)
+        rejection_menu.setToolTip(
+            "Configure if and how many lines between header and data\n"
+            "get rejected if they are malformed before an error occurs.")
+
+        self._act_rejection_enabled = rejection_menu.addAction("Enabled")
+        self._act_rejection_enabled.setCheckable(True)
+        self._act_rejection_enabled.setChecked(self._rejection_enabled)
+        self._act_rejection_enabled.setToolTip(
+            "When enabled, lines between the column header and the first\n"
+            "valid data row are silently skipped if they contain no\n"
+            "recognisable numeric data (wrong column count, pure text, etc.).\n"
+            "Useful for formats that embed extra comment or unit rows.")
+        self._act_rejection_enabled.triggered.connect(
+            self._toggle_rejection_enabled)
+
+        rejection_menu.addAction("Max Lines…").triggered.connect(
+            self._dlg_rejection_max_lines)
+
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Reload Plugins").triggered.connect(
@@ -804,7 +829,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        result = load_csv(path)
+        result = load_csv(path,
+                          rejection_enabled=self._rejection_enabled,
+                          rejection_max_lines=self._rejection_max_lines)
         if result.error:
             QMessageBox.critical(self, "Load Error", result.error)
             return
@@ -1124,6 +1151,23 @@ class MainWindow(QMainWindow):
             self._lane_label_size, self._show_lane_labels, checked,
             self._lane_label_spacing)
         self._save_settings()
+
+    def _toggle_rejection_enabled(self, checked: bool):
+        self._rejection_enabled = checked
+        self._settings["rejection_enabled"] = checked
+        self._save_settings()
+
+    def _dlg_rejection_max_lines(self):
+        val, ok = QInputDialog.getInt(
+            self, "Rejection — Max Lines",
+            "Maximum number of malformed lines to skip between the\n"
+            "column header and the first valid data row.\n"
+            "Lines beyond this limit are passed through normally.",
+            self._rejection_max_lines, 1, 1000, 1)
+        if ok:
+            self._rejection_max_lines = val
+            self._settings["rejection_max_lines"] = val
+            self._save_settings()
 
     # ── Cursors ────────────────────────────────────────────────────────
 

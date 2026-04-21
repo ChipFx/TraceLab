@@ -2,32 +2,26 @@
 core/data_loader.py
 Handles loading data from CSV and other formats.
 
-Supports '#' prefixed metadata lines at the top of the CSV, following the
-widely-used convention of '#' as a comment/metadata marker (used by gnuplot,
-numpy savetxt, R, LabVIEW exports, many instruments).  Lines starting with '#'
-before the header row are parsed for key=value pairs.
+Import pipeline
+───────────────
+1. Read all lines from the file.
+2. Run csv_detector.detect_parser() against the first MAX_DETECTION_LINES lines.
+   - If a parser plugin is found, call plugin.parse() → ParsedMetadata.
+   - If no plugin matches, fall back to the original '#key=value' metadata logic.
+3. Build LoadResult: parse CSV data starting at ParsedMetadata.data_start_line,
+   apply per-column metadata (names, units, is_time, skip), convert datetime /
+   unix-epoch time columns to float seconds, and store wall-clock anchor.
 
-Supported metadata keys (case-insensitive):
-  #samplerate=10000        or  #samplerate=10k / 2.2M / 100G
-  #dt=0.0001               (seconds per sample; linked with samplerate)
-  #time=time               (column name to use as time axis)
-  #time=3                  (1-based column index to use as time axis)
-  #gain=2.5/4096           (multiplier applied after reading; supports fractions)
-  #gain=1024
-  #attenuation=4096        (divides; equivalent to gain=1/4096)
-  #offset=-1.25            (added AFTER gain, in output units)
-  #unit=V
-  #coupling=AC
-  #impedance=50
-  #bwlimit=200M
+Native TraceLab '#key=value' format
+────────────────────────────────────
+TraceLab native files carry metadata in '#' comment lines before the header row.
+Supported keys (case-insensitive):
+  #samplerate=10000   #dt=0.0001   #time=time   #gain=2.5/4096
+  #attenuation=4096   #offset=-1.25   #unit=V   #coupling=AC
+  #impedance=50   #bwlimit=200M   #zerotime=N
+  #viewtimestart=   #viewtimestop=   #viewsamplestart=   #viewsamplestop=
 
-Example CSV header block:
-  #samplerate=10k
-  #gain=2.5/4096
-  #offset=-1.25
-  #unit=V
-  time,Ch1,Ch2,Ch3
-  0.0,1234,2048,512
+All metric suffixes (k/M/G/m/u/n/p) and fractions (2.5/4096) are supported.
 """
 
 import numpy as np
@@ -35,6 +29,8 @@ import csv
 import io
 import os
 import re
+import unicodedata
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 
@@ -59,8 +55,10 @@ def parse_value(s: str) -> float:
     return float(s)
 
 
+# ── TraceLab native metadata ──────────────────────────────────────────────────
+
 class CsvMetadata:
-    """Parsed metadata from '#' header lines."""
+    """Parsed metadata from '#' header lines (TraceLab native format)."""
     def __init__(self):
         self.sample_rate: Optional[float] = None
         self.dt: Optional[float] = None
@@ -132,6 +130,8 @@ def parse_metadata_lines(lines: List[str]) -> CsvMetadata:
     return meta
 
 
+# ── Load result ───────────────────────────────────────────────────────────────
+
 class LoadResult:
     def __init__(self):
         self.columns: Dict[str, np.ndarray] = {}
@@ -141,10 +141,31 @@ class LoadResult:
         self.error: Optional[str] = None
         self.metadata: CsvMetadata = CsvMetadata()
 
+        # ── Parser plugin results ─────────────────────────────────────
+        # Name of the plugin that handled this file, or "" for built-in logic.
+        self.parser_name: str = ""
+
+        # {clean_col_name: ColumnInfo} — populated when a plugin matched.
+        # Import dialog uses these for default labels, units, skip flags, groups.
+        self.column_infos: dict = {}
+
+        # Suggested column groupings from the parser (list[ColumnGroup]).
+        self.column_groups: list = []
+
+        # ISO 8601 string for what real-world moment corresponds to t=0.
+        # "" if unknown.  Set to the instrument trigger time (scope) or first
+        # sample timestamp (data logger) by the relevant parser plugin.
+        self.t0_wall_clock: str = ""
+
+        # How the time axis was derived — matches ParsedMetadata.time_format.
+        self.source_time_format: str = "seconds_relative"
+
     @property
     def column_names(self) -> List[str]:
         return list(self.columns.keys())
 
+
+# ── Main load function ────────────────────────────────────────────────────────
 
 def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
     result = LoadResult()
@@ -153,21 +174,49 @@ def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
         with open(filepath, "r", newline="", encoding="utf-8-sig") as f:
             all_lines = f.readlines()
 
-        meta_lines = []
-        data_lines = []
-        for line in all_lines:
-            stripped = line.lstrip()
-            if stripped.startswith("#"):
-                meta_lines.append(stripped.rstrip())
-            else:
-                data_lines.append(line)
+        # ── Try plugin detection ──────────────────────────────────────
+        parsed_meta = None
+        try:
+            from core.csv_detector import detect_parser
+            parser_module = detect_parser(all_lines)
+            if parser_module is not None and hasattr(parser_module, "parse"):
+                parsed_meta = parser_module.parse(filepath, all_lines)
+        except Exception as e:
+            # Detection errors must never prevent loading; fall back silently.
+            parsed_meta = None
 
-        result.metadata = parse_metadata_lines(meta_lines)
+        # ── Split into header / data sections ────────────────────────
+        if parsed_meta is not None:
+            result.parser_name = parsed_meta.parser_name
+            header_idx = parsed_meta.data_start_line
+            rows_idx   = parsed_meta.data_rows_start_line
+            if rows_idx > header_idx:
+                # Splice: keep the column-name row, skip the inter-header lines,
+                # then append the actual data rows.
+                data_lines = [all_lines[header_idx]] + all_lines[rows_idx:]
+            else:
+                data_lines = all_lines[header_idx:]
+            if delimiter is None:
+                delimiter = parsed_meta.data_delimiter or ","
+            # Build a minimal CsvMetadata from ParsedMetadata for backward compat
+            result.metadata = _csv_meta_from_parsed(parsed_meta)
+        else:
+            # Original TraceLab fallback: '#' comment lines are metadata
+            meta_lines = []
+            data_lines = []
+            for line in all_lines:
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    meta_lines.append(stripped.rstrip())
+                else:
+                    data_lines.append(line)
+            result.metadata = parse_metadata_lines(meta_lines)
 
         if not data_lines:
             result.error = "File contains no data rows."
             return result
 
+        # ── Delimiter sniff ───────────────────────────────────────────
         data_sample = "".join(data_lines[:20])
         if delimiter is None:
             try:
@@ -176,22 +225,14 @@ def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
             except csv.Error:
                 delimiter = ","
 
+        # ── CSV parsing ───────────────────────────────────────────────
         reader = csv.DictReader(io.StringIO("".join(data_lines)),
                                 delimiter=delimiter)
         if not reader.fieldnames:
             result.error = "No column headers found."
             return result
 
-        # Strip leading/trailing whitespace AND non-printable characters from
-        # column names. CSVs from some loggers/tools add spaces after commas
-        # in the header row, producing " ADC2" instead of "ADC2".
-        def _clean_name(s: str) -> str:
-            import unicodedata
-            cleaned = "".join(c for c in s if unicodedata.category(c) != "Cc")
-            return cleaned.strip()
-
         fieldnames_clean = [_clean_name(n) for n in reader.fieldnames]
-        # Build mapping old->new so we can still read the DictReader rows
         name_map = dict(zip(reader.fieldnames, fieldnames_clean))
 
         raw: Dict[str, List[str]] = {clean: [] for clean in fieldnames_clean}
@@ -204,28 +245,169 @@ def load_csv(filepath: str, delimiter: str = None) -> LoadResult:
 
         result.n_rows = len(next(iter(raw.values()))) if raw else 0
 
-        meta_time = result.metadata.time_col
-        if meta_time is not None:
-            # Also clean the metadata time column name for matching
-            col_names = list(result.columns.keys())
-            meta_time_clean = _clean_name(meta_time) if meta_time else meta_time
-            if meta_time_clean.isdigit():
-                idx = int(meta_time_clean) - 1
-                if 0 <= idx < len(col_names):
-                    result.suggested_time_col = col_names[idx]
-            elif meta_time_clean in result.columns:
-                result.suggested_time_col = meta_time_clean
+        # ── Apply plugin column metadata ──────────────────────────────
+        if parsed_meta is not None:
+            _apply_plugin_meta(result, parsed_meta)
         else:
-            result.suggested_time_col = _detect_time_column(result.columns)
+            # Original time-column detection
+            meta_time = result.metadata.time_col
+            if meta_time is not None:
+                col_names = list(result.columns.keys())
+                meta_time_clean = _clean_name(meta_time) if meta_time else meta_time
+                if meta_time_clean.isdigit():
+                    idx = int(meta_time_clean) - 1
+                    if 0 <= idx < len(col_names):
+                        result.suggested_time_col = col_names[idx]
+                elif meta_time_clean in result.columns:
+                    result.suggested_time_col = meta_time_clean
+            else:
+                result.suggested_time_col = _detect_time_column(result.columns)
 
     except Exception as e:
         result.error = str(e)
     return result
 
 
+# ── Plugin integration helpers ────────────────────────────────────────────────
+
+def _apply_plugin_meta(result: LoadResult, parsed_meta):
+    """
+    Apply per-column metadata from a ParsedMetadata instance to result.
+    Handles datetime / unix-epoch time column conversion.
+    """
+
+    # Build column_infos dict keyed by clean name
+    time_col_clean = None
+    for ci in parsed_meta.columns:
+        clean = _clean_name(ci.original_name)
+        result.column_infos[clean] = ci
+        # Also store by original in case caller uses the raw name
+        if ci.original_name != clean:
+            result.column_infos[ci.original_name] = ci
+        if ci.is_time and clean in result.columns:
+            time_col_clean = clean
+
+    result.column_groups    = parsed_meta.groups
+    result.source_time_format = parsed_meta.time_format
+
+    # ── NaN sentinels / invalid_above ────────────────────────────────
+    if parsed_meta.invalid_above is not None:
+        thresh = abs(parsed_meta.invalid_above)
+        for col_name, arr in result.columns.items():
+            if arr.dtype.kind == "f":
+                result.columns[col_name] = np.where(
+                    np.abs(arr) > thresh, np.nan, arr)
+
+    for sentinel in (parsed_meta.nan_sentinels or []):
+        for col_name, arr in result.columns.items():
+            if arr.dtype.kind == "f":
+                result.columns[col_name] = np.where(
+                    arr == sentinel, np.nan, arr)
+
+    # ── Time column handling ──────────────────────────────────────────
+    if time_col_clean is None:
+        # Fall back to keyword detection if plugin didn't mark one
+        time_col_clean = _detect_time_column(result.columns)
+
+    if time_col_clean:
+        result.suggested_time_col = time_col_clean
+        time_format = parsed_meta.time_format
+
+        if time_format.startswith("datetime:"):
+            fmt = time_format[len("datetime:"):]
+            arr = result.columns[time_col_clean]
+            if arr.dtype == object:
+                float_arr, t0_iso = _parse_datetime_series(list(arr), fmt)
+                result.columns[time_col_clean] = float_arr
+                result.t0_wall_clock = t0_iso
+            # If it somehow parsed as numeric already, leave it
+        elif time_format == "unix_epoch":
+            arr = result.columns[time_col_clean]
+            if arr.dtype.kind == "f":
+                float_arr, t0_iso = _unix_epoch_to_relative(arr)
+                result.columns[time_col_clean] = float_arr
+                result.t0_wall_clock = t0_iso
+        # "seconds_relative" — already floats, no conversion needed
+
+    # t0_wall_clock may also come from header (scope trigger time)
+    if not result.t0_wall_clock and parsed_meta.start_wall_clock:
+        result.t0_wall_clock = parsed_meta.start_wall_clock
+
+    # Apply t0_policy for loggers that want "first_sample" as zero
+    if (time_col_clean and
+            parsed_meta.t0_policy == "first_sample" and
+            result.t0_wall_clock == "" ):
+        # Parser didn't extract a wall clock but wants first sample as t=0
+        arr = result.columns.get(time_col_clean)
+        if arr is not None and arr.dtype.kind == "f" and len(arr) > 0:
+            result.columns[time_col_clean] = arr - arr[0]
+
+
+def _csv_meta_from_parsed(parsed_meta) -> CsvMetadata:
+    """Build a minimal CsvMetadata for backward compatibility from ParsedMetadata."""
+    m = CsvMetadata()
+    if parsed_meta.sample_rate:
+        m.sample_rate = parsed_meta.sample_rate
+        m.dt = 1.0 / parsed_meta.sample_rate
+    return m
+
+
+# ── Datetime / epoch helpers ──────────────────────────────────────────────────
+
+def _parse_datetime_series(values: list, fmt: str):
+    """
+    Convert a list of datetime strings to float seconds from the first valid sample.
+    Returns (float_array, t0_iso_string).
+    """
+    parsed = []
+    for v in values:
+        v = v.strip()
+        if not v:
+            parsed.append(None)
+            continue
+        try:
+            parsed.append(datetime.strptime(v, fmt))
+        except ValueError:
+            parsed.append(None)
+
+    first = next((dt for dt in parsed if dt is not None), None)
+    if first is None:
+        return np.full(len(values), np.nan, dtype=np.float64), ""
+
+    t0_iso = first.isoformat()
+    seconds = np.array(
+        [(dt - first).total_seconds() if dt is not None else np.nan
+         for dt in parsed],
+        dtype=np.float64,
+    )
+    return seconds, t0_iso
+
+
+def _unix_epoch_to_relative(arr: np.ndarray):
+    """
+    Convert Unix epoch seconds to seconds-from-first-sample.
+    Returns (relative_array, t0_iso_string).
+    """
+    valid = arr[np.isfinite(arr)]
+    if len(valid) == 0:
+        return arr.copy(), ""
+    t0 = float(valid[0])
+    t0_iso = datetime.fromtimestamp(t0, tz=timezone.utc).isoformat()
+    return arr - t0, t0_iso
+
+
+# ── Shared utilities (imported by parser plugins) ─────────────────────────────
+
+def _clean_name(s: str) -> str:
+    """Strip control characters and leading/trailing whitespace from a column name."""
+    cleaned = "".join(c for c in s if unicodedata.category(c) != "Cc")
+    return cleaned.strip()
+
+
 def _try_parse_numeric(values):
     try:
-        return np.array([float(v) if v else np.nan for v in values], dtype=np.float64)
+        return np.array([float(v) if v else np.nan for v in values],
+                        dtype=np.float64)
     except (ValueError, TypeError):
         return np.array(values, dtype=object)
 

@@ -92,19 +92,27 @@ def _normalise_decimal(s: str) -> str:
 class ColumnConfigRow(QWidget):
     def __init__(self, col_name: str, data: np.ndarray, color: str,
                  is_time_candidate: bool = False,
-                 metadata: CsvMetadata = None, parent=None):
+                 metadata: CsvMetadata = None,
+                 col_info=None,          # ColumnInfo from parser plugin, or None
+                 parent=None):
         super().__init__(parent)
         self.col_name = col_name
         self.data = data
         self._is_numeric = is_numeric_column(data)
         meta = metadata or CsvMetadata()
+        # col_info overrides the global CsvMetadata for per-column defaults
+        self._col_info = col_info
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(8)
 
+        # Default-skip: plugin may mark alarm/marker columns as skip=True
+        _plugin_skip = col_info.skip if col_info is not None else False
+
         self.chk_enable = QCheckBox()
-        self.chk_enable.setChecked(self._is_numeric and not is_time_candidate)
+        self.chk_enable.setChecked(
+            self._is_numeric and not is_time_candidate and not _plugin_skip)
         self.chk_enable.setToolTip("Import this column as a trace")
         layout.addWidget(self.chk_enable)
 
@@ -114,7 +122,9 @@ class ColumnConfigRow(QWidget):
         lbl.setFont(QFont("Courier New", 9))
         layout.addWidget(lbl)
 
-        self.edit_label = SciLineEdit(col_name)
+        _default_label = (col_info.display_name if col_info and col_info.display_name
+                          else col_name)
+        self.edit_label = SciLineEdit(_default_label)
         self.edit_label.setToolTip("Display label for this trace")
         self.edit_label.setMinimumWidth(90)
         self.edit_label.setMaximumWidth(140)
@@ -147,7 +157,9 @@ class ColumnConfigRow(QWidget):
             "Decimal: use '.' or ',' — both accepted")
         sl.addWidget(self.edit_offset)
 
-        self.edit_unit = SciLineEdit(meta.unit or "V")
+        _default_unit = (col_info.unit if col_info and col_info.unit
+                         else (meta.unit or "V"))
+        self.edit_unit = SciLineEdit(_default_unit)
         self.edit_unit.setFixedWidth(38)
         self.edit_unit.setToolTip("Physical unit label (V, A, °C, …)")
         sl.addWidget(self.edit_unit)
@@ -188,13 +200,16 @@ class ColumnConfigRow(QWidget):
             self.chk_enable.setEnabled(False)
             self.chk_scale.setEnabled(False)
 
-        # Pre-fill from CSV metadata
-        if meta.gain is not None and meta.gain != 1.0:
+        # Pre-fill scaling: col_info (per-column plugin data) takes precedence
+        # over the global CsvMetadata values.
+        _gain   = col_info.gain   if col_info is not None else (meta.gain   or 1.0)
+        _offset = col_info.offset if col_info is not None else (meta.offset or 0.0)
+        if _gain != 1.0:
             self.chk_scale.setChecked(True)
-            self.edit_gain.setText(str(meta.gain))
-        if meta.offset is not None and meta.offset != 0.0:
+            self.edit_gain.setText(str(_gain))
+        if _offset != 0.0:
             self.chk_scale.setChecked(True)
-            self.edit_offset.setValue(meta.offset)
+            self.edit_offset.setText(str(_offset))
 
     def _toggle_scaling(self, enabled: bool):
         self.scale_widget.setEnabled(enabled)
@@ -262,6 +277,10 @@ class ImportDialog(QDialog):
             meta_hints.append(f"Offset={meta.offset:.6g}")
         if meta.unit:
             meta_hints.append(f"Unit={meta.unit}")
+        if self.load_result.parser_name:
+            info_parts.append(
+                f"<span style='color:#80a0ff'>🔌 Parser: "
+                f"{self.load_result.parser_name}</span>")
         if meta_hints:
             info_parts.append(
                 f"<span style='color:#80c080'>📋 Metadata: "
@@ -377,8 +396,10 @@ class ImportDialog(QDialog):
             color = _trace_palette[color_idx % len(_trace_palette)]
             if is_numeric_column(data) and not is_time:
                 color_idx += 1
+            col_info = self.load_result.column_infos.get(col_name)
             row = ColumnConfigRow(col_name, data, color,
-                                   is_time_candidate=is_time, metadata=meta)
+                                  is_time_candidate=is_time, metadata=meta,
+                                  col_info=col_info)
             self._col_rows[col_name] = row
             if i > 0 and i % 5 == 0:
                 line = QFrame()
@@ -650,6 +671,7 @@ class ImportDialog(QDialog):
                 elif t0_time != 0.0:
                     td = td - t0_time
 
+            col_info = self.load_result.column_infos.get(col_name)
             trace = TraceModel(
                 name=col_name,
                 raw_data=raw,
@@ -660,6 +682,13 @@ class ImportDialog(QDialog):
                 label=row.edit_label.text().strip() or col_name,
                 unit=scaling.unit if scaling.enabled else "raw",
                 scaling=scaling,
+                # Source provenance — available to trace-manipulation plugins
+                source_file=self.load_result.filename,
+                original_col_name=col_name,
+                col_group=col_info.group if col_info else "",
+                # Wall-clock time anchor — used by cursor UI for real-world time display
+                t0_wall_clock=self.load_result.t0_wall_clock,
+                source_time_format=self.load_result.source_time_format,
             )
 
             # For sample-based time, apply t0 offset via dt-based shift

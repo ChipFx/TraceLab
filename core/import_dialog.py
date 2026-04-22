@@ -672,8 +672,9 @@ class ImportDialog(QDialog):
                     td = td - t0_time
 
             col_info = self.load_result.column_infos.get(col_name)
+            _trace_name = row.edit_label.text().strip() or col_name
             trace = TraceModel(
-                name=col_name,
+                name=_trace_name,
                 raw_data=raw,
                 time_data=td,
                 sample_rate=sps,

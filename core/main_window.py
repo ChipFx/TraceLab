@@ -857,7 +857,8 @@ class MainWindow(QMainWindow):
         if dlg.replace_existing:
             self._clear_all(confirm=False)
 
-        self._batch_import_traces(dlg.result_traces)
+        self._batch_import_traces(dlg.result_traces,
+                                   replace_existing=dlg.replace_existing)
 
         if dlg.reset_view:
             meta = result.metadata
@@ -869,19 +870,45 @@ class MainWindow(QMainWindow):
 
         self._update_status()
 
-    def _batch_import_traces(self, traces: List[TraceModel]) -> None:
+    def _unique_trace_name(self, name: str) -> str:
+        """Return name, or name_001 / name_002 … if name is already taken."""
+        existing = {t.name for t in self._traces}
+        if name not in existing:
+            return name
+        i = 1
+        while True:
+            candidate = f"{name}_{i:03d}"
+            if candidate not in existing:
+                return candidate
+            i += 1
+
+    def _batch_import_traces(self, traces: List[TraceModel],
+                             replace_existing: bool = True) -> None:
         """Add/replace multiple traces in a single plot rebuild.
-        Used by _open_csv so 8 traces cause one rebuild, not eight."""
+        Used by _open_csv so 8 traces cause one rebuild, not eight.
+        When replace_existing=False, name collisions get a _001/_002 suffix
+        instead of overwriting the existing trace."""
         for trace in traces:
             existing_names = [t.name for t in self._traces]
             if trace.name in existing_names:
-                idx = existing_names.index(trace.name)
-                old_trace = self._traces[idx]
-                trace.color = old_trace.color
-                trace.theme_color_index = old_trace.theme_color_index
-                trace.use_theme_color = old_trace.use_theme_color
-                self._traces[idx] = trace
-                self._channel_panel.refresh_all()
+                if replace_existing:
+                    idx = existing_names.index(trace.name)
+                    old_trace = self._traces[idx]
+                    trace.color = old_trace.color
+                    trace.theme_color_index = old_trace.theme_color_index
+                    trace.use_theme_color = old_trace.use_theme_color
+                    self._traces[idx] = trace
+                    self._channel_panel.refresh_all()
+                else:
+                    # Keep both — rename the incoming trace to avoid collision
+                    unique = self._unique_trace_name(trace.name)
+                    trace.name  = unique
+                    trace.label = unique
+                    n = len(self._traces)
+                    trace.reset_color_to_theme(n)
+                    trace.sync_theme_color(self.theme.active_theme)
+                    self._traces.append(trace)
+                    self._channel_panel.add_trace(trace)
             else:
                 n = len(self._traces)
                 trace.reset_color_to_theme(n)

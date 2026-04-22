@@ -173,8 +173,29 @@ def load_csv(filepath: str, delimiter: str = None,
     result = LoadResult()
     result.filename = os.path.basename(filepath)
     try:
-        with open(filepath, "r", newline="", encoding="utf-8-sig") as f:
-            all_lines = f.readlines()
+        # Try encodings in order: UTF-8 with BOM (TraceLab native, most modern
+        # tools), Windows-1252 (Agilent/Keysight BenchLink and other legacy
+        # Windows apps), Latin-1 (accepts every byte — last-resort fallback).
+        # Try encodings in order: UTF-8 with BOM (TraceLab native, most modern
+        # tools), Windows-1252 (Agilent/Keysight BenchLink and other legacy
+        # Windows apps), Latin-1 (accepts every byte — last-resort fallback).
+        # Read the whole file as a single string so we can normalise line
+        # endings before splitting: \r\n and bare \r both become \n, which
+        # prevents the csv module from seeing \r inside unquoted fields.
+        _encodings = ("utf-16", "utf-8-sig", "cp1252", "latin-1")
+        all_lines = None
+        for _enc in _encodings:
+            try:
+                with open(filepath, "r", newline="", encoding=_enc) as f:
+                    _raw = f.read()
+                _raw = _raw.replace("\r\n", "\n").replace("\r", "\n")
+                all_lines = _raw.splitlines(keepends=True)
+                break
+            except UnicodeDecodeError:
+                pass
+        if all_lines is None:
+            result.error = "Could not decode file (tried utf-8, cp1252, latin-1)."
+            return result
 
         # ── Try plugin detection ──────────────────────────────────────
         parsed_meta = None

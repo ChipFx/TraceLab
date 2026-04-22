@@ -115,6 +115,18 @@ class TraceModel:
     #   "datetime:<strptime>"   — was datetime strings; converted to seconds_relative
     source_time_format: str = "seconds_relative"
 
+    # ── Segment metadata ──────────────────────────────────────────────
+    # Populated by importers that support multi-segment captures (e.g. LeCroy).
+    # Each tuple: (start_index, end_index, t0_absolute, t0_relative)
+    #   start_index  : int   — inclusive 0-based index into time_data / raw_data
+    #   end_index    : int   — exclusive end index (Python slice convention)
+    #   t0_absolute  : float — Unix timestamp of this segment's trigger
+    #   t0_relative  : float — seconds since segment-1 trigger (0.0 for seg 1)
+    # None means non-segmented or unknown — all code that doesn't know about
+    # segments should treat None as "no special handling required".
+    segments: Optional[list] = None        # list[tuple[int,int,float,float]] | None
+    primary_segment: Optional[int] = None  # 0-based index into segments; None = all equal
+
     # Per-trace labels: list of (time_position, label_text) tuples
     # Each label is drawn as a text annotation anchored to that time point.
     trace_labels: list = field(default_factory=list)

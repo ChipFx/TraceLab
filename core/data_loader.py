@@ -210,6 +210,12 @@ class LoadResult:
         # How the time axis was derived — matches ParsedMetadata.time_format.
         self.source_time_format: str = "seconds_relative"
 
+        # ── Segment metadata ──────────────────────────────────────────
+        # Forwarded from ParsedMetadata.segments / primary_segment.
+        # None when the parser did not supply segment info.
+        self.segments: Optional[list] = None
+        self.primary_segment: Optional[int] = None
+
     @property
     def column_names(self) -> List[str]:
         return list(self.columns.keys())
@@ -314,6 +320,16 @@ def load_csv(filepath: str, delimiter: str = None,
             data_lines = _skip_preamble_garbage(
                 data_lines, delimiter, rejection_max_lines)
 
+        # ── Skip rows requested by parser plugin ─────────────────────
+        # Plugins may mark specific data rows for removal (e.g. repeat headers
+        # between segments).  0-based indices relative to the first data row
+        # (i.e. data_lines[1] = index 0).  None / empty → no filtering.
+        if parsed_meta is not None and getattr(parsed_meta, 'skip_rows', None):
+            _skip = set(parsed_meta.skip_rows)
+            data_lines = [data_lines[0]] + [
+                ln for i, ln in enumerate(data_lines[1:]) if i not in _skip
+            ]
+
         # ── CSV parsing ───────────────────────────────────────────────
         reader = csv.DictReader(io.StringIO("".join(data_lines)),
                                 delimiter=delimiter)
@@ -377,8 +393,10 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
         if ci.is_time and clean in result.columns:
             time_col_clean = clean
 
-    result.column_groups    = parsed_meta.groups
+    result.column_groups      = parsed_meta.groups
     result.source_time_format = parsed_meta.time_format
+    result.segments           = getattr(parsed_meta, 'segments', None)
+    result.primary_segment    = getattr(parsed_meta, 'primary_segment', None)
 
     # ── NaN sentinels / invalid_above ────────────────────────────────
     if parsed_meta.invalid_above is not None:

@@ -690,6 +690,9 @@ class ImportDialog(QDialog):
                 # Wall-clock time anchor — used by cursor UI for real-world time display
                 t0_wall_clock=self.load_result.t0_wall_clock,
                 source_time_format=self.load_result.source_time_format,
+                # Segment metadata — None when parser did not supply it
+                segments=self.load_result.segments,
+                primary_segment=self.load_result.primary_segment,
             )
 
             # For sample-based time, apply t0 offset via dt-based shift
@@ -719,6 +722,7 @@ class ImportDialog(QDialog):
 
 def _fmt_duration(dur: float) -> str:
     if dur <= 0: return "0 s"
+    if dur < 1e-9: return f"{dur*1e12:.3g} ps"
     if dur < 1e-6: return f"{dur*1e9:.3g} ns"
     if dur < 1e-3: return f"{dur*1e6:.3g} µs"
     if dur < 1:    return f"{dur*1e3:.3g} ms"

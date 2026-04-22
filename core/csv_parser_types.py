@@ -89,3 +89,20 @@ class ParsedMetadata:
     nan_sentinels: list = field(default_factory=list)     # list[float]
     invalid_above: Optional[float] = None
     raw_header_lines: list = field(default_factory=list)  # list[str]
+
+    # ── Segment metadata ─────────────────────────────────────────────
+    # For instruments that pack multiple trigger segments into one file.
+    # Each tuple: (start_index, end_index, t0_absolute, t0_relative)
+    #   start_index : int   — inclusive 0-based index into the data arrays
+    #   end_index   : int   — exclusive end index (Python slice convention)
+    #   t0_absolute : float — Unix timestamp of this segment's trigger
+    #   t0_relative : float — seconds since segment-1 trigger (0.0 for seg 1)
+    # None = non-segmented or unknown (no special handling needed).
+    segments: Optional[list] = None        # list[tuple[int,int,float,float]] | None
+    primary_segment: Optional[int] = None  # 0-based index; None = all equal
+
+    # ── Row filtering ────────────────────────────────────────────────
+    # 0-based indices of data rows (after the column-header row) to drop
+    # before parsing.  None = skip nothing.  Used when a format embeds
+    # per-segment repeat headers or comment rows inside the data section.
+    skip_rows: Optional[list] = None       # list[int] | None

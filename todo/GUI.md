@@ -80,3 +80,17 @@
 	* A: ----         | B: ----
 	* dt: ----        | 1/dt: ----
  - These should allow a small window to still show a decent amount of trace data at cursor points, rather than showing a line and a half with a scroll bar.
+ - Traces now have a segments element, as well as a primary_segment element. Both can be set to none, in which case they should be ignored as "don't exist", otherwise;
+	* segments is a list[(start, end, t0_abs, t0_rel)]; 
+		~ [int, int, float, float] with 1 or more entries, each entry represent a segmentation on the existing data import. If there are 2 or more segment elements in the list, that means that the time_data and raw_data (and possibly processed_data) contain multiple segments captured around a similar trigger on the same channel. The time_data will thus (likely) jump from positive index back to negative index on the edge between two segments. This allows non-segment aware plotters, analysers and modifier plugins still run on the full data, editing all segments the same.
+		~ start and end define the sample index on time_data and raw_data (and processed_data) on which that segment exists.
+		~ t0_abs is the absolute time, or t0_wall_clock for that segment. To stay compatible to simpler data models, the trace's t0_wall_clock is always also set, but to the first segment's clock, not some average or middle value.
+		~ t0_relative is the offset in seconds from this segment to the first segment, useful to quickly calculate segment trigger jitter (i.e. often signal jitter on good scopes)
+	* primary_segment is an integer either "None" or a number 0 through n-1, where n is the number of segments in the segment list, thus primary_segment is the show-index in the segments list. A channel will get an addition to its right click context menu to set the primary_segment and how to deal with non-primaries, including at least:
+		~ Show only primary (hide non-primary)
+		~ Show non-primaries dimmed (setting in settings.json; View->Segments->Dim Opacity=[10% to 90%]) (default setting when segemnts present and primary is not none)
+		~ Show non-primaries dashed (setting in settigns,json; "View->Segments->Dash Settings->Dash Size" and "View->Segments->Dash Settings->Gap Size")
+		~ Show non-primaries as regular (line at 100% opaque, as it would do now "by accident")
+		~ Trace model gets a "non_primary_viewmode" element which contains this selection per trace.
+		~ primary_segment=None --> Same as Show non-primaries as regular, because there isn't a primary to choose from.
+	* There is a "View->Segemnts->Process Segments" setting, default checked, if set, the segments get processed by the view system as dictated by the settings. Showing multi-segment may invalidate persistence and interpolate/averaging for that trace at a point in the future, but for now, we leave those as-is and see what happens when both are enabled, maybe it's super useful.

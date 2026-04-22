@@ -41,22 +41,24 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
     # Skip the 3-line preamble (lines 0-2), then skip #N,date,offset segment
     # entries, and take the first remaining non-empty line as the header.
     data_header_idx = None
-    segment_times   = {}   # seg_number → datetime (for t0_wall_clock)
+    seg_count       = None   # from "Segments,N,..." line
+    seg_size        = None   # from "SegmentSize,M" on the same line
+    segment_info    = {}     # seg_number (1-based) → (datetime, relative_time_s)
 
     for i in range(len(all_lines)):
         line = all_lines[i].strip()
         if not line:
             continue
         if i < 3:
-            # Fixed preamble lines — parse line 1 for segment count
+            # Fixed preamble lines — parse line 1 for segment count + size
             if i == 1:
-                _parse_segments_line(line, meta)
+                seg_count, seg_size = _parse_segments_line(line)
             continue
 
         m = _SEGMENT_RE.match(line)
         if m:
             seg_num = int(m.group(1))
-            _parse_segment_entry(line, seg_num, segment_times)
+            _parse_segment_entry(line, seg_num, segment_info)
             continue
 
         # First non-segment, non-empty line after the preamble = column header
@@ -71,8 +73,26 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
     meta.raw_header_lines = [l.rstrip() for l in all_lines[:data_header_idx]]
 
     # ── Trigger wall-clock time (segment 1 = first trigger) ────────────
-    if 1 in segment_times:
-        meta.start_wall_clock = segment_times[1].isoformat()
+    if 1 in segment_info:
+        meta.start_wall_clock = segment_info[1][0].isoformat()
+
+    # ── Build segment metadata ──────────────────────────────────────────
+    # Only populate when there are 2+ segments; single-segment files remain
+    # non-segmented (segments=None) so all existing code paths are unchanged.
+    if seg_count is not None and seg_size is not None and seg_count > 1:
+        segs = []
+        for k in range(1, seg_count + 1):
+            start_idx = (k - 1) * seg_size
+            end_idx   = k * seg_size
+            if k in segment_info:
+                dt_obj, t_rel = segment_info[k]
+                t_abs = dt_obj.timestamp()
+            else:
+                t_abs = 0.0
+                t_rel = 0.0
+            segs.append((start_idx, end_idx, t_abs, t_rel))
+        meta.segments        = segs
+        meta.primary_segment = None   # GUI will later add a selector
 
     # ── Delimiter ───────────────────────────────────────────────────────
     data_sample = "".join(all_lines[data_header_idx:data_header_idx + 20])
@@ -110,10 +130,13 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _parse_segments_line(line: str, meta: ParsedMetadata):
-    """Parse 'Segments,N,SegmentSize,M' to extract sample count / implied rate."""
+def _parse_segments_line(line: str):
+    """
+    Parse 'Segments,N,SegmentSize,M'.
+    Returns (seg_count, seg_size) as ints, or (None, None) on failure.
+    """
     parts = [p.strip() for p in line.split(",")]
-    # parts: ["Segments", "1", "SegmentSize", "100002"]
+    # parts: ["Segments", "10", "SegmentSize", "10001"]
     seg_count = None
     seg_size  = None
     for i, p in enumerate(parts):
@@ -127,24 +150,29 @@ def _parse_segments_line(line: str, meta: ParsedMetadata):
                 seg_size = int(parts[i + 1])
             except ValueError:
                 pass
-    # We don't know the sample rate from this alone; leave meta.sample_rate = None.
-    # The time column in the data provides the actual sample spacing.
+    return seg_count, seg_size
 
 
 def _parse_segment_entry(line: str, seg_num: int, out: dict):
     """
     Parse a segment entry line: '#1,23-Mar-2002 02:21:36,0'
-    Stores the trigger datetime for seg_num in out[seg_num].
+    Stores (datetime, relative_time_seconds) for seg_num in out[seg_num].
     """
-    # Strip the leading '#N'
+    # Strip the leading '#N,'
     body = line.split(",", 1)[1] if "," in line else ""
-    # body = '23-Mar-2002 02:21:36,0'
+    # body = '23-Mar-2002 02:21:36,0.00132238'
     parts = [p.strip() for p in body.split(",")]
     if not parts:
         return
     trig_str = parts[0]
     try:
         dt = datetime.strptime(trig_str, _TRIGTIME_FMT)
-        out[seg_num] = dt
     except ValueError:
-        pass
+        return
+    t_rel = 0.0
+    if len(parts) >= 2:
+        try:
+            t_rel = float(parts[1])
+        except ValueError:
+            pass
+    out[seg_num] = (dt, t_rel)

@@ -75,6 +75,11 @@ class CsvMetadata:
         self.view_sample_start: Optional[int] = None
         self.view_sample_stop: Optional[int] = None
         self.raw_lines: List[str] = []
+        # Each entry is (group_name: str, members: list[int | str])
+        # Integers are 1-based column indices; strings are exact column names.
+        # Resolved to ColumnGroup objects by tracelab_native.py once the
+        # column list is known.
+        self.groups: list = []
 
     def __repr__(self):
         return (f"CsvMetadata(sps={self.sample_rate}, gain={self.gain}, "
@@ -125,9 +130,54 @@ def parse_metadata_lines(lines: List[str]) -> CsvMetadata:
                 meta.view_sample_start = int(float(val))
             elif key in ("viewsamplestop", "view_sample_stop", "viewsampleend"):
                 meta.view_sample_stop = int(float(val))
+            elif key in ("addgroup", "add_group"):
+                parsed = _parse_addgroup_value(val)
+                if parsed:
+                    meta.groups.append(parsed)
         except (ValueError, ZeroDivisionError):
             pass
     return meta
+
+
+def _parse_addgroup_value(value: str):
+    """
+    Parse the value half of an #addgroup directive.
+
+    Accepted format:  { "Group Name", member, member, ... }
+
+    Members can be:
+      integer — 1-based column index (consistent with #time=N)
+      "string" — exact column name as it appears in the CSV header
+
+    Anything after the closing } is ignored, so inline comments are fine:
+      #addgroup={ "Temps", 2, 4, 6 }  # the thermocouple channels
+
+    Returns (group_name: str, members: list[int | str]) or None if unparseable.
+    """
+    start = value.find('{')
+    end   = value.rfind('}')
+    if start == -1 or end == -1 or end <= start:
+        return None
+    inner = value[start + 1 : end]
+
+    try:
+        items = next(csv.reader([inner.strip()], skipinitialspace=True))
+    except StopIteration:
+        return None
+
+    items = [item.strip() for item in items if item.strip()]
+    if len(items) < 2:
+        return None     # need at least a name and one member
+
+    name    = items[0]
+    members = []
+    for item in items[1:]:
+        try:
+            members.append(int(item))
+        except ValueError:
+            members.append(item)    # keep as column-name string
+
+    return name, members
 
 
 # ── Load result ───────────────────────────────────────────────────────────────

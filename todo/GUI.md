@@ -44,3 +44,7 @@
  - Support creating a group and renaming it based on currently viewed channels, could be a plugin, but a GUI function in the channel menu would be better
  - Support renaming a signal in the channel panel
  - When exporting to CSV use the TraceLab header function (added in feat_CSV_Robustness) to also export group information in the export, so that manipulating channel settings, naming and grouping in the app can be saved to a native CSV format.
+	* A new "addgroup" directive is defined in the CSV parser system for custom TraceLab as follows:
+		~ #addgroup={ "some group name", 2, 4, 6, 8, 10, 12 }    # defines "some group name" with columns 2, 4, 6, 8 , 10  ,12
+		~ #addgroup={ "The best group", "101", "banana", "fish tacos" }   # defines "The best group" with "101" "banana" "fish tacos", referring to exact column name strings after parsing, however weird a main course that is. 
+		

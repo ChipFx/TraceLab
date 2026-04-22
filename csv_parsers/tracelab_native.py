@@ -89,4 +89,35 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
 
             meta.columns.append(ci)
 
+    # ── Resolve #addgroup directives ─────────────────────────────────────
+    # Build lookup tables from the now-complete column list.
+    # name_to_idx: exact clean name → 0-based index (with case-insensitive fallback)
+    name_to_idx_exact = {ci.original_name: ci.index for ci in meta.columns}
+    name_to_idx_lower = {ci.original_name.lower(): ci.index for ci in meta.columns}
+
+    for group_name, members in csv_meta.groups:
+        resolved = []
+        for m in members:
+            if isinstance(m, int):
+                # 1-based column index → 0-based
+                idx = m - 1
+                if 0 <= idx < len(meta.columns):
+                    resolved.append(idx)
+            else:
+                # String: exact match first, then case-insensitive
+                clean_m = _clean_name(m)
+                if clean_m in name_to_idx_exact:
+                    resolved.append(name_to_idx_exact[clean_m])
+                elif clean_m.lower() in name_to_idx_lower:
+                    resolved.append(name_to_idx_lower[clean_m.lower()])
+                # Silently skip unresolvable names — column may have been
+                # removed or renamed since the file was written.
+
+        if resolved:
+            # Also stamp the group name onto the matching ColumnInfo objects
+            # so the import dialog can use it for display.
+            for idx in resolved:
+                meta.columns[idx].group = group_name
+            meta.groups.append(ColumnGroup(group_name, resolved))
+
     return meta

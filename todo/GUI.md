@@ -1,4 +1,5 @@
 ## Wishlist:
+ - Primary note: ALL Settings mentioned in this whishlist should be cached in the main settings cache and written to settings.json on application close, like just about every other setting so far. All settings should also recover any tick-mark locations from the settings cache after it is loaded from disk.
  - Statusbar block order should follow trace order in trace-panel, just like cursor menu and in-plot tracelabels (in overlaped view)
  - Add new interfaces to the import menu to handle all the new meta data:
 	* Add a group select/deselect system, using the groups information (if present) from the parse plugin (ParsedMetadata.groups)
@@ -13,7 +14,7 @@
 	* plugins/spikes/plugin_five.py defines name="Max spike = t0"   # no group defined
 	* plugins/plugin_six.py defines name="Awesome Plugin"    # no group defined
   Will end up:
-   plugins->Spikes->{plugin_one.name, plugin_two.name, plugin_three.name, plugin_four.name, plugin_fixe.name}
+   plugins->Spikes->{plugin_one.name, plugin_two.name, plugin_three.name, plugin_four.name, plugin_five.name}
    plugins->Ungrouped->{plugin_six.name}
   i.e.: group-name folders and name strings are case-insensitive (on all OS'es!) and the GUI draws them as Camel Case: "my gROUP name" -> "My Group Name". ideally stupid-chars ('-', '_', '\t', '    ' etc) get replaced by a single space, to avoid ending up with group entries in the GUI for "My_group_name", "My Group Name", "My   Group Name", etc. And there is one "catch all" group "Ungrouped" for plugins that forgot to declare a group and aren't in a named folder.
  - When ManyLines(tm) are imported, the view in split mode very neatly builds the full list and then resizes and applies a scroll function to the list so everything is somewhat legible. This asks for some upgrades:
@@ -30,6 +31,7 @@
 		~ Allow left/right panning of time = true/false (true default)
 		~ Allow up/down trace scrolling = true/false (true default)
 		Proposed: Setting->Advanced UI->Keyboard->
+	* Multi-trace minimum height setting in Settings->Advanced UI->Split View->Minimum Trace Height=
  - When importing data is done, at least on many-column but sparse data in some instances (hp34970a_exmaple.csv) the initial div-scaling in the status bar isn't sensible.
  - When the mouse is over the status bar, using the scroll wheel should scroll the status bar, if enabled:
 	* Settings->Advanced UI->Mouse->Scroll->Enable Status Bar Scrolling
@@ -47,4 +49,34 @@
 	* A new "addgroup" directive is defined in the CSV parser system for custom TraceLab as follows:
 		~ #addgroup={ "some group name", 2, 4, 6, 8, 10, 12 }    # defines "some group name" with columns 2, 4, 6, 8 , 10  ,12
 		~ #addgroup={ "The best group", "101", "banana", "fish tacos" }   # defines "The best group" with "101" "banana" "fish tacos", referring to exact column name strings after parsing, however weird a main course that is. 
-		
+ - Fix this rare bug on n'th import of data (folder origins anonymised):
+	Traceback (most recent call last):
+	File "\core\main_window.py", line 1289, in _zoom_full_safe
+		pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
+		~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+	File "\Python314\site-packages\pyqtgraph\graphicsItems\PlotItem\PlotItem.py", line 319, in method
+		return getattr(self.vb, name)(*args, **kwargs)
+			~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+	File "\Python314\site-packages\pyqtgraph\graphicsItems\ViewBox\ViewBox.py", line 696, in setYRange
+		self.setRange(yRange=[min, max], update=update, padding=padding)
+		~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+	File "\Python314\site-packages\pyqtgraph\graphicsItems\ViewBox\ViewBox.py", line 619, in setRange
+		raise Exception("Cannot set range [%s, %s]" % (str(mn), str(mx)))
+	Exception: Cannot set range [nan, nan]
+ - Trace Colours in the import window would ideally be assigned in order to enabled channels, not in order to channels, and then only loaded into enabled channels. Say I have 8 colours and 32 channels, of which I want to show only 4, suddenly I end up with 4 yellow traces.
+ - The Import Window could use a pass for user friendliness and clarity and alignment of stuff as well.
+ - Add the ChipFX Icon to the program
+ - Add a button to the trace panel to delete a trace.
+ - Trigger menu and options on the smallest possible window now takes up 2/3rd of the right hand action bar.
+	* Trigger Settings can be optimised(, after which the layout of the area can also do with reduced blank space):
+		~ Channel: [DropDown]   # Leave as is, sometimes a channel name set is long
+		~ Edge: [Smaller Dropdown] | Level: [Smaller box]  # Level accepts and shows n, u, m, k, M, so doesn't need loads of space
+		~ Search: [tick] Start  [tick] End  # Right now it's a weird info block, by making it two ticks and adding the search from end option it actually has a use.
+	* On trigger can be optimised (and hopefully de-blanked as well):
+		~ [tick] Place Cur. A | [tick] Set t=0
+		~ [tick] Zoom to trig | [tick] Auto-update  # add "retrigger" only if it fits
+	* The "Find Trigger" and "Next" buttons can be placed next to each other. 50/50 or 60/40
+ - The cursor data view can also be improved:
+	* A: ----         | B: ----
+	* dt: ----        | 1/dt: ----
+ - These should allow a small window to still show a decent amount of trace data at cursor points, rather than showing a line and a half with a scroll bar.

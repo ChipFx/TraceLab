@@ -72,5 +72,6 @@
   "viewport_scale_max_px": 12,
   "viewport_preset_min": 2048,
   "viewport_preset_max": 50000,
-  "rejection_enabled": true
+  "rejection_enabled": true,
+  "export_segments_mode": "all"
 }

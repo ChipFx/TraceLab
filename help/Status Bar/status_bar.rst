@@ -1,13 +1,13 @@
 ---
-short_name: template
-long_name: T'em Pe Latte
-chapter: ThisOne
-chapter_long: This Oneoneone
-order: 0
-keywords: [ba, na, na]
+short_name: status_bar
+long_name: Status Bar
+chapter: tracelab-help
+chapter_long: ChipFX TraceLab Help
+order: 5
+keywords: [help, tracelab, main]
 ---
 
-Bananas
+Status Bar
 ===========
 
 Yellow **yum yum**.

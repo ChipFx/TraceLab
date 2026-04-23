@@ -1,6 +1,6 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb000300000000010f000001280000050d000004770000010f000001470000050d0000047700000000000000000f000000010f000001470000050d00000477",
+  "geometry": "01d9d0cb0003000000000286000000ab00000692000003fc00000286000000ca00000692000003fc00000000000000000f0000000286000000ca00000692000003fc",
   "import_replace": true,
   "import_reset_view": true,
   "fft_min_freq": 0.001,
@@ -71,5 +71,6 @@
   "viewport_scale_min_px": 2,
   "viewport_scale_max_px": 12,
   "viewport_preset_min": 2048,
-  "viewport_preset_max": 50000
+  "viewport_preset_max": 50000,
+  "rejection_enabled": true
 }

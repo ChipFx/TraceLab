@@ -55,7 +55,7 @@ MAX_DETECTION_LINES = 100            # how many lines to read for detection
 
 # Cache: list of (toml_dict, parser_py_path)  — loaded once, reused
 _parser_registry: Optional[list] = None
-_registry_mtime: float = 0.0        # mtime of csv_parsers dir, for hot-reload
+_registry_mtimes: dict = {}         # {toml_path: mtime} — per-file, for hot-reload
 
 
 def _parsers_dir() -> str:
@@ -63,8 +63,13 @@ def _parsers_dir() -> str:
 
 
 def _load_registry(force: bool = False) -> list:
-    """Load (or reload) the list of (toml_dict, py_path) from csv_parsers/."""
-    global _parser_registry, _registry_mtime
+    """Load (or reload) the list of (toml_dict, py_path) from csv_parsers/.
+
+    Uses per-file mtime tracking instead of directory mtime so that editing
+    a TOML file on Windows (where directory mtime is not updated on content
+    changes, only on file creation/deletion) is correctly detected.
+    """
+    global _parser_registry, _registry_mtimes
 
     if tomllib is None:
         return []
@@ -73,19 +78,21 @@ def _load_registry(force: bool = False) -> list:
     if not os.path.isdir(pdir):
         return []
 
+    # Collect current mtime of every .toml in the directory
     try:
-        mtime = os.path.getmtime(pdir)
+        current_mtimes = {
+            os.path.join(pdir, f): os.path.getmtime(os.path.join(pdir, f))
+            for f in sorted(os.listdir(pdir)) if f.endswith(".toml")
+        }
     except OSError:
-        mtime = 0.0
+        current_mtimes = {}
 
-    if not force and _parser_registry is not None and mtime == _registry_mtime:
+    if not force and _parser_registry is not None and current_mtimes == _registry_mtimes:
         return _parser_registry
 
     registry = []
-    for fname in sorted(os.listdir(pdir)):
-        if not fname.endswith(".toml"):
-            continue
-        toml_path = os.path.join(pdir, fname)
+    for toml_path in sorted(current_mtimes.keys()):
+        fname = os.path.basename(toml_path)
         try:
             with open(toml_path, "rb") as fh:
                 data = tomllib.load(fh)
@@ -98,7 +105,7 @@ def _load_registry(force: bool = False) -> list:
             # Derive from toml filename
             py_name = os.path.splitext(fname)[0] + ".py"
 
-        py_path = os.path.join(pdir, py_name)
+        py_path = os.path.join(os.path.dirname(toml_path), py_name)
         if not os.path.isfile(py_path):
             py_path = None
 
@@ -106,7 +113,7 @@ def _load_registry(force: bool = False) -> list:
 
     registry.sort(key=lambda x: -x[0].get("priority", 0))  # highest priority first
     _parser_registry = registry
-    _registry_mtime = mtime
+    _registry_mtimes = current_mtimes
     return registry
 
 

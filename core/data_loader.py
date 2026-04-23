@@ -273,6 +273,8 @@ def load_csv(filepath: str, delimiter: str = None,
                 parsed_meta = parser_module.parse(filepath, all_lines)
         except Exception as e:
             # Detection errors must never prevent loading; fall back silently.
+            # Print so any parse exception is visible in the console.
+            print(f"[data_loader] Parser exception ({type(e).__name__}): {e}")
             parsed_meta = None
 
         # ── Split into header / data sections ────────────────────────

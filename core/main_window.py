@@ -180,6 +180,10 @@ class MainWindow(QMainWindow):
         self._import_reset_retrigger  = self._settings.get("import_reset_retrigger", True)
         self._rejection_enabled       = self._settings.get("rejection_enabled", False)
         self._rejection_max_lines     = self._settings.get("rejection_max_lines", 10)
+        self._export_segments_mode    = self._settings.get("export_segments_mode", "all")
+        self._segments_dim_opacity    = self._settings.get("segments_dim_opacity", 50)
+        self._segments_dash_size      = self._settings.get("segments_dash_size", 8)
+        self._segments_gap_size       = self._settings.get("segments_gap_size", 4)
         self._y_lock_auto = self._settings.get("y_lock_auto", True)
         self._fft_min_freq = self._settings.get("fft_min_freq", 1.0)
         self._viewport_min_pts = self._settings.get("viewport_min_pts", 1024)
@@ -460,6 +464,17 @@ class MainWindow(QMainWindow):
         self._theme_submenu = view_menu.addMenu("Theme")
         self._rebuild_theme_menu()
 
+        view_menu.addSeparator()
+        seg_view_menu = view_menu.addMenu("Segments")
+        seg_view_menu.setToolTipsVisible(True)
+        seg_view_menu.addAction("Dim Opacity…").triggered.connect(
+            self._dlg_segments_dim_opacity)
+        seg_dash_menu = seg_view_menu.addMenu("Dash Settings")
+        seg_dash_menu.addAction("Dash Size…").triggered.connect(
+            self._dlg_segments_dash_size)
+        seg_dash_menu.addAction("Gap Size…").triggered.connect(
+            self._dlg_segments_gap_size)
+
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
         a = analysis_menu.addAction("FFT...")
@@ -731,6 +746,34 @@ class MainWindow(QMainWindow):
 
         rejection_menu.addAction("Max Lines…").triggered.connect(
             self._dlg_rejection_max_lines)
+
+        settings_menu.addSeparator()
+        export_menu = settings_menu.addMenu("Export")
+        export_menu.setToolTipsVisible(True)
+        seg_export_menu = export_menu.addMenu("Segments")
+        seg_export_menu.setToolTipsVisible(True)
+        seg_export_group = QActionGroup(self)
+        seg_export_group.setExclusive(True)
+        self._act_export_seg_all = seg_export_menu.addAction("Export All Always")
+        self._act_export_seg_all.setCheckable(True)
+        self._act_export_seg_all.setToolTip(
+            "Export every segment of a segmented trace.\n"
+            "Each segment becomes its own column (Trace.SEG0, Trace.SEG1, …).")
+        self._act_export_seg_primary = seg_export_menu.addAction("Export Primary Only")
+        self._act_export_seg_primary.setCheckable(True)
+        self._act_export_seg_primary.setToolTip(
+            "Export only the primary segment of each segmented trace.\n"
+            "If no primary is set, segment 0 is used.\n"
+            "The exported file is non-segmented (no #segments= headers).")
+        seg_export_group.addAction(self._act_export_seg_all)
+        seg_export_group.addAction(self._act_export_seg_primary)
+        (self._act_export_seg_primary
+         if self._export_segments_mode == "primary_only"
+         else self._act_export_seg_all).setChecked(True)
+        self._act_export_seg_all.triggered.connect(
+            lambda: self._set_export_segments_mode("all"))
+        self._act_export_seg_primary.triggered.connect(
+            lambda: self._set_export_segments_mode("primary_only"))
 
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
@@ -1194,6 +1237,41 @@ class MainWindow(QMainWindow):
         if ok:
             self._rejection_max_lines = val
             self._settings["rejection_max_lines"] = val
+            self._save_settings()
+
+    def _set_export_segments_mode(self, mode: str):
+        self._export_segments_mode = mode
+        self._settings["export_segments_mode"] = mode
+        self._save_settings()
+
+    def _dlg_segments_dim_opacity(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Dim Opacity",
+            "Opacity for non-primary segments when dimmed (10 – 90 %):",
+            self._segments_dim_opacity, 10, 90, 5)
+        if ok:
+            self._segments_dim_opacity = val
+            self._settings["segments_dim_opacity"] = val
+            self._save_settings()
+
+    def _dlg_segments_dash_size(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Dash Size",
+            "Drawn dash length in pixels for non-primary segments (1 – 50):",
+            self._segments_dash_size, 1, 50, 1)
+        if ok:
+            self._segments_dash_size = val
+            self._settings["segments_dash_size"] = val
+            self._save_settings()
+
+    def _dlg_segments_gap_size(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Gap Size",
+            "Gap length in pixels between dashes for non-primary segments (1 – 50):",
+            self._segments_gap_size, 1, 50, 1)
+        if ok:
+            self._segments_gap_size = val
+            self._settings["segments_gap_size"] = val
             self._save_settings()
 
     # ── Cursors ────────────────────────────────────────────────────────

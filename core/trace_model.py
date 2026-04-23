@@ -127,6 +127,11 @@ class TraceModel:
     segments: Optional[list] = None        # list[tuple[int,int,float,float]] | None
     primary_segment: Optional[int] = None  # 0-based index into segments; None = all equal
 
+    # How non-primary segments are rendered.  Empty string = default behaviour
+    # (treated as "regular" until the GUI segment controls are implemented).
+    # Valid values: "show_only_primary", "dimmed", "dashed", "regular"
+    non_primary_viewmode: str = ""
+
     # Per-trace labels: list of (time_position, label_text) tuples
     # Each label is drawn as a text annotation anchored to that time point.
     trace_labels: list = field(default_factory=list)

@@ -216,6 +216,17 @@ class LoadResult:
         self.segments: Optional[list] = None
         self.primary_segment: Optional[int] = None
 
+        # Per-trace segment lists, built when importing TraceLab native
+        # segmented CSVs (which store each segment as a .SEGn column).
+        # {clean_trace_name: list[(start, end, t0_abs, t0_rel)]}
+        # Falls back to self.segments when the key is absent.
+        self.trace_segments: dict = {}
+
+        # Per-trace segment settings parsed from #trace_settings= headers.
+        # {clean_trace_name: {"primary_segment": int|None,
+        #                     "non_primary_viewmode": str}}
+        self.trace_segment_settings: dict = {}
+
     @property
     def column_names(self) -> List[str]:
         return list(self.columns.keys())
@@ -393,10 +404,12 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
         if ci.is_time and clean in result.columns:
             time_col_clean = clean
 
-    result.column_groups      = parsed_meta.groups
-    result.source_time_format = parsed_meta.time_format
-    result.segments           = getattr(parsed_meta, 'segments', None)
-    result.primary_segment    = getattr(parsed_meta, 'primary_segment', None)
+    result.column_groups           = parsed_meta.groups
+    result.source_time_format      = parsed_meta.time_format
+    result.segments                = getattr(parsed_meta, 'segments', None)
+    result.primary_segment         = getattr(parsed_meta, 'primary_segment', None)
+    result.trace_segment_settings  = dict(
+        getattr(parsed_meta, 'trace_segment_settings', {}))
 
     # ── NaN sentinels / invalid_above ────────────────────────────────
     if parsed_meta.invalid_above is not None:
@@ -449,6 +462,87 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
         arr = result.columns.get(time_col_clean)
         if arr is not None and arr.dtype.kind == "f" and len(arr) > 0:
             result.columns[time_col_clean] = arr - arr[0]
+
+    # ── Merge TraceLab-native segment columns ─────────────────────────
+    # When importing a TraceLab segmented CSV, each segment is stored as
+    # a separate .SEGn column.  Merge them back into one flat trace with
+    # a populated segments list, and extend the time column to match.
+    seg_groups = getattr(parsed_meta, 'segment_col_groups', [])
+    if seg_groups:
+        time_arr  = result.columns.get(time_col_clean) if time_col_clean else None
+        time_merged = False  # merge the time column only once
+
+        for group in seg_groups:
+            trace_name   = _clean_name(group["trace_name"])
+            seg_col_names = [_clean_name(n) for n in group["seg_col_names"]]
+            # Sort metas by segment index so concatenation order is guaranteed
+            seg_metas = sorted(group["seg_metas"], key=lambda m: m[0])
+
+            merged_data_parts = []
+            merged_time_parts = []
+            flat_segments     = []
+            flat_offset       = 0
+
+            for (idx, start_row, stop_row, t0_abs, t0_rel) in seg_metas:
+                # start_row / stop_row are 1-based inclusive row numbers
+                r0 = start_row - 1          # 0-based start (inclusive)
+                r1 = stop_row               # 0-based end   (exclusive)
+
+                col_name = (seg_col_names[idx]
+                            if 0 <= idx < len(seg_col_names) else None)
+                if col_name is None or col_name not in result.columns:
+                    continue
+
+                seg_arr = result.columns[col_name]
+                r1_clamped = min(r1, len(seg_arr))
+                seg_slice  = seg_arr[r0:r1_clamped]
+                # Drop trailing NaN rows (from empty cells in shorter segments)
+                if seg_slice.dtype.kind == "f":
+                    last_valid = len(seg_slice)
+                    while last_valid > 0 and np.isnan(seg_slice[last_valid - 1]):
+                        last_valid -= 1
+                    seg_slice = seg_slice[:last_valid]
+
+                n = len(seg_slice)
+                merged_data_parts.append(seg_slice)
+                flat_segments.append((flat_offset, flat_offset + n, t0_abs, t0_rel))
+                flat_offset += n
+
+                # Time slice for this segment (same trigger-relative window)
+                if time_arr is not None:
+                    t1c = min(r1, len(time_arr))
+                    t_slice = time_arr[r0:t1c]
+                    merged_time_parts.append(t_slice[:n])
+
+            if not merged_data_parts:
+                continue
+
+            # Store merged data under the logical trace name
+            merged_arr = np.concatenate(merged_data_parts)
+            result.columns[trace_name] = merged_arr
+            result.trace_segments[trace_name] = flat_segments
+
+            # Remove the individual .SEGn columns (data + column_infos)
+            for col_name in seg_col_names:
+                result.columns.pop(col_name, None)
+                result.column_infos.pop(col_name, None)
+
+            # Add a ColumnInfo for the merged trace if none already present
+            if trace_name not in result.column_infos:
+                from core.csv_parser_types import ColumnInfo  # lazy to avoid circular
+                result.column_infos[trace_name] = ColumnInfo(
+                    index=0,
+                    original_name=group["trace_name"],
+                    display_name=group["trace_name"],
+                )
+
+            # Extend the time column once (all traces share the same time axis)
+            if not time_merged and merged_time_parts and time_col_clean:
+                merged_time = np.concatenate(merged_time_parts)
+                result.columns[time_col_clean] = merged_time
+                result.n_rows = len(merged_time)
+                time_arr     = merged_time   # keep in sync for subsequent groups
+                time_merged  = True
 
 
 def _csv_meta_from_parsed(parsed_meta) -> CsvMetadata:

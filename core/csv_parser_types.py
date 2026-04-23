@@ -106,3 +106,20 @@ class ParsedMetadata:
     # before parsing.  None = skip nothing.  Used when a format embeds
     # per-segment repeat headers or comment rows inside the data section.
     skip_rows: Optional[list] = None       # list[int] | None
+
+    # ── Segment column groupings (TraceLab native segmented format) ───
+    # Parsed from #segments= and #segment_meta= headers.
+    # The import pipeline uses this to merge .SEGn columns back into one
+    # flat trace with a populated segments list.
+    #
+    # Each entry in segment_col_groups:
+    # {
+    #   "trace_name"  : str,
+    #   "seg_col_names": list[str],  # column names, index-ordered
+    #   "seg_metas"   : list[(idx, start_row, stop_row, t0_abs, t0_rel)]
+    # }
+    segment_col_groups: list = field(default_factory=list)
+
+    # Per-trace settings from #trace_settings= headers.
+    # {trace_name: {"primary_segment": int|None, "non_primary_viewmode": str}}
+    trace_segment_settings: dict = field(default_factory=dict)

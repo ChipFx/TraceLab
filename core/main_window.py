@@ -83,6 +83,116 @@ def _hex_perceived_luminance(hex_color: str) -> float:
     return 0.299 * r + 0.587 * g + 0.114 * b
 
 
+# ── CSV export helpers ────────────────────────────────────────────────────────
+
+def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
+    """
+    Viewport-clipped flat CSV export (existing behaviour).
+    When primary_only=True and a trace carries segments, only the primary
+    segment's slice is exported (no segment headers written).
+    """
+    import numpy as np
+
+    def _seg_slice(trace):
+        """Return (time_array, data_array) for the relevant segment slice."""
+        if primary_only and trace.segments:
+            si = trace.primary_segment if trace.primary_segment is not None else 0
+            si = max(0, min(si, len(trace.segments) - 1))
+            s, e = trace.segments[si][0], trace.segments[si][1]
+            return trace.time_axis[s:e], trace.processed_data[s:e]
+        return trace.time_axis, trace.processed_data
+
+    ref_ta, _ = _seg_slice(traces[0])
+    mask  = (ref_ta >= x0) & (ref_ta <= x1)
+    ref_t = ref_ta[mask]
+
+    col_slices = [_seg_slice(t) for t in traces]
+    lines = ["time," + ",".join(t.label for t in traces)]
+    for t_val in ref_t:
+        row = [f"{t_val:.10g}"]
+        for (ta, ya), trace in zip(col_slices, traces):
+            if len(ta) < 2:
+                row.append(f"{ya[0]:.10g}" if len(ya) else "")
+                continue
+            idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
+            idx = max(0, min(idx, len(ya) - 1))
+            row.append(f"{ya[idx]:.10g}")
+        lines.append(",".join(row))
+    return lines
+
+
+def _build_segmented_csv(traces):
+    """
+    Full-data segmented TraceLab native export.
+    Segmented traces expand into .SEG0, .SEG1, … columns with segment
+    headers; non-segmented traces export as a single column.
+    All data is written without viewport clipping.
+    """
+    import numpy as np
+
+    header_comments = []
+    col_order  = ["Time"]
+    col_arrays = {}
+
+    # Reference time axis: first segment of the first segmented trace.
+    # All LeCroy-style segments share an identical trigger-relative time axis,
+    # so one copy is sufficient for the Time column.
+    ref_time = None
+    for trace in traces:
+        if trace.segments is not None:
+            s0, e0 = trace.segments[0][0], trace.segments[0][1]
+            ref_time = trace.time_axis[s0:e0]
+            break
+    if ref_time is None:
+        ref_time = traces[0].time_axis
+    col_arrays["Time"] = ref_time
+    n_rows = len(ref_time)
+
+    for trace in traces:
+        if trace.segments is not None:
+            seg_col_names = [f"{trace.label}.SEG{i}"
+                             for i in range(len(trace.segments))]
+
+            # #segments= header (named-column form)
+            header_comments.append(
+                '#segments=("{}",{})'.format(
+                    trace.label,
+                    ",".join(f'"{n}"' for n in seg_col_names)))
+
+            # #segment_meta= and per-segment column data
+            for i, (s, e, t0_abs, t0_rel) in enumerate(trace.segments):
+                seg_data = trace.processed_data[s:e]
+                header_comments.append(
+                    f'#segment_meta={{"{trace.label}",{i},1,'
+                    f'{len(seg_data)},{t0_abs:.6f},{t0_rel:.10g}}}')
+                col_order.append(seg_col_names[i])
+                col_arrays[seg_col_names[i]] = seg_data
+
+            # #trace_settings= header  (positional: name, primary_segment, viewmode)
+            ps  = trace.primary_segment
+            vm  = trace.non_primary_viewmode or ""
+            header_comments.append(
+                f'#trace_settings={{"{trace.label}",'
+                f'{"null" if ps is None else ps},'
+                f'"{vm}"}}')
+        else:
+            col_order.append(trace.label)
+            col_arrays[trace.label] = trace.processed_data
+
+    lines = header_comments[:]
+    lines.append(",".join(col_order))
+    for row_idx in range(n_rows):
+        row = [f"{ref_time[row_idx]:.10g}"]
+        for col_name in col_order[1:]:
+            arr = col_arrays.get(col_name)
+            if arr is not None and row_idx < len(arr):
+                row.append(f"{arr[row_idx]:.10g}")
+            else:
+                row.append("")   # empty cell for shorter segments
+        lines.append(",".join(row))
+    return lines
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1036,23 +1146,15 @@ class MainWindow(QMainWindow):
         if not visible:
             return
 
-        import numpy as np
-        ref_t = visible[0].time_axis
-        mask = (ref_t >= x0) & (ref_t <= x1)
-        ref_t = ref_t[mask]
+        any_segmented = any(t.segments is not None for t in visible)
+        primary_only  = (self._export_segments_mode == "primary_only")
 
-        lines = ["time," + ",".join(t.label for t in visible)]
-        for t_val in ref_t:
-            row = [f"{t_val:.10g}"]
-            for trace in visible:
-                ta = trace.time_axis
-                ya = trace.processed_data
-                idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
-                idx = max(0, min(idx, len(ya) - 1))
-                row.append(f"{ya[idx]:.10g}")
-            lines.append(",".join(row))
+        if any_segmented and not primary_only:
+            lines = _build_segmented_csv(visible)
+        else:
+            lines = _build_flat_csv(visible, x0, x1, primary_only=primary_only)
 
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         self._status_lbl.setText(f"Exported: {os.path.basename(path)}")
 

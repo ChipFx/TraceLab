@@ -673,6 +673,10 @@ class ImportDialog(QDialog):
 
             col_info = self.load_result.column_infos.get(col_name)
             _trace_name = row.edit_label.text().strip() or col_name
+            # Per-trace segment settings (from #trace_settings= headers)
+            _ts_seg = (self.load_result.trace_segment_settings.get(col_name)
+                       or self.load_result.trace_segment_settings.get(_trace_name)
+                       or {})
             trace = TraceModel(
                 name=_trace_name,
                 raw_data=raw,
@@ -690,9 +694,13 @@ class ImportDialog(QDialog):
                 # Wall-clock time anchor — used by cursor UI for real-world time display
                 t0_wall_clock=self.load_result.t0_wall_clock,
                 source_time_format=self.load_result.source_time_format,
-                # Segment metadata — None when parser did not supply it
-                segments=self.load_result.segments,
-                primary_segment=self.load_result.primary_segment,
+                # Segment metadata — per-trace if available, file-level fallback
+                segments=(self.load_result.trace_segments.get(col_name)
+                          or self.load_result.trace_segments.get(_trace_name)
+                          or self.load_result.segments),
+                primary_segment=(_ts_seg.get("primary_segment",
+                                             self.load_result.primary_segment)),
+                non_primary_viewmode=_ts_seg.get("non_primary_viewmode", ""),
             )
 
             # For sample-based time, apply t0 offset via dt-based shift

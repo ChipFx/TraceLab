@@ -39,3 +39,7 @@ strategy = "any"
     [[detection.rules]]
     line_search = 20
     pattern     = "^#(viewtimestart|viewtimestop|viewsamplestart|viewsamplestop)="
+
+    [[detection.rules]]
+    line_search = 20
+    pattern     = "^#(segements|segment_meta|segmentmeta|trace_settings|tracesettings)="

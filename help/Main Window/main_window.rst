@@ -1,13 +1,13 @@
 ---
-short_name: template
-long_name: T'em Pe Latte
-chapter: ThisOne
-chapter_long: This Oneoneone
-order: 0
-keywords: [ba, na, na]
+short_name: main_window
+long_name: Main Window
+chapter: tracelab-help
+chapter_long: ChipFX TraceLab Help
+order: 3
+keywords: [help, tracelab, main]
 ---
 
-Bananas
+Main Window
 ===========
 
 Yellow **yum yum**.

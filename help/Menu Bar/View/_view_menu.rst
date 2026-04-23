@@ -1,9 +1,9 @@
 ---
-short_name: template
-long_name: T'em Pe Latte
-chapter: ThisOne
-chapter_long: This Oneoneone
-order: 0
+short_name: view_menu
+long_name: View Menu
+chapter: menu_bar
+chapter_long: Menu Bar
+order: 2
 keywords: [ba, na, na]
 ---
 

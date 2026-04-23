@@ -1,13 +1,13 @@
 ---
-short_name: template
-long_name: T'em Pe Latte
-chapter: ThisOne
-chapter_long: This Oneoneone
-order: 0
-keywords: [ba, na, na]
+short_name: channel_panel
+long_name: Channel Panel
+chapter: tracelab-help
+chapter_long: ChipFX TraceLab Help
+order: 2
+keywords: [channel, color, colour, lin, cub, sinc]
 ---
 
-Bananas
+Channel Panel
 ===========
 
 Yellow **yum yum**.

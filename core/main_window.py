@@ -1607,6 +1607,7 @@ class MainWindow(QMainWindow):
 
     def _on_trace_visibility(self, name: str, visible: bool):
         self._plot.set_trace_visible(name, visible)
+        self._refresh_status_bar()
 
     def _on_trace_color(self, name: str, color: str):
         self._plot.refresh_all()

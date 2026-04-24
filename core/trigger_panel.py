@@ -80,13 +80,8 @@ class TriggerPanel(QWidget):
             "Fractions and metric suffixes supported: 1.5, 500m")
         gl.addWidget(self.edit_level, 1, 3)
 
-        # Row 2: Search direction radios
+        # Row 2: Direction × Origin — two independent radio pairs
         gl.addWidget(QLabel("Search:"), 2, 0)
-        self.radio_search_start = QRadioButton("Start")
-        self.radio_search_end   = QRadioButton("End")
-        self.radio_search_start.setChecked(True)
-        self.radio_search_start.setToolTip("Find Trigger searches forward from the beginning")
-        self.radio_search_end.setToolTip("Find Trigger searches backward from the end")
         _radio_style = (
             "QRadioButton::indicator {"
             "  width: 11px; height: 11px; border-radius: 6px;"
@@ -94,16 +89,48 @@ class TriggerPanel(QWidget):
             "QRadioButton::indicator:checked {"
             "  background: #60e060; border-color: #40a040; }"
         )
-        self.radio_search_start.setStyleSheet(_radio_style)
-        self.radio_search_end.setStyleSheet(_radio_style)
-        _bg = QButtonGroup(grp)
-        _bg.addButton(self.radio_search_start)
-        _bg.addButton(self.radio_search_end)
-        self.radio_search_start.toggled.connect(self._on_search_direction_changed)
+        # Direction pair
+        self.radio_dir_forward  = QRadioButton("Fwd")
+        self.radio_dir_backward = QRadioButton("Bwd")
+        self.radio_dir_forward.setChecked(True)
+        self.radio_dir_forward.setToolTip("Search forward (→) from the origin point")
+        self.radio_dir_backward.setToolTip("Search backward (←) from the origin point")
+        self.radio_dir_forward.setStyleSheet(_radio_style)
+        self.radio_dir_backward.setStyleSheet(_radio_style)
+        _bg_dir = QButtonGroup(grp)
+        _bg_dir.addButton(self.radio_dir_forward)
+        _bg_dir.addButton(self.radio_dir_backward)
+        self.radio_dir_forward.toggled.connect(self._on_search_direction_changed)
+
+        # Origin pair
+        self.radio_from_t0   = QRadioButton("t=0")
+        self.radio_from_edge = QRadioButton("Edge")
+        self.radio_from_t0.setChecked(True)
+        self.radio_from_t0.setToolTip(
+            "Start search from t=0\n"
+            "Fwd→ searches forward from t=0; Bwd← searches backward from t=0")
+        self.radio_from_edge.setToolTip(
+            "Start search from the waveform edge\n"
+            "Fwd→ searches from the start of data; Bwd← searches from the end of data")
+        self.radio_from_t0.setStyleSheet(_radio_style)
+        self.radio_from_edge.setStyleSheet(_radio_style)
+        _bg_from = QButtonGroup(grp)
+        _bg_from.addButton(self.radio_from_t0)
+        _bg_from.addButton(self.radio_from_edge)
+
         search_row = QHBoxLayout()
-        search_row.setSpacing(6)
-        search_row.addWidget(self.radio_search_start)
-        search_row.addWidget(self.radio_search_end)
+        search_row.setSpacing(4)
+        search_row.addWidget(self.radio_dir_forward)
+        search_row.addWidget(self.radio_dir_backward)
+        sep_s = QFrame()
+        sep_s.setFrameShape(QFrame.Shape.VLine)
+        sep_s.setStyleSheet("color: #444;")
+        sep_s.setFixedWidth(1)
+        search_row.addSpacing(4)
+        search_row.addWidget(sep_s)
+        search_row.addSpacing(4)
+        search_row.addWidget(self.radio_from_t0)
+        search_row.addWidget(self.radio_from_edge)
         search_row.addStretch()
         search_container = QWidget()
         search_container.setLayout(search_row)
@@ -175,8 +202,8 @@ class TriggerPanel(QWidget):
 
         layout.addStretch()
 
-    def _on_search_direction_changed(self, is_start: bool):
-        if is_start:
+    def _on_search_direction_changed(self, is_forward: bool):
+        if is_forward:
             self.btn_next.setText("Next →")
             self.btn_next.setToolTip("Find next trigger after the last one")
         else:
@@ -209,36 +236,47 @@ class TriggerPanel(QWidget):
             self.lbl_status.setText("No channel selected.")
             return
 
-        level = self.edit_level.get_value(0.0)
+        level    = self.edit_level.get_value(0.0)
         edge_idx = self.combo_edge.currentIndex()  # 0=rise, 1=fall, 2=either
 
         t = trace.time_axis
         y = trace.processed_data
 
-        search_from_end = self.radio_search_end.isChecked()
+        backward  = self.radio_dir_backward.isChecked()
+        from_edge = self.radio_from_edge.isChecked()   # False = from t=0
 
-        if search_from_end:
-            # Backward search: "Find Trigger" from the end; "← Prev" from before last
+        if backward:
             if search_after is not None:
+                # ← Prev: continue backward from just before last found trigger
                 i_end = int(np.searchsorted(t, search_after)) - 2
-            else:
+            elif from_edge:
+                # Backward from end of waveform
                 i_end = len(t) - 2
-            i_end = max(0, min(i_end, len(t) - 2))
-            t_pos = self._find_crossing_backward(t, y, level, edge_idx, i_end)
-        else:
-            # Forward search: "Find Trigger" from the start; "Next →" from after last
-            if search_after is not None:
-                i_start = int(np.searchsorted(t, search_after)) + 1
             else:
+                # Backward from t=0
+                i_end = int(np.searchsorted(t, 0.0)) - 1
+            i_end = max(0, min(i_end, len(t) - 2))
+            t_pos   = self._find_crossing_backward(t, y, level, edge_idx, i_end)
+            bound_t = float(t[i_end])
+            direction = "before"
+        else:
+            if search_after is not None:
+                # Next →: continue forward from just after last found trigger
+                i_start = int(np.searchsorted(t, search_after)) + 1
+            elif from_edge:
+                # Forward from start of waveform
                 i_start = 0
+            else:
+                # Forward from t=0
+                i_start = int(np.searchsorted(t, 0.0))
             i_start = max(0, min(i_start, len(t) - 2))
-            t_pos = self._find_crossing(t, y, level, edge_idx, i_start)
+            t_pos   = self._find_crossing(t, y, level, edge_idx, i_start)
+            bound_t = float(t[i_start])
+            direction = "after"
 
         if t_pos is None:
             edge_name = ("rising" if edge_idx == 0
                          else "falling" if edge_idx == 1 else "")
-            direction = "before" if search_from_end else "after"
-            bound_t   = float(t[i_end]) if search_from_end else float(t[i_start])
             self.lbl_status.setText(
                 f"No {edge_name} crossing at {level:.4g} "
                 f"found {direction} t={bound_t:.6g}")

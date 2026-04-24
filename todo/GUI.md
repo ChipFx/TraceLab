@@ -50,6 +50,7 @@
 		~ #addgroup={ "some group name", 2, 4, 6, 8, 10, 12 }    # defines "some group name" with columns 2, 4, 6, 8 , 10  ,12
 		~ #addgroup={ "The best group", "101", "banana", "fish tacos" }   # defines "The best group" with "101" "banana" "fish tacos", referring to exact column name strings after parsing, however weird a main course that is. 
  - Fix this rare bug on n'th import of data (folder origins anonymised):
+	~ Update: Probably figured it out: When setting the zoom view such that a trace element has no data in that area, the Y-lock autozoom calls a zoom range from NaN to NaN. That should be handled properly, when either of the limits returns NaN, the zoom call should be aborted.
 	Traceback (most recent call last):
 	File "\core\main_window.py", line 1289, in _zoom_full_safe
 		pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)

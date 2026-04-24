@@ -42,4 +42,4 @@ strategy = "any"
 
     [[detection.rules]]
     line_search = 20
-    pattern     = "^#(segments|segements|segment_meta|segmentmeta|trace_settings|tracesettings|trace_meta|t0_wall_clock)="
+    pattern     = "^#(segments|segements|segment_meta|segmentmeta|trace_settings|tracesettings|trace_meta|trace_data_range|t0_wall_clock)="

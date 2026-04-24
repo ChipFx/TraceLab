@@ -128,3 +128,9 @@ class ParsedMetadata:
     # Per-trace settings from #trace_settings= headers.
     # {trace_name: {"primary_segment": int|None, "non_primary_viewmode": str}}
     trace_segment_settings: dict = field(default_factory=dict)
+
+    # Per-column valid data row range, parsed from #trace_data_range= headers.
+    # {clean_col_name: (start_row, end_row)} — 1-based inclusive row numbers
+    # relative to the first data row (row 1 = first non-header data row).
+    # Columns absent from this dict span all rows.
+    trace_data_ranges: dict = field(default_factory=dict)

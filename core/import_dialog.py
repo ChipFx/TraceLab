@@ -671,6 +671,18 @@ class ImportDialog(QDialog):
                 elif t0_time != 0.0:
                     td = td - t0_time
 
+            # Trim raw_data and time_data to the valid range declared by the
+            # parser via #trace_data_range= headers.  This strips the leading/
+            # trailing empty-cell padding that the exporter writes when traces
+            # have different time extents, restoring the original array length.
+            _dr = self.load_result.trace_data_ranges.get(col_name)
+            if _dr is not None:
+                r0_0 = _dr[0] - 1        # 0-based inclusive start
+                r1_0 = _dr[1]             # 0-based exclusive end
+                raw = raw[r0_0:r1_0]
+                if td is not None:
+                    td = td[r0_0:r1_0]
+
             col_info = self.load_result.column_infos.get(col_name)
             _trace_name = row.edit_label.text().strip() or col_name
 

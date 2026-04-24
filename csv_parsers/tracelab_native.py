@@ -165,6 +165,12 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
         elif key == "t0_wall_clock":
             meta.start_wall_clock = val.strip()
 
+        elif key == "trace_data_range":
+            result = _parse_trace_data_range_header(val)
+            if result is not None:
+                tname, r0, r1 = result
+                meta.trace_data_ranges[_clean_name(tname)] = (r0, r1)
+
     # Build segment_col_groups from the accumulated dicts
     for tname, col_refs in _seg_cols.items():
         # col_refs may be strings (column names) or ints (1-based indices).
@@ -350,3 +356,32 @@ def _parse_trace_meta_header(value_str: str):
             k, _, v = tok.partition("=")
             attrs[k.strip().lower()] = v.strip()
     return trace_name, attrs
+
+
+def _parse_trace_data_range_header(value_str: str):
+    """
+    Parse '#trace_data_range={"TraceName",start_row,end_row}'.
+
+    Row numbers are 1-based and inclusive, relative to the first data row
+    (i.e. row 1 = the row immediately after the column-header row).
+
+    Returns (trace_name, start_row, end_row) or None on failure.
+    """
+    inner = value_str.strip()
+    if inner.startswith("{") and inner.endswith("}"):
+        inner = inner[1:-1].strip()
+    try:
+        tokens = next(csv.reader([inner], skipinitialspace=True))
+    except (StopIteration, csv.Error):
+        return None
+    if len(tokens) < 3:
+        return None
+    try:
+        trace_name = tokens[0].strip().strip("\"'")
+        start = int(tokens[1])
+        end   = int(tokens[2])
+    except (ValueError, IndexError):
+        return None
+    if start < 1 or end < start:
+        return None
+    return trace_name, start, end

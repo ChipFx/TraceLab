@@ -227,6 +227,11 @@ class LoadResult:
         #                     "non_primary_viewmode": str}}
         self.trace_segment_settings: dict = {}
 
+        # Per-column valid data row range from #trace_data_range= headers.
+        # {clean_col_name: (start_1based, end_1based)} — both inclusive.
+        # Absent key = trace spans all rows.
+        self.trace_data_ranges: dict = {}
+
     @property
     def column_names(self) -> List[str]:
         return list(self.columns.keys())
@@ -412,6 +417,8 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
     result.primary_segment         = getattr(parsed_meta, 'primary_segment', None)
     result.trace_segment_settings  = dict(
         getattr(parsed_meta, 'trace_segment_settings', {}))
+    result.trace_data_ranges       = dict(
+        getattr(parsed_meta, 'trace_data_ranges', {}))
 
     # ── NaN sentinels / invalid_above ────────────────────────────────
     if parsed_meta.invalid_above is not None:

@@ -153,18 +153,58 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
     ref_t = ref_ta[mask]
 
     col_slices = [_seg_slice(t) for t in traces]
-    lines = _meta_header_comments(traces)
-    lines.append("time," + ",".join(t.label for t in traces))
-    for t_val in ref_t:
+
+    # Per-trace valid time window: half-sample tolerance at each end so that
+    # the exact first/last sample still matches despite floating-point jitter.
+    trace_lo = []
+    trace_hi = []
+    for (ta, _), trace in zip(col_slices, traces):
+        if len(ta):
+            eps = trace.dt * 0.5 if trace.dt > 0 else 1e-12
+            trace_lo.append(ta[0]  - eps)
+            trace_hi.append(ta[-1] + eps)
+        else:
+            trace_lo.append(None)
+            trace_hi.append(None)
+
+    # Build data rows, recording the first and last row (1-based) that each
+    # trace actually contributes a value — needed for #trace_data_range= headers.
+    first_row = [None] * len(traces)
+    last_row  = [None] * len(traces)
+    data_lines = []
+
+    for row_idx, t_val in enumerate(ref_t, start=1):
         row = [f"{t_val:.10g}"]
-        for (ta, ya), trace in zip(col_slices, traces):
-            if len(ta) < 2:
-                row.append(f"{ya[0]:.10g}" if len(ya) else "")
-                continue
-            idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
-            idx = max(0, min(idx, len(ya) - 1))
-            row.append(f"{ya[idx]:.10g}")
-        lines.append(",".join(row))
+        for i, ((ta, ya), trace) in enumerate(zip(col_slices, traces)):
+            lo, hi = trace_lo[i], trace_hi[i]
+            if lo is None or t_val < lo or t_val > hi:
+                row.append("")        # empty cell — outside this trace's time range
+            else:
+                if len(ta) < 2:
+                    row.append(f"{ya[0]:.10g}" if len(ya) else "")
+                else:
+                    idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
+                    idx = max(0, min(idx, len(ya) - 1))
+                    row.append(f"{ya[idx]:.10g}")
+                if first_row[i] is None:
+                    first_row[i] = row_idx
+                last_row[i] = row_idx
+        data_lines.append(",".join(row))
+
+    # Range headers for traces that don't cover the full exported window.
+    # Omitted when the trace spans every row (no information gain).
+    n_rows = len(ref_t)
+    range_comments = []
+    for i, trace in enumerate(traces):
+        r0, r1 = first_row[i], last_row[i]
+        if r0 is not None and r1 is not None and (r0 != 1 or r1 != n_rows):
+            range_comments.append(
+                f'#trace_data_range={{"{trace.label}",{r0},{r1}}}')
+
+    lines = _meta_header_comments(traces)
+    lines.extend(range_comments)
+    lines.append("time," + ",".join(t.label for t in traces))
+    lines.extend(data_lines)
     return lines
 
 

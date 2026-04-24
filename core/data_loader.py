@@ -17,7 +17,7 @@ Native TraceLab '#key=value' format
 TraceLab native files carry metadata in '#' comment lines before the header row.
 Supported keys (case-insensitive):
   #samplerate=10000   #dt=0.0001   #time=time   #gain=2.5/4096
-  #attenuation=4096   #offset=-1.25   #unit=V   #coupling=AC
+  #offset=-1.25   #unit=V   #coupling=AC
   #impedance=50   #bwlimit=200M   #zerotime=N
   #viewtimestart=   #viewtimestop=   #viewsamplestart=   #viewsamplestop=
 

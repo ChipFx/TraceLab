@@ -29,6 +29,11 @@ class ColumnInfo:
     is_time: bool = False             # True → this column is the time axis
     skip: bool = False                # True → default-unchecked in import dialog
     group: str = ""                   # group name, e.g. "Temperatures" or "Alarms"
+    coupling: str = ""                # instrument coupling: "DC", "AC", "GND", …
+    impedance: str = ""               # input impedance: "50", "1M", …
+    bwlimit: str = ""                 # bandwidth limit: "200M", "full", …
+    sample_rate: Optional[float] = None  # Hz; None → use file-level default
+    t0_wall_clock: str = ""           # ISO 8601 trigger/anchor time; "" → use file-level default
 
     def __post_init__(self):
         if not self.display_name:

@@ -85,6 +85,52 @@ def _hex_perceived_luminance(hex_color: str) -> float:
 
 # ── CSV export helpers ────────────────────────────────────────────────────────
 
+def _meta_header_comments(traces) -> list:
+    """
+    Build TraceLab '#trace_meta=' comment lines for a set of exported traces.
+
+    Everything is per-trace — different captures can have different sample rates,
+    wall-clock anchors and channel metadata.
+
+    Per-trace format (one line per trace that has any metadata):
+      #trace_meta={"label","sps=10000","dt=0.0001","t0_wall_clock=...","unit=V",
+                   "coupling=DC","impedance=1M","bwlimit=200M"}
+
+    Rules:
+      - Both sps= and dt= are written when set; neither is skipped because they
+        are stored as separate floats and round-tripping through only one can
+        accumulate error.
+      - t0_wall_clock= is written per-trace; each capture has its own anchor.
+      - unit=, coupling=, impedance=, bwlimit= written when non-empty.
+      - gain= / offset= are intentionally omitted: the exported data is already
+        processed_data (scaling already applied), so writing them would cause
+        double-application on re-import.
+      - The first token is the trace label (= column name in the CSV header),
+        so the parser can match #trace_meta to the right column.
+    """
+    lines = []
+    for trace in traces:
+        attrs = []
+        if trace.sample_rate and trace.sample_rate != 1.0:
+            attrs.append(f"sps={trace.sample_rate:.10g}")
+        if trace.dt and trace.dt != 1.0:
+            attrs.append(f"dt={trace.dt:.10g}")
+        if trace.t0_wall_clock:
+            attrs.append(f"t0_wall_clock={trace.t0_wall_clock}")
+        if trace.unit and trace.unit not in ("", "raw"):
+            attrs.append(f"unit={trace.unit}")
+        if trace.coupling:
+            attrs.append(f"coupling={trace.coupling}")
+        if trace.impedance:
+            attrs.append(f"impedance={trace.impedance}")
+        if trace.bwlimit:
+            attrs.append(f"bwlimit={trace.bwlimit}")
+        if attrs:
+            quoted = ",".join(f'"{a}"' for a in attrs)
+            lines.append(f'#trace_meta={{"{trace.label}",{quoted}}}')
+    return lines
+
+
 def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
     """
     Viewport-clipped flat CSV export (existing behaviour).
@@ -107,7 +153,8 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
     ref_t = ref_ta[mask]
 
     col_slices = [_seg_slice(t) for t in traces]
-    lines = ["time," + ",".join(t.label for t in traces)]
+    lines = _meta_header_comments(traces)
+    lines.append("time," + ",".join(t.label for t in traces))
     for t_val in ref_t:
         row = [f"{t_val:.10g}"]
         for (ta, ya), trace in zip(col_slices, traces):
@@ -179,7 +226,7 @@ def _build_segmented_csv(traces):
             col_order.append(trace.label)
             col_arrays[trace.label] = trace.processed_data
 
-    lines = header_comments[:]
+    lines = _meta_header_comments(traces) + header_comments
     lines.append(",".join(col_order))
     for row_idx in range(n_rows):
         row = [f"{ref_time[row_idx]:.10g}"]

@@ -673,6 +673,18 @@ class ImportDialog(QDialog):
 
             col_info = self.load_result.column_infos.get(col_name)
             _trace_name = row.edit_label.text().strip() or col_name
+
+            # Per-trace sample rate from #trace_meta= takes precedence over
+            # the file-level value derived from the time column / UI spinboxes.
+            _ci_sps = col_info.sample_rate if (col_info and col_info.sample_rate) else None
+            _trace_sps = _ci_sps if _ci_sps else sps
+            _trace_dt  = (1.0 / _trace_sps) if _trace_sps > 0 else dt
+
+            # Per-trace wall-clock anchor; falls back to file-level value.
+            _trace_t0wc = (col_info.t0_wall_clock
+                           if (col_info and col_info.t0_wall_clock)
+                           else self.load_result.t0_wall_clock)
+
             # Per-trace segment settings (from #trace_settings= headers)
             _ts_seg = (self.load_result.trace_segment_settings.get(col_name)
                        or self.load_result.trace_segment_settings.get(_trace_name)
@@ -681,18 +693,22 @@ class ImportDialog(QDialog):
                 name=_trace_name,
                 raw_data=raw,
                 time_data=td,
-                sample_rate=sps,
-                dt=dt,
+                sample_rate=_trace_sps,
+                dt=_trace_dt,
                 color=row.color,
                 label=row.edit_label.text().strip() or col_name,
-                unit=scaling.unit if scaling.enabled else "raw",
+                unit=scaling.unit,
                 scaling=scaling,
+                # Instrument channel metadata (preserved from file headers)
+                coupling=col_info.coupling if col_info else "",
+                impedance=col_info.impedance if col_info else "",
+                bwlimit=col_info.bwlimit if col_info else "",
                 # Source provenance — available to trace-manipulation plugins
                 source_file=self.load_result.filename,
                 original_col_name=col_name,
                 col_group=col_info.group if col_info else "",
-                # Wall-clock time anchor — used by cursor UI for real-world time display
-                t0_wall_clock=self.load_result.t0_wall_clock,
+                # Wall-clock time anchor — per-trace first, file-level fallback
+                t0_wall_clock=_trace_t0wc,
                 source_time_format=self.load_result.source_time_format,
                 # Segment metadata — per-trace if available, file-level fallback
                 segments=(self.load_result.trace_segments.get(col_name)

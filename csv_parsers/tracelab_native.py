@@ -9,7 +9,7 @@ through the unified parser pipeline — even the home format.
 import csv
 import io
 from core.csv_parser_types import ParsedMetadata, ColumnInfo, ColumnGroup
-from core.data_loader import parse_metadata_lines, _clean_name
+from core.data_loader import parse_metadata_lines, _clean_name, parse_value
 
 PARSER_NAME = "TraceLab Native CSV"
 
@@ -71,9 +71,12 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
                 index         = idx,
                 original_name = clean,
                 display_name  = clean,
-                unit          = csv_meta.unit or "",
-                gain          = csv_meta.gain  if csv_meta.gain   is not None else 1.0,
-                offset        = csv_meta.offset if csv_meta.offset is not None else 0.0,
+                unit          = csv_meta.unit      or "",
+                gain          = csv_meta.gain      if csv_meta.gain   is not None else 1.0,
+                offset        = csv_meta.offset    if csv_meta.offset is not None else 0.0,
+                coupling      = csv_meta.coupling  or "",
+                impedance     = csv_meta.impedance or "",
+                bwlimit       = csv_meta.bwlimit   or "",
                 is_time       = False,
                 skip          = False,
                 group         = "",
@@ -120,11 +123,13 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
                 meta.columns[idx].group = group_name
             meta.groups.append(ColumnGroup(group_name, resolved))
 
-    # ── Resolve #segments= / #segment_meta= / #trace_settings= directives ──
+    # ── Resolve #segments= / #segment_meta= / #trace_settings= /
+    #          #trace_meta= / #t0_wall_clock= directives ──────────────────────
     # These are accumulated into dicts keyed by trace name, then assembled
-    # into meta.segment_col_groups and meta.trace_segment_settings.
-    _seg_cols   = {}   # trace_name → list of col-name/index references
-    _seg_metas  = {}   # trace_name → list of (idx, start, stop, t0_abs, t0_rel)
+    # into meta.segment_col_groups, meta.trace_segment_settings, etc.
+    _seg_cols    = {}   # trace_name → list of col-name/index references
+    _seg_metas   = {}   # trace_name → list of (idx, start, stop, t0_abs, t0_rel)
+    _trace_metas = {}   # trace_name → {attr: value}  from #trace_meta= headers
 
     for line in comment_lines:
         # Strip the leading '#' and split on first '='
@@ -151,6 +156,15 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
             if tname is not None:
                 meta.trace_segment_settings[tname] = settings
 
+        elif key == "trace_meta":
+            tname, attrs = _parse_trace_meta_header(val)
+            if tname is not None:
+                # Key by cleaned name so lookup against ci.original_name is direct
+                _trace_metas[_clean_name(tname)] = attrs
+
+        elif key == "t0_wall_clock":
+            meta.start_wall_clock = val.strip()
+
     # Build segment_col_groups from the accumulated dicts
     for tname, col_refs in _seg_cols.items():
         # col_refs may be strings (column names) or ints (1-based indices).
@@ -170,6 +184,51 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
             "seg_col_names": resolved_names,
             "seg_metas"    : metas,
         })
+
+    # ── Apply #trace_meta= attributes to ColumnInfo objects ──────────────────
+    # Keys in _trace_metas are already _clean_name'd; ci.original_name is clean.
+    for ci in meta.columns:
+        tm = _trace_metas.get(ci.original_name)
+        if not tm:
+            continue
+        if tm.get("unit"):
+            ci.unit = tm["unit"]
+        if tm.get("coupling"):
+            ci.coupling = tm["coupling"]
+        if tm.get("impedance"):
+            ci.impedance = tm["impedance"]
+        if tm.get("bwlimit"):
+            ci.bwlimit = tm["bwlimit"]
+        if tm.get("gain"):
+            try:
+                ci.gain = parse_value(tm["gain"])
+            except (ValueError, ZeroDivisionError):
+                pass
+        if tm.get("offset"):
+            try:
+                ci.offset = parse_value(tm["offset"])
+            except (ValueError, ZeroDivisionError):
+                pass
+        # sps= and dt= — prefer dt when both present (fewer floating-point steps)
+        _sps_str = tm.get("sps") or tm.get("samplerate") or tm.get("sample_rate")
+        _dt_str  = tm.get("dt")
+        _sps_val = None
+        if _dt_str:
+            try:
+                _dt_val = parse_value(_dt_str)
+                if _dt_val > 0:
+                    _sps_val = 1.0 / _dt_val
+            except (ValueError, ZeroDivisionError):
+                pass
+        if _sps_val is None and _sps_str:
+            try:
+                _sps_val = parse_value(_sps_str)
+            except (ValueError, ZeroDivisionError):
+                pass
+        if _sps_val is not None and _sps_val > 0:
+            ci.sample_rate = _sps_val
+        if tm.get("t0_wall_clock"):
+            ci.t0_wall_clock = tm["t0_wall_clock"]
 
     return meta
 
@@ -261,3 +320,33 @@ def _parse_trace_settings_header(value_str: str):
     if len(tokens) >= 3:
         settings["non_primary_viewmode"] = tokens[2].strip().strip("\"'")
     return trace_name, settings
+
+
+def _parse_trace_meta_header(value_str: str):
+    """
+    Parse '#trace_meta={"TraceName","unit=V","coupling=DC","gain=1/4096",...}'.
+
+    Each element after the trace name is a "key=value" token.
+    Supported keys: unit, coupling, impedance, bwlimit, gain, offset.
+
+    Returns (trace_name, {key: value_string}) or (None, {}) on failure.
+    The caller is responsible for converting numeric strings (gain, offset)
+    via parse_value() before use.
+    """
+    inner = value_str.strip()
+    if inner.startswith("{") and inner.endswith("}"):
+        inner = inner[1:-1].strip()
+    try:
+        tokens = next(csv.reader([inner], skipinitialspace=True))
+    except (StopIteration, csv.Error):
+        return None, {}
+    if not tokens:
+        return None, {}
+    trace_name = tokens[0].strip().strip("\"'")
+    attrs = {}
+    for tok in tokens[1:]:
+        tok = tok.strip().strip("\"'")
+        if "=" in tok:
+            k, _, v = tok.partition("=")
+            attrs[k.strip().lower()] = v.strip()
+    return trace_name, attrs

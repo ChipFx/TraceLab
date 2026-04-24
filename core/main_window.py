@@ -128,6 +128,18 @@ def _meta_header_comments(traces) -> list:
         if attrs:
             quoted = ",".join(f'"{a}"' for a in attrs)
             lines.append(f'#trace_meta={{"{trace.label}",{quoted}}}')
+
+    # Group membership — one #addgroup= line per unique group, listing all
+    # member labels.  The first token in the braces is the group name;
+    # subsequent tokens are column names (= trace labels in the exported CSV).
+    groups: dict = {}
+    for trace in traces:
+        if trace.col_group:
+            groups.setdefault(trace.col_group, []).append(trace.label)
+    for group_name, members in groups.items():
+        quoted = ",".join(f'"{m}"' for m in members)
+        lines.append(f'#addgroup={{"{group_name}",{quoted}}}')
+
     return lines
 
 

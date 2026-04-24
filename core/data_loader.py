@@ -531,6 +531,15 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
             result.columns[trace_name] = merged_arr
             result.trace_segments[trace_name] = flat_segments
 
+            # Before removing SEGn columns, capture any group assignment that
+            # was stamped on them (from #addgroup= using the logical trace name).
+            _seg_group = ""
+            for col_name in seg_col_names:
+                ci = result.column_infos.get(col_name)
+                if ci and ci.group:
+                    _seg_group = ci.group
+                    break
+
             # Remove the individual .SEGn columns (data + column_infos)
             for col_name in seg_col_names:
                 result.columns.pop(col_name, None)
@@ -543,6 +552,7 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
                     index=0,
                     original_name=group["trace_name"],
                     display_name=group["trace_name"],
+                    group=_seg_group,
                 )
 
             # Extend the time column once (all traces share the same time axis)

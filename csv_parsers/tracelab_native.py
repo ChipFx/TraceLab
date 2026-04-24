@@ -113,8 +113,30 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
                     resolved.append(name_to_idx_exact[clean_m])
                 elif clean_m.lower() in name_to_idx_lower:
                     resolved.append(name_to_idx_lower[clean_m.lower()])
-                # Silently skip unresolvable names — column may have been
-                # removed or renamed since the file was written.
+                else:
+                    # Try matching as a logical segmented trace name.
+                    # The exporter writes the trace label (e.g. "Ampl"), but
+                    # the CSV columns are "Ampl.SEG0", "Ampl.SEG1", etc.
+                    # Resolve to all SEGn columns so the group gets stamped on
+                    # every segment column; the segment-merge step in
+                    # _apply_plugin_meta then copies it to the merged ColumnInfo.
+                    _seg_key = clean_m if clean_m in _seg_cols else next(
+                        (k for k in _seg_cols if k.lower() == clean_m.lower()),
+                        None)
+                    if _seg_key:
+                        for ref in _seg_cols[_seg_key]:
+                            if isinstance(ref, int):
+                                idx = ref - 1
+                                if 0 <= idx < len(meta.columns):
+                                    resolved.append(idx)
+                            else:
+                                ref_c = _clean_name(str(ref))
+                                if ref_c in name_to_idx_exact:
+                                    resolved.append(name_to_idx_exact[ref_c])
+                                elif ref_c.lower() in name_to_idx_lower:
+                                    resolved.append(
+                                        name_to_idx_lower[ref_c.lower()])
+                    # else: silently skip — column removed or renamed
 
         if resolved:
             # Also stamp the group name onto the matching ColumnInfo objects

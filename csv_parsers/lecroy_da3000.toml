@@ -1,0 +1,32 @@
+# csv_parsers/lecroy_da3000.toml
+# Parser for LeCroy DA3000 series oscilloscope waveform CSVs.
+#
+# Typical file structure (single segment):
+#   LECROYDDA3000,10081,Waveform          ← line 0: model identifier
+#   Segments,1,SegmentSize,100002         ← line 1: segment / sample count
+#   Segment,TrigTime,TimeSinceSegment1    ← line 2: segment time header
+#   #1,23-Mar-2002 02:21:36,0             ← line 3: segment entry (starts with #N!)
+#   Time,Ampl                             ← line 4: data column header
+#   -0.0050000283,0.354573                ← data rows
+#
+# Multi-segment files have multiple #N,date,offset lines before the column header.
+# The parser handles both single and multi-segment by scanning for the first
+# purely alphabetic header row after the segment entries.
+#
+# NOTE: the "#1" segment lines are NOT TraceLab metadata — the '#' is part of
+# LeCroy's segment numbering syntax.  The parser explicitly skips them so they
+# are not mis-parsed as '#key=value' metadata.
+
+name     = "LeCroy DA3000 Waveform"
+brands   = ["LeCroy"]
+parser   = "lecroy_da3000.py"
+priority = 20
+
+# Detection: field 0 of line 0 must start with "LECROY" (covers all model variants)
+[[detection]]
+strategy = "all"
+
+    [[detection.rules]]
+    line    = 0
+    field   = 0
+    pattern = "^LECROY"

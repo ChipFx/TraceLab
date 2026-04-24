@@ -78,6 +78,60 @@ class TraceModel:
     impedance: str = ""
     bwlimit: str = ""
 
+    # ── Source provenance ─────────────────────────────────────────────
+    # Set at import time; readable by trace-manipulation plugins via the
+    # traces list that gets passed to plugin.run().
+
+    # Filename the trace was loaded from (basename only)
+    source_file: str = ""
+
+    # Column name exactly as it appeared in the source CSV header row,
+    # before any display-name override from a parser plugin or the user.
+    original_col_name: str = ""
+
+    # Parser-assigned group name (e.g. "Measurements", "Alarms", "Temperature").
+    # Empty string if no grouping was provided.
+    col_group: str = ""
+
+    # ── Wall-clock time anchor ────────────────────────────────────────
+    # ISO 8601 string for the real-world moment that corresponds to t=0 on
+    # this trace's time axis.  Empty string if unknown.
+    #
+    # Examples:
+    #   Scope capture  → trigger time, e.g. "2002-03-23T02:21:36"
+    #   Data logger    → timestamp of the first imported sample
+    #
+    # When the user performs "Set t=0 here" (cursor or sample index), the
+    # pipeline shifts time_data and updates t0_wall_clock by the same delta
+    # so the real-world calendar time remains consistent.
+    #
+    # The cursor UI uses:  t0_wall_clock_as_datetime + timedelta(seconds=cursor_t)
+    # to show "Thursday 12 April 2026  13:44:22.460"
+    t0_wall_clock: str = ""
+
+    # Describes how the time axis was sourced; informational for plugins / UI.
+    #   "seconds_relative"      — float seconds from t=0, kept as-is
+    #   "unix_epoch"            — was Unix epoch; converted to seconds_relative
+    #   "datetime:<strptime>"   — was datetime strings; converted to seconds_relative
+    source_time_format: str = "seconds_relative"
+
+    # ── Segment metadata ──────────────────────────────────────────────
+    # Populated by importers that support multi-segment captures (e.g. LeCroy).
+    # Each tuple: (start_index, end_index, t0_absolute, t0_relative)
+    #   start_index  : int   — inclusive 0-based index into time_data / raw_data
+    #   end_index    : int   — exclusive end index (Python slice convention)
+    #   t0_absolute  : float — Unix timestamp of this segment's trigger
+    #   t0_relative  : float — seconds since segment-1 trigger (0.0 for seg 1)
+    # None means non-segmented or unknown — all code that doesn't know about
+    # segments should treat None as "no special handling required".
+    segments: Optional[list] = None        # list[tuple[int,int,float,float]] | None
+    primary_segment: Optional[int] = None  # 0-based index into segments; None = all equal
+
+    # How non-primary segments are rendered.  Empty string = default behaviour
+    # (treated as "regular" until the GUI segment controls are implemented).
+    # Valid values: "show_only_primary", "dimmed", "dashed", "regular"
+    non_primary_viewmode: str = ""
+
     # Per-trace labels: list of (time_position, label_text) tuples
     # Each label is drawn as a text annotation anchored to that time point.
     trace_labels: list = field(default_factory=list)

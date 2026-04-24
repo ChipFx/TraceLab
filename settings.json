@@ -1,9 +1,9 @@
 {
   "theme": "dark",
-  "geometry": "01d9d0cb00030000000003c7000000c800000a4700000538000003c7000000e700000a470000053800000000000000000f00000003c7000000e700000a4700000538",
+  "geometry": "01d9d0cb0003000000000286000000ab00000692000003fc00000286000000ca00000692000003fc00000000000000000f0000000286000000ca00000692000003fc",
   "import_replace": true,
   "import_reset_view": true,
-  "fft_min_freq": 10.0,
+  "fft_min_freq": 0.001,
   "y_lock_auto": true,
   "font_scale": 1.2500000000000002,
   "trace_colors": [
@@ -20,7 +20,7 @@
   ],
   "color_overrides": {},
   "max_display_points": 50000,
-  "default_sample_rate": 2200000.0,
+  "default_sample_rate": 1000.0,
   "last_open_folder": "./",
   "last_save_folder": "./",
   "remember_folder": true,
@@ -32,8 +32,8 @@
     "response_curve": 0.41
   },
   "viewport_min_pts": 2048,
-  "last_gain": "2.048/4096",
-  "last_offset": "-1.024",
+  "last_gain": "1",
+  "last_offset": "0",
   "last_unit": "V",
   "retrigger_mode": "off",
   "persistence": {
@@ -65,5 +65,13 @@
   "show_lane_labels": true,
   "allow_theme_force_labels": false,
   "lane_label_spacing": 0.3,
-  "display_mode": "split"
+  "display_mode": "split",
+  "periodicity_estimation_timeout": 5,
+  "viewport_limits_mode": "window",
+  "viewport_scale_min_px": 2,
+  "viewport_scale_max_px": 12,
+  "viewport_preset_min": 2048,
+  "viewport_preset_max": 50000,
+  "rejection_enabled": true,
+  "export_segments_mode": "all"
 }

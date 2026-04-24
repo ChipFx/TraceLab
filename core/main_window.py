@@ -83,6 +83,215 @@ def _hex_perceived_luminance(hex_color: str) -> float:
     return 0.299 * r + 0.587 * g + 0.114 * b
 
 
+# ── CSV export helpers ────────────────────────────────────────────────────────
+
+def _meta_header_comments(traces) -> list:
+    """
+    Build TraceLab '#trace_meta=' comment lines for a set of exported traces.
+
+    Everything is per-trace — different captures can have different sample rates,
+    wall-clock anchors and channel metadata.
+
+    Per-trace format (one line per trace that has any metadata):
+      #trace_meta={"label","sps=10000","dt=0.0001","t0_wall_clock=...","unit=V",
+                   "coupling=DC","impedance=1M","bwlimit=200M"}
+
+    Rules:
+      - Both sps= and dt= are written when set; neither is skipped because they
+        are stored as separate floats and round-tripping through only one can
+        accumulate error.
+      - t0_wall_clock= is written per-trace; each capture has its own anchor.
+      - unit=, coupling=, impedance=, bwlimit= written when non-empty.
+      - gain= / offset= are intentionally omitted: the exported data is already
+        processed_data (scaling already applied), so writing them would cause
+        double-application on re-import.
+      - The first token is the trace label (= column name in the CSV header),
+        so the parser can match #trace_meta to the right column.
+    """
+    lines = []
+    for trace in traces:
+        attrs = []
+        if trace.sample_rate and trace.sample_rate != 1.0:
+            attrs.append(f"sps={trace.sample_rate:.10g}")
+        if trace.dt and trace.dt != 1.0:
+            attrs.append(f"dt={trace.dt:.10g}")
+        if trace.t0_wall_clock:
+            attrs.append(f"t0_wall_clock={trace.t0_wall_clock}")
+        if trace.unit and trace.unit not in ("", "raw"):
+            attrs.append(f"unit={trace.unit}")
+        if trace.coupling:
+            attrs.append(f"coupling={trace.coupling}")
+        if trace.impedance:
+            attrs.append(f"impedance={trace.impedance}")
+        if trace.bwlimit:
+            attrs.append(f"bwlimit={trace.bwlimit}")
+        if attrs:
+            quoted = ",".join(f'"{a}"' for a in attrs)
+            lines.append(f'#trace_meta={{"{trace.label}",{quoted}}}')
+
+    # Group membership — one #addgroup= line per unique group, listing all
+    # member labels.  The first token in the braces is the group name;
+    # subsequent tokens are column names (= trace labels in the exported CSV).
+    groups: dict = {}
+    for trace in traces:
+        if trace.col_group:
+            groups.setdefault(trace.col_group, []).append(trace.label)
+    for group_name, members in groups.items():
+        quoted = ",".join(f'"{m}"' for m in members)
+        lines.append(f'#addgroup={{"{group_name}",{quoted}}}')
+
+    return lines
+
+
+def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
+    """
+    Viewport-clipped flat CSV export (existing behaviour).
+    When primary_only=True and a trace carries segments, only the primary
+    segment's slice is exported (no segment headers written).
+    """
+    import numpy as np
+
+    def _seg_slice(trace):
+        """Return (time_array, data_array) for the relevant segment slice."""
+        if primary_only and trace.segments:
+            si = trace.primary_segment if trace.primary_segment is not None else 0
+            si = max(0, min(si, len(trace.segments) - 1))
+            s, e = trace.segments[si][0], trace.segments[si][1]
+            return trace.time_axis[s:e], trace.processed_data[s:e]
+        return trace.time_axis, trace.processed_data
+
+    ref_ta, _ = _seg_slice(traces[0])
+    mask  = (ref_ta >= x0) & (ref_ta <= x1)
+    ref_t = ref_ta[mask]
+
+    col_slices = [_seg_slice(t) for t in traces]
+
+    # Per-trace valid time window: half-sample tolerance at each end so that
+    # the exact first/last sample still matches despite floating-point jitter.
+    trace_lo = []
+    trace_hi = []
+    for (ta, _), trace in zip(col_slices, traces):
+        if len(ta):
+            eps = trace.dt * 0.5 if trace.dt > 0 else 1e-12
+            trace_lo.append(ta[0]  - eps)
+            trace_hi.append(ta[-1] + eps)
+        else:
+            trace_lo.append(None)
+            trace_hi.append(None)
+
+    # Build data rows, recording the first and last row (1-based) that each
+    # trace actually contributes a value — needed for #trace_data_range= headers.
+    first_row = [None] * len(traces)
+    last_row  = [None] * len(traces)
+    data_lines = []
+
+    for row_idx, t_val in enumerate(ref_t, start=1):
+        row = [f"{t_val:.10g}"]
+        for i, ((ta, ya), trace) in enumerate(zip(col_slices, traces)):
+            lo, hi = trace_lo[i], trace_hi[i]
+            if lo is None or t_val < lo or t_val > hi:
+                row.append("")        # empty cell — outside this trace's time range
+            else:
+                if len(ta) < 2:
+                    row.append(f"{ya[0]:.10g}" if len(ya) else "")
+                else:
+                    idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
+                    idx = max(0, min(idx, len(ya) - 1))
+                    row.append(f"{ya[idx]:.10g}")
+                if first_row[i] is None:
+                    first_row[i] = row_idx
+                last_row[i] = row_idx
+        data_lines.append(",".join(row))
+
+    # Range headers for traces that don't cover the full exported window.
+    # Omitted when the trace spans every row (no information gain).
+    n_rows = len(ref_t)
+    range_comments = []
+    for i, trace in enumerate(traces):
+        r0, r1 = first_row[i], last_row[i]
+        if r0 is not None and r1 is not None and (r0 != 1 or r1 != n_rows):
+            range_comments.append(
+                f'#trace_data_range={{"{trace.label}",{r0},{r1}}}')
+
+    lines = _meta_header_comments(traces)
+    lines.extend(range_comments)
+    lines.append("time," + ",".join(t.label for t in traces))
+    lines.extend(data_lines)
+    return lines
+
+
+def _build_segmented_csv(traces):
+    """
+    Full-data segmented TraceLab native export.
+    Segmented traces expand into .SEG0, .SEG1, … columns with segment
+    headers; non-segmented traces export as a single column.
+    All data is written without viewport clipping.
+    """
+    import numpy as np
+
+    header_comments = []
+    col_order  = ["Time"]
+    col_arrays = {}
+
+    # Reference time axis: first segment of the first segmented trace.
+    # All LeCroy-style segments share an identical trigger-relative time axis,
+    # so one copy is sufficient for the Time column.
+    ref_time = None
+    for trace in traces:
+        if trace.segments is not None:
+            s0, e0 = trace.segments[0][0], trace.segments[0][1]
+            ref_time = trace.time_axis[s0:e0]
+            break
+    if ref_time is None:
+        ref_time = traces[0].time_axis
+    col_arrays["Time"] = ref_time
+    n_rows = len(ref_time)
+
+    for trace in traces:
+        if trace.segments is not None:
+            seg_col_names = [f"{trace.label}.SEG{i}"
+                             for i in range(len(trace.segments))]
+
+            # #segments= header (named-column form)
+            header_comments.append(
+                '#segments=("{}",{})'.format(
+                    trace.label,
+                    ",".join(f'"{n}"' for n in seg_col_names)))
+
+            # #segment_meta= and per-segment column data
+            for i, (s, e, t0_abs, t0_rel) in enumerate(trace.segments):
+                seg_data = trace.processed_data[s:e]
+                header_comments.append(
+                    f'#segment_meta={{"{trace.label}",{i},1,'
+                    f'{len(seg_data)},{t0_abs:.6f},{t0_rel:.10g}}}')
+                col_order.append(seg_col_names[i])
+                col_arrays[seg_col_names[i]] = seg_data
+
+            # #trace_settings= header  (positional: name, primary_segment, viewmode)
+            ps  = trace.primary_segment
+            vm  = trace.non_primary_viewmode or ""
+            header_comments.append(
+                f'#trace_settings={{"{trace.label}",'
+                f'{"null" if ps is None else ps},'
+                f'"{vm}"}}')
+        else:
+            col_order.append(trace.label)
+            col_arrays[trace.label] = trace.processed_data
+
+    lines = _meta_header_comments(traces) + header_comments
+    lines.append(",".join(col_order))
+    for row_idx in range(n_rows):
+        row = [f"{ref_time[row_idx]:.10g}"]
+        for col_name in col_order[1:]:
+            arr = col_arrays.get(col_name)
+            if arr is not None and row_idx < len(arr):
+                row.append(f"{arr[row_idx]:.10g}")
+            else:
+                row.append("")   # empty cell for shorter segments
+        lines.append(",".join(row))
+    return lines
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -178,6 +387,12 @@ class MainWindow(QMainWindow):
         self._import_replace          = self._settings.get("import_replace", True)
         self._import_reset_view       = self._settings.get("import_reset_view", True)
         self._import_reset_retrigger  = self._settings.get("import_reset_retrigger", True)
+        self._rejection_enabled       = self._settings.get("rejection_enabled", False)
+        self._rejection_max_lines     = self._settings.get("rejection_max_lines", 10)
+        self._export_segments_mode    = self._settings.get("export_segments_mode", "all")
+        self._segments_dim_opacity    = self._settings.get("segments_dim_opacity", 50)
+        self._segments_dash_size      = self._settings.get("segments_dash_size", 8)
+        self._segments_gap_size       = self._settings.get("segments_gap_size", 4)
         self._y_lock_auto = self._settings.get("y_lock_auto", True)
         self._fft_min_freq = self._settings.get("fft_min_freq", 1.0)
         self._viewport_min_pts = self._settings.get("viewport_min_pts", 1024)
@@ -458,6 +673,17 @@ class MainWindow(QMainWindow):
         self._theme_submenu = view_menu.addMenu("Theme")
         self._rebuild_theme_menu()
 
+        view_menu.addSeparator()
+        seg_view_menu = view_menu.addMenu("Segments")
+        seg_view_menu.setToolTipsVisible(True)
+        seg_view_menu.addAction("Dim Opacity…").triggered.connect(
+            self._dlg_segments_dim_opacity)
+        seg_dash_menu = seg_view_menu.addMenu("Dash Settings")
+        seg_dash_menu.addAction("Dash Size…").triggered.connect(
+            self._dlg_segments_dash_size)
+        seg_dash_menu.addAction("Gap Size…").triggered.connect(
+            self._dlg_segments_gap_size)
+
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
         a = analysis_menu.addAction("FFT...")
@@ -707,6 +933,57 @@ class MainWindow(QMainWindow):
         self._act_allow_force_labels.triggered.connect(
             self._toggle_allow_theme_force_labels)
 
+        settings_menu.addSeparator()
+        import_menu = settings_menu.addMenu("Import")
+        import_menu.setToolTipsVisible(True)
+        rejection_menu = import_menu.addMenu("Rejection")
+        rejection_menu.setToolTipsVisible(True)
+        rejection_menu.setToolTip(
+            "Configure if and how many lines between header and data\n"
+            "get rejected if they are malformed before an error occurs.")
+
+        self._act_rejection_enabled = rejection_menu.addAction("Enabled")
+        self._act_rejection_enabled.setCheckable(True)
+        self._act_rejection_enabled.setChecked(self._rejection_enabled)
+        self._act_rejection_enabled.setToolTip(
+            "When enabled, lines between the column header and the first\n"
+            "valid data row are silently skipped if they contain no\n"
+            "recognisable numeric data (wrong column count, pure text, etc.).\n"
+            "Useful for formats that embed extra comment or unit rows.")
+        self._act_rejection_enabled.triggered.connect(
+            self._toggle_rejection_enabled)
+
+        rejection_menu.addAction("Max Lines…").triggered.connect(
+            self._dlg_rejection_max_lines)
+
+        settings_menu.addSeparator()
+        export_menu = settings_menu.addMenu("Export")
+        export_menu.setToolTipsVisible(True)
+        seg_export_menu = export_menu.addMenu("Segments")
+        seg_export_menu.setToolTipsVisible(True)
+        seg_export_group = QActionGroup(self)
+        seg_export_group.setExclusive(True)
+        self._act_export_seg_all = seg_export_menu.addAction("Export All Always")
+        self._act_export_seg_all.setCheckable(True)
+        self._act_export_seg_all.setToolTip(
+            "Export every segment of a segmented trace.\n"
+            "Each segment becomes its own column (Trace.SEG0, Trace.SEG1, …).")
+        self._act_export_seg_primary = seg_export_menu.addAction("Export Primary Only")
+        self._act_export_seg_primary.setCheckable(True)
+        self._act_export_seg_primary.setToolTip(
+            "Export only the primary segment of each segmented trace.\n"
+            "If no primary is set, segment 0 is used.\n"
+            "The exported file is non-segmented (no #segments= headers).")
+        seg_export_group.addAction(self._act_export_seg_all)
+        seg_export_group.addAction(self._act_export_seg_primary)
+        (self._act_export_seg_primary
+         if self._export_segments_mode == "primary_only"
+         else self._act_export_seg_all).setChecked(True)
+        self._act_export_seg_all.triggered.connect(
+            lambda: self._set_export_segments_mode("all"))
+        self._act_export_seg_primary.triggered.connect(
+            lambda: self._set_export_segments_mode("primary_only"))
+
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Reload Plugins").triggered.connect(
@@ -804,7 +1081,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        result = load_csv(path)
+        result = load_csv(path,
+                          rejection_enabled=self._rejection_enabled,
+                          rejection_max_lines=self._rejection_max_lines)
         if result.error:
             QMessageBox.critical(self, "Load Error", result.error)
             return
@@ -830,7 +1109,8 @@ class MainWindow(QMainWindow):
         if dlg.replace_existing:
             self._clear_all(confirm=False)
 
-        self._batch_import_traces(dlg.result_traces)
+        self._batch_import_traces(dlg.result_traces,
+                                   replace_existing=dlg.replace_existing)
 
         if dlg.reset_view:
             meta = result.metadata
@@ -842,19 +1122,45 @@ class MainWindow(QMainWindow):
 
         self._update_status()
 
-    def _batch_import_traces(self, traces: List[TraceModel]) -> None:
+    def _unique_trace_name(self, name: str) -> str:
+        """Return name, or name_001 / name_002 … if name is already taken."""
+        existing = {t.name for t in self._traces}
+        if name not in existing:
+            return name
+        i = 1
+        while True:
+            candidate = f"{name}_{i:03d}"
+            if candidate not in existing:
+                return candidate
+            i += 1
+
+    def _batch_import_traces(self, traces: List[TraceModel],
+                             replace_existing: bool = True) -> None:
         """Add/replace multiple traces in a single plot rebuild.
-        Used by _open_csv so 8 traces cause one rebuild, not eight."""
+        Used by _open_csv so 8 traces cause one rebuild, not eight.
+        When replace_existing=False, name collisions get a _001/_002 suffix
+        instead of overwriting the existing trace."""
         for trace in traces:
             existing_names = [t.name for t in self._traces]
             if trace.name in existing_names:
-                idx = existing_names.index(trace.name)
-                old_trace = self._traces[idx]
-                trace.color = old_trace.color
-                trace.theme_color_index = old_trace.theme_color_index
-                trace.use_theme_color = old_trace.use_theme_color
-                self._traces[idx] = trace
-                self._channel_panel.refresh_all()
+                if replace_existing:
+                    idx = existing_names.index(trace.name)
+                    old_trace = self._traces[idx]
+                    trace.color = old_trace.color
+                    trace.theme_color_index = old_trace.theme_color_index
+                    trace.use_theme_color = old_trace.use_theme_color
+                    self._traces[idx] = trace
+                    self._channel_panel.refresh_all()
+                else:
+                    # Keep both — rename the incoming trace to avoid collision
+                    unique = self._unique_trace_name(trace.name)
+                    trace.name  = unique
+                    trace.label = unique
+                    n = len(self._traces)
+                    trace.reset_color_to_theme(n)
+                    trace.sync_theme_color(self.theme.active_theme)
+                    self._traces.append(trace)
+                    self._channel_panel.add_trace(trace)
             else:
                 n = len(self._traces)
                 trace.reset_color_to_theme(n)
@@ -939,23 +1245,15 @@ class MainWindow(QMainWindow):
         if not visible:
             return
 
-        import numpy as np
-        ref_t = visible[0].time_axis
-        mask = (ref_t >= x0) & (ref_t <= x1)
-        ref_t = ref_t[mask]
+        any_segmented = any(t.segments is not None for t in visible)
+        primary_only  = (self._export_segments_mode == "primary_only")
 
-        lines = ["time," + ",".join(t.label for t in visible)]
-        for t_val in ref_t:
-            row = [f"{t_val:.10g}"]
-            for trace in visible:
-                ta = trace.time_axis
-                ya = trace.processed_data
-                idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
-                idx = max(0, min(idx, len(ya) - 1))
-                row.append(f"{ya[idx]:.10g}")
-            lines.append(",".join(row))
+        if any_segmented and not primary_only:
+            lines = _build_segmented_csv(visible)
+        else:
+            lines = _build_flat_csv(visible, x0, x1, primary_only=primary_only)
 
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         self._status_lbl.setText(f"Exported: {os.path.basename(path)}")
 
@@ -1124,6 +1422,58 @@ class MainWindow(QMainWindow):
             self._lane_label_size, self._show_lane_labels, checked,
             self._lane_label_spacing)
         self._save_settings()
+
+    def _toggle_rejection_enabled(self, checked: bool):
+        self._rejection_enabled = checked
+        self._settings["rejection_enabled"] = checked
+        self._save_settings()
+
+    def _dlg_rejection_max_lines(self):
+        val, ok = QInputDialog.getInt(
+            self, "Rejection — Max Lines",
+            "Maximum number of malformed lines to skip between the\n"
+            "column header and the first valid data row.\n"
+            "Lines beyond this limit are passed through normally.",
+            self._rejection_max_lines, 1, 1000, 1)
+        if ok:
+            self._rejection_max_lines = val
+            self._settings["rejection_max_lines"] = val
+            self._save_settings()
+
+    def _set_export_segments_mode(self, mode: str):
+        self._export_segments_mode = mode
+        self._settings["export_segments_mode"] = mode
+        self._save_settings()
+
+    def _dlg_segments_dim_opacity(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Dim Opacity",
+            "Opacity for non-primary segments when dimmed (10 – 90 %):",
+            self._segments_dim_opacity, 10, 90, 5)
+        if ok:
+            self._segments_dim_opacity = val
+            self._settings["segments_dim_opacity"] = val
+            self._save_settings()
+
+    def _dlg_segments_dash_size(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Dash Size",
+            "Drawn dash length in pixels for non-primary segments (1 – 50):",
+            self._segments_dash_size, 1, 50, 1)
+        if ok:
+            self._segments_dash_size = val
+            self._settings["segments_dash_size"] = val
+            self._save_settings()
+
+    def _dlg_segments_gap_size(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Gap Size",
+            "Gap length in pixels between dashes for non-primary segments (1 – 50):",
+            self._segments_gap_size, 1, 50, 1)
+        if ok:
+            self._segments_gap_size = val
+            self._settings["segments_gap_size"] = val
+            self._save_settings()
 
     # ── Cursors ────────────────────────────────────────────────────────
 

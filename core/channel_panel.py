@@ -8,10 +8,35 @@ from PyQt6.QtWidgets import (
     QCheckBox, QScrollArea, QMenu, QColorDialog, QSizePolicy,
     QAbstractItemView, QListWidget, QListWidgetItem, QFrame
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QMimeData
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QMimeData, QObject, QEvent, QPoint
 from PyQt6.QtGui import QColor, QFont, QDrag, QPixmap, QPainter, QCursor
 from typing import List, Dict
 from core.trace_model import TraceModel
+
+
+class _LabelClickFilter(QObject):
+    """Event filter installed on a QLabel so clicking it toggles a checkbox.
+    Tracks press position; only toggles on release if the mouse didn't move
+    (i.e. it was a click, not the start of a drag)."""
+
+    def __init__(self, checkbox, parent=None):
+        super().__init__(parent)
+        self._chk = checkbox
+        self._press_pos: QPoint | None = None
+
+    def eventFilter(self, obj, event):
+        t = event.type()
+        if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.pos()
+            return False   # let press propagate for drag initiation
+        if t == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            if self._press_pos is not None:
+                delta = event.pos() - self._press_pos
+                if abs(delta.x()) < 6 and abs(delta.y()) < 6:
+                    self._chk.toggle()
+            self._press_pos = None
+            return False
+        return False
 
 
 class ChannelRow(QWidget):
@@ -55,6 +80,10 @@ class ChannelRow(QWidget):
         self.lbl.setStyleSheet(f"color: {trace.color};")
         self.lbl.setSizePolicy(QSizePolicy.Policy.Expanding,
                                 QSizePolicy.Policy.Preferred)
+        self.lbl.setToolTip("Click to toggle visibility")
+        self.lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._lbl_click_filter = _LabelClickFilter(self.chk_vis, self.lbl)
+        self.lbl.installEventFilter(self._lbl_click_filter)
         layout.addWidget(self.lbl)
 
     def _update_color_btn(self):

@@ -1867,9 +1867,16 @@ class MainWindow(QMainWindow):
     # ── Channel order ─────────────────────────────────────────────────
 
     def _on_channel_order_changed(self, name_order: list):
-        """Channel panel drag-reorder → update plot and cursor table."""
+        """Channel panel drag-reorder → update plot, cursor table and status bar."""
         self._plot.reorder_traces(name_order)
         self._cursor_panel.set_trace_order(name_order)
+        # Keep self._traces in channel-panel order so the status bar blocks
+        # appear in the same sequence as the trace panel rows.
+        name_to_trace = {t.name: t for t in self._traces}
+        ordered = [name_to_trace[n] for n in name_order if n in name_to_trace]
+        extras  = [t for t in self._traces if t.name not in set(name_order)]
+        self._traces = ordered + extras
+        self._refresh_status_bar()
 
     # ── Settings dialogs ───────────────────────────────────────────────
 

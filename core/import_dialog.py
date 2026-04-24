@@ -120,6 +120,18 @@ class ColumnConfigRow(QWidget):
         lbl.setMinimumWidth(110)
         lbl.setMaximumWidth(180)
         lbl.setFont(QFont("Courier New", 9))
+        # Stats shown as a tooltip rather than inline to save horizontal space
+        if self._is_numeric and len(data) > 0:
+            try:
+                d = data.astype(float)
+                valid = d[np.isfinite(d)]
+                if len(valid):
+                    lbl.setToolTip(
+                        f"n={len(data)}  min={valid.min():.3g}  max={valid.max():.3g}")
+                else:
+                    lbl.setToolTip(f"n={len(data)}  (no finite values)")
+            except Exception:
+                lbl.setToolTip(f"n={len(data)}")
         layout.addWidget(lbl)
 
         _default_label = (col_info.display_name if col_info and col_info.display_name
@@ -157,15 +169,17 @@ class ColumnConfigRow(QWidget):
             "Decimal: use '.' or ',' — both accepted")
         sl.addWidget(self.edit_offset)
 
+        self.scale_widget.setEnabled(False)
+        layout.addWidget(self.scale_widget)
+
+        # Unit is always visible/editable — useful even without gain/offset scaling
         _default_unit = (col_info.unit if col_info and col_info.unit
                          else (meta.unit or "V"))
+        layout.addWidget(QLabel("Unit:"))
         self.edit_unit = SciLineEdit(_default_unit)
         self.edit_unit.setFixedWidth(38)
         self.edit_unit.setToolTip("Physical unit label (V, A, °C, …)")
-        sl.addWidget(self.edit_unit)
-
-        self.scale_widget.setEnabled(False)
-        layout.addWidget(self.scale_widget)
+        layout.addWidget(self.edit_unit)
 
         layout.addStretch()
 
@@ -177,23 +191,7 @@ class ColumnConfigRow(QWidget):
             f"background-color: {color}; border: 1px solid #555;")
         self.btn_color.clicked.connect(self._pick_color)
         layout.addWidget(self.btn_color)
-
-        # Stats
-        if self._is_numeric and len(data) > 0:
-            try:
-                d = data.astype(float)
-                valid = d[np.isfinite(d)]
-                if len(valid):
-                    stats = (f"n={len(data)}"
-                             f"  min={valid.min():.3g}"
-                             f"  max={valid.max():.3g}")
-                else:
-                    stats = f"n={len(data)}"
-            except Exception:
-                stats = f"n={len(data)}"
-            lbl_stats = QLabel(stats)
-            lbl_stats.setStyleSheet("color: #888; font-size: 9px;")
-            layout.addWidget(lbl_stats)
+        # (Stats moved to tooltip on the column name label above)
 
         if not self._is_numeric:
             self.chk_enable.setChecked(False)
@@ -373,6 +371,33 @@ class ImportDialog(QDialog):
             tb.addWidget(b)
         tb.addStretch()
         cl.addLayout(tb)
+
+        # ── Column header row ─────────────────────────────────────────
+        col_hdr = QWidget()
+        col_hdr.setStyleSheet(
+            "background: #12122a; border-bottom: 1px solid #2a2a4a;")
+        hdr_layout = QHBoxLayout(col_hdr)
+        hdr_layout.setContentsMargins(4, 2, 4, 2)
+        hdr_layout.setSpacing(8)
+        _hdr_style = "color: #6060a0; font-size: 9px;"
+        for _txt, _w, _stretch in [
+            ("✓",             20, 0),
+            ("Column",       120, 0),
+            ("Display Label", 90, 0),
+            ("Scale",         50, 0),
+            ("Gain / Offset", 160, 1),
+            ("Unit",          38, 0),
+            ("",              22, 0),   # color swatch column
+        ]:
+            _h = QLabel(_txt)
+            _h.setStyleSheet(_hdr_style)
+            if _stretch:
+                _h.setMinimumWidth(_w)
+                hdr_layout.addWidget(_h, 1)
+            else:
+                _h.setFixedWidth(_w)
+                hdr_layout.addWidget(_h)
+        cl.addWidget(col_hdr)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

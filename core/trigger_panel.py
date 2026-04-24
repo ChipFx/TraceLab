@@ -18,7 +18,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QComboBox, QPushButton, QGroupBox, QCheckBox, QFrame,
-    QSizePolicy
+    QSizePolicy, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -59,76 +59,93 @@ class TriggerPanel(QWidget):
 
         grp = QGroupBox("Trigger Settings")
         gl = QGridLayout(grp)
-        gl.setSpacing(6)
+        gl.setSpacing(4)
+        gl.setContentsMargins(6, 14, 6, 6)
 
-        # Channel selector
+        # Row 0: Channel (full width)
         gl.addWidget(QLabel("Channel:"), 0, 0)
         self.combo_ch = QComboBox()
         self.combo_ch.setToolTip("Trace to trigger on")
-        gl.addWidget(self.combo_ch, 0, 1)
+        gl.addWidget(self.combo_ch, 0, 1, 1, 3)
 
-        # Edge type
+        # Row 1: Edge | Level on the same row
         gl.addWidget(QLabel("Edge:"), 1, 0)
         self.combo_edge = QComboBox()
         self.combo_edge.addItems(["Rising ↑", "Falling ↓", "Either ↕"])
         gl.addWidget(self.combo_edge, 1, 1)
-
-        # Threshold
-        gl.addWidget(QLabel("Level:"), 2, 0)
+        gl.addWidget(QLabel("Level:"), 1, 2)
         self.edit_level = SciLineEdit("0")
         self.edit_level.setToolTip(
             "Threshold value (in trace units after scaling).\n"
             "Fractions and metric suffixes supported: 1.5, 500m")
-        gl.addWidget(self.edit_level, 2, 1)
+        gl.addWidget(self.edit_level, 1, 3)
 
-        # Search start
-        gl.addWidget(QLabel("Search from:"), 3, 0)
-        # "Find Trigger" always starts from the beginning of data.
-        # "Next ->" continues from after the last trigger.
-        # No combo needed — kept as label for clarity.
-        lbl_search = QLabel("Find: always from start\nNext →: from last")
-        lbl_search.setStyleSheet("color: #888; font-size: 9px;")
-        gl.addWidget(lbl_search, 3, 1)
+        # Row 2: Search direction radios
+        gl.addWidget(QLabel("Search:"), 2, 0)
+        self.radio_search_start = QRadioButton("Start")
+        self.radio_search_end   = QRadioButton("End")
+        self.radio_search_start.setChecked(True)
+        self.radio_search_start.setToolTip("Find Trigger searches forward from the beginning")
+        self.radio_search_end.setToolTip("Find Trigger searches backward from the end")
+        _bg = QButtonGroup(grp)
+        _bg.addButton(self.radio_search_start)
+        _bg.addButton(self.radio_search_end)
+        self.radio_search_start.toggled.connect(self._on_search_direction_changed)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
+        search_row.addWidget(self.radio_search_start)
+        search_row.addWidget(self.radio_search_end)
+        search_row.addStretch()
+        search_container = QWidget()
+        search_container.setLayout(search_row)
+        gl.addWidget(search_container, 2, 1, 1, 3)
 
+        gl.setColumnStretch(1, 1)
+        gl.setColumnStretch(3, 1)
         layout.addWidget(grp)
 
-        # Options
+        # On Trigger options — 2×2 grid
         opt_grp = QGroupBox("On Trigger")
-        ol = QVBoxLayout(opt_grp)
-        self.chk_cursor_a = QCheckBox("Place Cursor A at trigger")
+        og = QGridLayout(opt_grp)
+        og.setSpacing(4)
+        og.setContentsMargins(6, 14, 6, 6)
+        self.chk_cursor_a = QCheckBox("Place Cur. A")
         self.chk_cursor_a.setChecked(True)
-        self.chk_set_t0   = QCheckBox("Set t=0 to trigger point")
+        self.chk_set_t0 = QCheckBox("Set t=0")
         self.chk_set_t0.setChecked(False)
         self.chk_set_t0.setToolTip(
             "Shifts the time axis so the trigger point becomes t=0.\n"
             "All earlier samples appear with negative time.")
-        self.chk_zoom     = QCheckBox("Zoom to show trigger context")
+        self.chk_zoom = QCheckBox("Zoom to trig")
         self.chk_zoom.setChecked(True)
-        self.chk_auto_retrigger = QCheckBox("Auto-update retrigger")
+        self.chk_auto_retrigger = QCheckBox("Auto-update")
         self.chk_auto_retrigger.setChecked(False)
         self.chk_auto_retrigger.setToolTip(
             "Automatically recalculate persistence / averaging / interpolation\n"
             "when you zoom or scroll.  Disable on large datasets to keep the\n"
             "app responsive.")
-        ol.addWidget(self.chk_cursor_a)
-        ol.addWidget(self.chk_set_t0)
-        ol.addWidget(self.chk_zoom)
-        ol.addWidget(self.chk_auto_retrigger)
+        og.addWidget(self.chk_cursor_a,    0, 0)
+        og.addWidget(self.chk_set_t0,      0, 1)
+        og.addWidget(self.chk_zoom,        1, 0)
+        og.addWidget(self.chk_auto_retrigger, 1, 1)
         layout.addWidget(opt_grp)
 
-        # Trigger button + status
+        # Find Trigger + Next → side by side (60/40 split)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
         self.btn_trigger = QPushButton("Find Trigger")
         self.btn_trigger.setStyleSheet(
             "background: #1a4a1a; color: #60e060; font-weight: bold; "
             "padding: 6px; border: 1px solid #40a040; border-radius: 3px;")
         self.btn_trigger.clicked.connect(self._find_trigger)
-        layout.addWidget(self.btn_trigger)
+        btn_row.addWidget(self.btn_trigger, 3)
 
         self.btn_next = QPushButton("Next →")
         self.btn_next.setEnabled(False)
         self.btn_next.setToolTip("Find next trigger after the last one")
         self.btn_next.clicked.connect(self._find_next)
-        layout.addWidget(self.btn_next)
+        btn_row.addWidget(self.btn_next, 2)
+        layout.addLayout(btn_row)
 
         self.btn_retrigger_update = QPushButton("Update Retrigger")
         self.btn_retrigger_update.setEnabled(False)
@@ -148,6 +165,14 @@ class TriggerPanel(QWidget):
         layout.addWidget(self.lbl_status)
 
         layout.addStretch()
+
+    def _on_search_direction_changed(self, is_start: bool):
+        if is_start:
+            self.btn_next.setText("Next →")
+            self.btn_next.setToolTip("Find next trigger after the last one")
+        else:
+            self.btn_next.setText("← Prev")
+            self.btn_next.setToolTip("Find previous trigger before the last one")
 
     def update_traces(self, traces: List[TraceModel]):
         """Refresh the channel selector when traces change."""
@@ -181,17 +206,24 @@ class TriggerPanel(QWidget):
         t = trace.time_axis
         y = trace.processed_data
 
-        # "Find Trigger" always starts from the beginning of data (i_start=0).
-        # "Next ->" (search_after set) starts from just after the last trigger.
-        if search_after is not None:
-            i_start = int(np.searchsorted(t, search_after)) + 1
+        search_from_end = self.radio_search_end.isChecked()
+
+        if search_from_end:
+            # Backward search: "Find Trigger" from the end; "← Prev" from before last
+            if search_after is not None:
+                i_end = int(np.searchsorted(t, search_after)) - 2
+            else:
+                i_end = len(t) - 2
+            i_end = max(0, min(i_end, len(t) - 2))
+            t_pos = self._find_crossing_backward(t, y, level, edge_idx, i_end)
         else:
-            i_start = 0
-
-        i_start = max(0, min(i_start, len(t) - 2))
-
-        # Find crossing
-        t_pos = self._find_crossing(t, y, level, edge_idx, i_start)
+            # Forward search: "Find Trigger" from the start; "Next →" from after last
+            if search_after is not None:
+                i_start = int(np.searchsorted(t, search_after)) + 1
+            else:
+                i_start = 0
+            i_start = max(0, min(i_start, len(t) - 2))
+            t_pos = self._find_crossing(t, y, level, edge_idx, i_start)
 
         if t_pos is None:
             self.lbl_status.setText(
@@ -254,6 +286,36 @@ class TriggerPanel(QWidget):
             else:
                 frac = (level - a) / denom
 
+            t0, t1 = float(t[i]), float(t[i + 1])
+            return t0 + frac * (t1 - t0)
+
+        return None
+
+    @staticmethod
+    def _find_crossing_backward(t: np.ndarray, y: np.ndarray,
+                                level: float, edge_idx: int,
+                                i_end: int) -> Optional[float]:
+        """
+        Find last threshold crossing at or before i_end, searching backward.
+        Uses the same edge definitions as _find_crossing.
+        """
+        if len(t) < 2:
+            return None
+
+        for i in range(min(i_end, len(y) - 2), -1, -1):
+            a, b = float(y[i]), float(y[i + 1])
+            is_rising  = (a < level) and (b >= level)
+            is_falling = (a > level) and (b <= level)
+
+            if edge_idx == 0 and not is_rising:
+                continue
+            if edge_idx == 1 and not is_falling:
+                continue
+            if edge_idx == 2 and not (is_rising or is_falling):
+                continue
+
+            denom = b - a
+            frac = 0.0 if denom == 0 else (level - a) / denom
             t0, t1 = float(t[i]), float(t[i + 1])
             return t0 + frac * (t1 - t0)
 

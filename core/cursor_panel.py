@@ -121,7 +121,7 @@ class CursorPanel(QWidget):
         sep1.setStyleSheet("color: #444;")
         layout.addWidget(sep1)
 
-        # ── Time + delta readout ───────────────────────────────────────
+        # ── Time + delta readout (2×2: A|B on row 0, Δt|1/Δt on row 1) ──
         grid = QGridLayout()
         grid.setSpacing(2)
         grid.setContentsMargins(2, 2, 2, 2)
@@ -135,22 +135,23 @@ class CursorPanel(QWidget):
 
         lbl_b_key = QLabel("B:")
         lbl_b_key.setStyleSheet("color: #00ccff; font-weight: bold;")
-        grid.addWidget(lbl_b_key, 1, 0)
+        grid.addWidget(lbl_b_key, 0, 2)
         self.lbl_b_time = QLabel("---")
         self.lbl_b_time.setFont(QFont("Courier New", 9))
-        grid.addWidget(self.lbl_b_time, 1, 1)
+        grid.addWidget(self.lbl_b_time, 0, 3)
 
-        grid.addWidget(QLabel("Δt:"), 2, 0)
+        grid.addWidget(QLabel("Δt:"), 1, 0)
         self.lbl_dt = QLabel("---")
         self.lbl_dt.setFont(QFont("Courier New", 9))
-        grid.addWidget(self.lbl_dt, 2, 1)
+        grid.addWidget(self.lbl_dt, 1, 1)
 
-        grid.addWidget(QLabel("1/Δt:"), 3, 0)
+        grid.addWidget(QLabel("1/Δt:"), 1, 2)
         self.lbl_freq = QLabel("---")
         self.lbl_freq.setFont(QFont("Courier New", 9))
-        grid.addWidget(self.lbl_freq, 3, 1)
+        grid.addWidget(self.lbl_freq, 1, 3)
 
         grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
         layout.addLayout(grid)
 
         # ── Separator ──────────────────────────────────────────────────

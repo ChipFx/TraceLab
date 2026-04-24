@@ -226,14 +226,12 @@ class ScopeStatusBar(QWidget):
         while self._ch_layout.count():
             item = self._ch_layout.takeAt(0)
             if item and item.widget():
-                item.widget().setParent(None)
+                item.widget().deleteLater()
         self._ch_blocks.clear()
 
         y_major_divs = y_major_divs or {}
         visible = [t for t in traces if t.visible]
 
-        # Determine theme name from palette (use bar_bg as proxy for phosphor)
-        # Channel blocks now receive the full palette dict
         for trace in visible:
             y_div = y_major_divs.get(trace.name, 0.0)
             mode  = self._trace_interp_modes.get(trace.name, "linear")
@@ -246,7 +244,8 @@ class ScopeStatusBar(QWidget):
             block.show()
 
         n = len(visible)
-        self._ch_container.setFixedWidth(max(n * (BLOCK_W + SEP_W) + 4, BLOCK_W))
+        w = n * (BLOCK_W + SEP_W) + 4 if n > 0 else 0
+        self._ch_container.setFixedWidth(w)
         self._ch_container.setFixedHeight(BAR_H)
 
     def repaint_channel_blocks(self):

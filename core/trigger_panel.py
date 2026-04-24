@@ -87,6 +87,15 @@ class TriggerPanel(QWidget):
         self.radio_search_start.setChecked(True)
         self.radio_search_start.setToolTip("Find Trigger searches forward from the beginning")
         self.radio_search_end.setToolTip("Find Trigger searches backward from the end")
+        _radio_style = (
+            "QRadioButton::indicator {"
+            "  width: 11px; height: 11px; border-radius: 6px;"
+            "  border: 2px solid #666; background: #222; }"
+            "QRadioButton::indicator:checked {"
+            "  background: #60e060; border-color: #40a040; }"
+        )
+        self.radio_search_start.setStyleSheet(_radio_style)
+        self.radio_search_end.setStyleSheet(_radio_style)
         _bg = QButtonGroup(grp)
         _bg.addButton(self.radio_search_start)
         _bg.addButton(self.radio_search_end)
@@ -137,7 +146,7 @@ class TriggerPanel(QWidget):
         self.btn_trigger.setStyleSheet(
             "background: #1a4a1a; color: #60e060; font-weight: bold; "
             "padding: 6px; border: 1px solid #40a040; border-radius: 3px;")
-        self.btn_trigger.clicked.connect(self._find_trigger)
+        self.btn_trigger.clicked.connect(lambda: self._find_trigger())
         btn_row.addWidget(self.btn_trigger, 3)
 
         self.btn_next = QPushButton("Next →")
@@ -226,9 +235,13 @@ class TriggerPanel(QWidget):
             t_pos = self._find_crossing(t, y, level, edge_idx, i_start)
 
         if t_pos is None:
+            edge_name = ("rising" if edge_idx == 0
+                         else "falling" if edge_idx == 1 else "")
+            direction = "before" if search_from_end else "after"
+            bound_t   = float(t[i_end]) if search_from_end else float(t[i_start])
             self.lbl_status.setText(
-                f"No {'rising' if edge_idx==0 else 'falling' if edge_idx==1 else ''} "
-                f"crossing at {level:.4g} found after t={t[i_start]:.6g}")
+                f"No {edge_name} crossing at {level:.4g} "
+                f"found {direction} t={bound_t:.6g}")
             self.btn_next.setEnabled(False)
             return
 

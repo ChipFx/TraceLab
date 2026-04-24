@@ -35,6 +35,12 @@ def _fmt_val(v: float, unit: str = "") -> str:
     """Format a measurement value with SI prefix if a unit is known."""
     if v is None:
         return "---"
+    try:
+        import math
+        if math.isnan(v) or math.isinf(v):
+            return "---"
+    except (TypeError, ValueError):
+        return "---"
     if not unit or unit == "raw":
         # No unit — use plain engineering notation
         a = abs(v)
@@ -227,6 +233,16 @@ class CursorPanel(QWidget):
                 _fmt_val(va, unit) if va is not None else "---"))
             self.table.setItem(i, 2, QTableWidgetItem(
                 _fmt_val(vb, unit) if vb is not None else "---"))
+
+    def clear_readout(self):
+        """Clear all cursor time/value readouts (called when cursors are removed)."""
+        self._cursor_times = {0: None, 1: None}
+        self._trace_values = {}
+        self.lbl_a_time.setText("---")
+        self.lbl_b_time.setText("---")
+        self.lbl_dt.setText("---")
+        self.lbl_freq.setText("---")
+        self.table.setRowCount(0)
 
     def set_trace_order(self, names: List[str]):
         """Update the display order for cursor value table."""

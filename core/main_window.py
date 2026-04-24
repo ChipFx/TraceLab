@@ -534,6 +534,7 @@ class MainWindow(QMainWindow):
         self._cursor_panel.set_t0_at_a.connect(self._cursor_set_t0_at_a)
         self._cursor_panel.jump_to_t0.connect(self._jump_to_t0)
         self._cursor_panel.remove_cursors.connect(self._plot.clear_cursors)
+        self._cursor_panel.remove_cursors.connect(self._cursor_panel.clear_readout)
         right_splitter.addWidget(self._cursor_panel)
 
         self._trigger_panel = TriggerPanel()
@@ -1573,17 +1574,19 @@ class MainWindow(QMainWindow):
             t = trace.time_axis
             y = trace.processed_data
             if len(t):
-                t_mins.append(float(t.min()))
-                t_maxs.append(float(t.max()))
+                t_finite = t[np.isfinite(t)]
+                if len(t_finite):
+                    t_mins.append(float(t_finite.min()))
+                    t_maxs.append(float(t_finite.max()))
             if len(y):
-                y_mins.append(float(y.min()))
-                y_maxs.append(float(y.max()))
+                y_finite = y[np.isfinite(y)]
+                if len(y_finite):
+                    y_mins.append(float(y_finite.min()))
+                    y_maxs.append(float(y_finite.max()))
         if not t_mins:
             self._plot.zoom_full()
             return
         t0, t1 = min(t_mins), max(t_maxs)
-        y0, y1 = min(y_mins), max(y_maxs)
-        pad_y = (y1 - y0) * 0.05 or 0.1
         # Suppress per-lane redraws while setting ranges — one clean refresh at end
         self._plot._set_lanes_suppress(True)
         try:
@@ -1592,12 +1595,18 @@ class MainWindow(QMainWindow):
                     pi = lane.getPlotItem()
                     pi.disableAutoRange()
                     pi.setXRange(t0, t1, padding=0.02)
-                    pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
+                    if y_mins:
+                        y0, y1 = min(y_mins), max(y_maxs)
+                        pad_y = (y1 - y0) * 0.05 or 0.1
+                        pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
             else:
                 pi = self._plot._overlay_widget.getPlotItem()
                 pi.disableAutoRange()
                 pi.setXRange(t0, t1, padding=0.02)
-                pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
+                if y_mins:
+                    y0, y1 = min(y_mins), max(y_maxs)
+                    pad_y = (y1 - y0) * 0.05 or 0.1
+                    pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
         finally:
             self._plot._set_lanes_suppress(False)
             self._plot.refresh_all()
@@ -1863,7 +1872,7 @@ class MainWindow(QMainWindow):
                 ag.addAction(a)
                 a.triggered.connect(
                     lambda _, n=name, m=mode:
-                        self._plot.set_interp_mode_for_trace(n, m))
+                        self._on_channel_interp_changed(n, m))
 
     # ── Channel order ─────────────────────────────────────────────────
 

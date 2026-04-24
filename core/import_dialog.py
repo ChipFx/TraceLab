@@ -415,12 +415,22 @@ class ImportDialog(QDialog):
             _trace_palette = ["#F0C040","#40C0F0","#F04080","#40F080","#F08040",
                               "#A040F0","#40F0F0","#F0F040","#F04040","#4080F0"]
 
-        color_idx = 0
+        # First pass: assign color indices only to channels that are enabled by default,
+        # so that 4 enabled channels out of 32 all get distinct colours rather than
+        # landing on the same colour after cycling through the disabled ones.
+        _enabled_color: dict = {}
+        _cidx = 0
+        for col_name, data in self.load_result.columns.items():
+            _is_time = col_name == self.load_result.suggested_time_col
+            _ci = self.load_result.column_infos.get(col_name)
+            _skip = _ci.skip if _ci is not None else False
+            if is_numeric_column(data) and not _is_time and not _skip:
+                _enabled_color[col_name] = _cidx
+                _cidx += 1
+
         for i, (col_name, data) in enumerate(self.load_result.columns.items()):
             is_time = col_name == self.load_result.suggested_time_col
-            color = _trace_palette[color_idx % len(_trace_palette)]
-            if is_numeric_column(data) and not is_time:
-                color_idx += 1
+            color = _trace_palette[_enabled_color.get(col_name, 0) % len(_trace_palette)]
             col_info = self.load_result.column_infos.get(col_name)
             row = ColumnConfigRow(col_name, data, color,
                                   is_time_candidate=is_time, metadata=meta,

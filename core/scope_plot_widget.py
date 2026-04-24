@@ -690,13 +690,16 @@ class TraceLane(pg.PlotWidget):
         y = self.trace.processed_data
         if len(t) < 2:
             return None
+        # Outside the trace's time range → no data at this cursor position
+        if t_pos < float(t[0]) or t_pos > float(t[-1]):
+            return None
         idx = np.searchsorted(t, t_pos)
-        if idx <= 0: return float(y[0])
-        if idx >= len(t): return float(y[-1])
-        t0, t1 = t[idx-1], t[idx]
-        y0, y1 = y[idx-1], y[idx]
-        if t1 == t0: return float(y0)
-        return float(y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0))
+        idx = max(1, min(idx, len(t) - 1))
+        t0, t1 = float(t[idx-1]), float(t[idx])
+        y0, y1 = float(y[idx-1]), float(y[idx])
+        v = y0 if t1 == t0 else y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0)
+        import math
+        return None if math.isnan(v) else v
 
     # ── Persistence / retrigger overlay ───────────────────────────────────────
 
@@ -1341,13 +1344,20 @@ class ScopePlotWidget(QWidget):
             pi.enableAutoRange(axis="y")
 
     def set_interp_mode(self, mode: str):
-        """Switch global interpolation mode. Clears per-trace overrides."""
+        """Switch global interpolation mode. Clears per-trace overrides.
+        Updates existing lanes directly to avoid triggering auto-range."""
         self.interp_mode = mode
-        # Clear per-trace overrides so all traces follow global mode
         for trace in self.traces:
             if hasattr(trace, '_interp_mode_override'):
                 del trace._interp_mode_override
-        self._rebuild()
+        # Update lanes in-place — avoids the enableAutoRange() that _rebuild() triggers
+        vr = self.get_current_view_range()
+        for lane in self._lanes.values():
+            lane.interp_mode = mode
+            lane.refresh_curve()
+        for visual in self._overlay_visuals.values():
+            visual.interp_mode = mode
+            visual.refresh_curve(vr)
 
     def add_trace(self, trace: TraceModel):
         # Allow overwrite if name already exists

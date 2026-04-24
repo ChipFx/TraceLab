@@ -86,6 +86,16 @@ class ChannelRow(QWidget):
         self.lbl.installEventFilter(self._lbl_click_filter)
         layout.addWidget(self.lbl)
 
+        btn_del = QPushButton("✕")
+        btn_del.setFixedSize(16, 16)
+        btn_del.setToolTip("Remove trace")
+        btn_del.setStyleSheet(
+            "QPushButton { color: #884444; border: none; font-size: 9px; "
+            "background: transparent; padding: 0; }"
+            "QPushButton:hover { color: #ff6666; }")
+        btn_del.clicked.connect(lambda: self.remove_requested.emit(self.trace.name))
+        layout.addWidget(btn_del)
+
     def _update_color_btn(self):
         self.btn_color.setStyleSheet(
             f"background-color: {self.trace.color}; "

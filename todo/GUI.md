@@ -80,6 +80,7 @@
 	* A: ----         | B: ----
 	* dt: ----        | 1/dt: ----
  - These should allow a small window to still show a decent amount of trace data at cursor points, rather than showing a line and a half with a scroll bar.
+ - Removing the cursors doesn't clear the A/B data and trace measurements, but it should.
  - Traces now have a segments element, as well as a primary_segment element. Both can be set to none, in which case they should be ignored as "don't exist", otherwise;
 	* segments is a list[(start, end, t0_abs, t0_rel)]; 
 		~ [int, int, float, float] with 1 or more entries, each entry represent a segmentation on the existing data import. If there are 2 or more segment elements in the list, that means that the time_data and raw_data (and possibly processed_data) contain multiple segments captured around a similar trigger on the same channel. The time_data will thus (likely) jump from positive index back to negative index on the edge between two segments. This allows non-segment aware plotters, analysers and modifier plugins still run on the full data, editing all segments the same.

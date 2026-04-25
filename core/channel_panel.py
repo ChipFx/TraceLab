@@ -52,6 +52,7 @@ class ChannelRow(QWidget):
     def __init__(self, trace: TraceModel, parent=None):
         super().__init__(parent)
         self.trace = trace
+        self.scroll_primaries: bool = False  # set by ChannelPanel
         self.setFixedHeight(32)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
 
@@ -209,6 +210,21 @@ class ChannelRow(QWidget):
         self.trace.non_primary_viewmode = mode
         self.segment_changed.emit(self.trace.name)
 
+    def wheelEvent(self, event):
+        segs = getattr(self.trace, 'segments', None)
+        cur = getattr(self.trace, 'primary_segment', None)
+        if (self.scroll_primaries and segs and len(segs) >= 2
+                and cur is not None and 0 <= cur < len(segs)):
+            delta = event.angleDelta().y()
+            step = 1 if delta < 0 else -1
+            new_idx = max(0, min(len(segs) - 1, cur + step))
+            if new_idx != cur:
+                self.trace.primary_segment = new_idx
+                self.segment_changed.emit(self.trace.name)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
 
 class _ChannelGroupHeader(QWidget):
     """Compact group header: collapse toggle + group name + All/None buttons."""
@@ -301,6 +317,7 @@ class ChannelPanel(QWidget):
         self._group_rows: Dict[str, List[str]] = {}     # group -> [trace names]
         self._group_items: Dict[str, QListWidgetItem] = {}  # group -> header item
         self._group_hdr_rows: Dict[str, List] = {}      # group -> [ChannelRow refs]
+        self._scroll_primaries: bool = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -394,6 +411,7 @@ class ChannelPanel(QWidget):
             self._rows[trace.name].refresh()
             return
         row = ChannelRow(trace)
+        row.scroll_primaries = self._scroll_primaries
         row.visibility_changed.connect(self.visibility_changed)
         row.color_changed.connect(self.color_changed)
         row.remove_requested.connect(self._on_remove)
@@ -500,6 +518,12 @@ class ChannelPanel(QWidget):
     def _set_all_visible(self, visible: bool):
         for row in self._rows.values():
             row.chk_vis.setChecked(visible)
+
+    def set_scroll_primaries(self, enabled: bool):
+        """Enable/disable wheel-to-step-primary-segment on all rows."""
+        self._scroll_primaries = enabled
+        for row in self._rows.values():
+            row.scroll_primaries = enabled
 
     def _set_all_interp(self, mode: str):
         for row in self._rows.values():

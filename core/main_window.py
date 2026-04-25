@@ -355,6 +355,7 @@ class MainWindow(QMainWindow):
         s["advanced_ui"] = dict(self._adv_ui)
         s["smart_scale"] = dict(self._smart_scale)
         s["process_segments"] = self._process_segments
+        s["scroll_primaries"] = self._scroll_primaries
         s["lane_label_size"] = self._lane_label_size
         s["show_lane_labels"] = self._show_lane_labels
         s["allow_theme_force_labels"] = self._allow_theme_force_labels
@@ -395,9 +396,9 @@ class MainWindow(QMainWindow):
         self._rejection_enabled       = self._settings.get("rejection_enabled", False)
         self._rejection_max_lines     = self._settings.get("rejection_max_lines", 10)
         self._export_segments_mode    = self._settings.get("export_segments_mode", "all")
-        self._segments_dim_opacity    = self._settings.get("segments_dim_opacity", 50)
-        self._segments_dash_size      = self._settings.get("segments_dash_size", 8)
-        self._segments_gap_size       = self._settings.get("segments_gap_size", 4)
+        self._segments_dim_opacity    = self._settings.get("segments_dim_opacity", 30)
+        self._segments_dash_size      = self._settings.get("segments_dash_size", 6)
+        self._segments_gap_size       = self._settings.get("segments_gap_size", 6)
         self._y_lock_auto = self._settings.get("y_lock_auto", True)
         self._fft_min_freq = self._settings.get("fft_min_freq", 1.0)
         self._viewport_min_pts = self._settings.get("viewport_min_pts", 1024)
@@ -466,6 +467,8 @@ class MainWindow(QMainWindow):
         # ── Segment view rendering ────────────────────────────────────────────
         self._process_segments: bool = bool(
             self._settings.get("process_segments", True))
+        self._scroll_primaries: bool = bool(
+            self._settings.get("scroll_primaries", True))
 
         # ── Periodicity estimation ────────────────────────────────────────────
         # Migrate any old method names that may live in settings.json
@@ -494,6 +497,7 @@ class MainWindow(QMainWindow):
         self._channel_panel.reset_color_requested.connect(self._on_reset_trace_color)
         self._channel_panel.trace_renamed.connect(self._on_trace_renamed)
         self._channel_panel.segment_changed.connect(self._on_segment_changed)
+        self._channel_panel.set_scroll_primaries(self._scroll_primaries)
         self._splitter.addWidget(self._channel_panel)
 
         self._interp_mode = self._settings.get("interp_mode", "linear")
@@ -741,6 +745,13 @@ class MainWindow(QMainWindow):
             "When enabled, only the primary segment is drawn as the main trace;\n"
             "other segments are shown according to their non-primary view mode.")
         self._act_process_segments.toggled.connect(self._toggle_process_segments)
+        self._act_scroll_primaries = seg_view_menu.addAction("Scroll Primaries")
+        self._act_scroll_primaries.setCheckable(True)
+        self._act_scroll_primaries.setChecked(self._scroll_primaries)
+        self._act_scroll_primaries.setToolTip(
+            "When enabled, hovering the mouse over a channel in the panel\n"
+            "and scrolling the wheel steps through its primary segment.")
+        self._act_scroll_primaries.toggled.connect(self._toggle_scroll_primaries)
         seg_view_menu.addSeparator()
         seg_view_menu.addAction("Dim Opacity…").triggered.connect(
             self._dlg_segments_dim_opacity)
@@ -1686,6 +1697,11 @@ class MainWindow(QMainWindow):
     def _toggle_process_segments(self, enabled: bool):
         self._process_segments = enabled
         self._plot.set_process_segments(enabled)
+        self._save_settings()
+
+    def _toggle_scroll_primaries(self, enabled: bool):
+        self._scroll_primaries = enabled
+        self._channel_panel.set_scroll_primaries(enabled)
         self._save_settings()
 
     def _toggle_smart_scale(self, enabled: bool):

@@ -32,8 +32,8 @@
     "response_curve": 0.41
   },
   "viewport_min_pts": 2048,
-  "last_gain": "1",
-  "last_offset": "0",
+  "last_gain": "2.048/4096",
+  "last_offset": "-1.024",
   "last_unit": "V",
   "retrigger_mode": "off",
   "persistence": {
@@ -73,5 +73,20 @@
   "viewport_preset_min": 2048,
   "viewport_preset_max": 50000,
   "rejection_enabled": true,
-  "export_segments_mode": "all"
+  "export_segments_mode": "all",
+  "import_remove_cursors": true,
+  "advanced_ui": {
+    "statusbar_scroll": true,
+    "scroll_zoom_enabled": true,
+    "scroll_list_enabled": true,
+    "scroll_modifier_keys": [
+      "ctrl",
+      "alt",
+      "shift"
+    ],
+    "scroll_default": "zoom",
+    "arrow_mode": "pan_time",
+    "split_min_lane_height": 80
+  },
+  "segments_dim_opacity": 50
 }

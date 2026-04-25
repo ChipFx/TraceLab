@@ -24,7 +24,7 @@ INFO_W = 120
 
 
 def _tdiv(span: float) -> str:
-    return "---" if span <= 0 else _eng(span / 10.0, "s") + "/div"
+    return "---" if span <= 0 else _eng(span, "s") + "/div"
 
 
 def _sep_widget(color: str = "#1e1e38") -> QFrame:

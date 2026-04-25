@@ -450,6 +450,7 @@ class MainWindow(QMainWindow):
             "scroll_default":        "zoom",
             "arrow_mode":            "pan_time",
             "split_min_lane_height": 80,
+            "div_min_pixels":        8,
         }
         self._adv_ui: dict = {**_adv_defaults,
                               **self._settings.get("advanced_ui", {})}
@@ -1828,8 +1829,29 @@ class MainWindow(QMainWindow):
             self._traces, x_major_div, trig_info, y_major_divs,
             sinc_active, settings=self._settings)
 
+    def _finest_visible_tick(self, ticks: list, span: float, pixels: float) -> float:
+        """Return the finest tick level that occupies at least div_min_pixels px.
+
+        ticks  — list of (spacing, offset) from pyqtgraph tickSpacing(), coarsest→finest
+        span   — visible range in data units (e.g. seconds or volts)
+        pixels — axis length in pixels (width for X, height for Y)
+
+        Iterates finest→coarsest and returns the first level whose pixel spacing
+        meets the threshold from advanced_ui['div_min_pixels'] (default 8 px).
+        Falls back to the major (coarsest) level if nothing qualifies."""
+        if not ticks or span <= 0 or pixels <= 0:
+            return float(ticks[0][0]) if ticks else 0.0
+        min_px = float(self._adv_ui.get("div_min_pixels", 8))
+        for spacing, _ in reversed(ticks):   # finest → coarsest
+            if spacing <= 0:
+                continue
+            px = pixels * (spacing / span)
+            if px >= min_px:
+                return float(spacing)
+        return float(ticks[0][0])   # fallback: major tick
+
     def _get_x_major_tick(self) -> float:
-        """Return the actual major X tick spacing in data units (seconds)."""
+        """Return the finest X tick spacing that is visually resolvable."""
         try:
             if self._plot._lanes:
                 lane = next(iter(self._plot._lanes.values()))
@@ -1838,7 +1860,7 @@ class MainWindow(QMainWindow):
                 w = lane.width() or 800
                 ticks = ax.tickSpacing(vr[0], vr[1], w)
                 if ticks:
-                    return float(ticks[0][0])
+                    return self._finest_visible_tick(ticks, vr[1] - vr[0], w)
             elif self._plot._mode == "overlay":
                 pi = self._plot._overlay_widget.getPlotItem()
                 ax = pi.getAxis('bottom')
@@ -1846,21 +1868,21 @@ class MainWindow(QMainWindow):
                 w = self._plot._overlay_widget.width() or 800
                 ticks = ax.tickSpacing(vr[0], vr[1], w)
                 if ticks:
-                    return float(ticks[0][0])
+                    return self._finest_visible_tick(ticks, vr[1] - vr[0], w)
         except Exception:
             pass
         x0, x1 = self._plot.get_current_view_range()
         return (x1 - x0) / 10.0
 
     def _get_y_major_tick(self, lane) -> float:
-        """Return the actual major Y tick spacing for a lane."""
+        """Return the finest Y tick spacing that is visually resolvable."""
         try:
             ax = lane.getPlotItem().getAxis('left')
             vr = lane.getPlotItem().viewRange()[1]
             h = lane.height() or 300
             ticks = ax.tickSpacing(vr[0], vr[1], h)
             if ticks:
-                return float(ticks[0][0])
+                return self._finest_visible_tick(ticks, vr[1] - vr[0], h)
         except Exception:
             pass
         return 0.0
@@ -1904,8 +1926,13 @@ class MainWindow(QMainWindow):
                     pi = lane.getPlotItem()
                     pi.disableAutoRange()
                     pi.setXRange(t0, t1, padding=0.02)
-                    if y_mins:
-                        y0, y1 = min(y_mins), max(y_maxs)
+                    # Per-lane Y range — avoids forcing mV-scale lanes to the
+                    # global V-scale range, which would produce nonsense Y/div.
+                    y = lane.trace.processed_data
+                    y_finite = y[np.isfinite(y)] if len(y) else np.array([])
+                    if len(y_finite):
+                        y0 = float(y_finite.min())
+                        y1 = float(y_finite.max())
                         pad_y = (y1 - y0) * 0.05 or 0.1
                         pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
             else:

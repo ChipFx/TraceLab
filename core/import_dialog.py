@@ -550,6 +550,12 @@ class ImportDialog(QDialog):
             "applied immediately to new data before you have had a chance\n"
             "to configure the trigger for the new file.")
         og.addWidget(self.chk_reset_retrigger)
+        self.chk_remove_cursors = QCheckBox("Remove cursors on import")
+        self.chk_remove_cursors.setChecked(
+            self._settings.get("import_remove_cursors", True))
+        self.chk_remove_cursors.setToolTip(
+            "Clear both cursors and their readouts when import completes.")
+        og.addWidget(self.chk_remove_cursors)
         og.addStretch()
         layout.addWidget(opt_box)
 
@@ -781,6 +787,7 @@ class ImportDialog(QDialog):
         self.replace_existing    = self.chk_replace.isChecked()
         self.reset_view          = self.chk_reset_view.isChecked()
         self.reset_retrigger     = self.chk_reset_retrigger.isChecked()
+        self.remove_cursors      = self.chk_remove_cursors.isChecked()
         # Persist last-used global scale values
         self._settings["last_gain"]   = self.edit_global_gain.text().strip()
         self._settings["last_offset"] = self.edit_global_offset.text().strip()

@@ -1103,9 +1103,14 @@ class MainWindow(QMainWindow):
         self._settings["import_replace"]          = self._import_replace
         self._settings["import_reset_view"]       = self._import_reset_view
         self._settings["import_reset_retrigger"]  = dlg.reset_retrigger
+        self._settings["import_remove_cursors"]   = dlg.remove_cursors
 
         if dlg.reset_retrigger:
             self._set_retrigger_mode(MODE_OFF)
+
+        if dlg.remove_cursors:
+            self._plot.clear_cursors()
+            self._cursor_panel.clear_readout()
 
         if dlg.replace_existing:
             self._clear_all(confirm=False)

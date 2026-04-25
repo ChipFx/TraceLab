@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QMenu, QColorDialog, QInputDialog,
                                QLineEdit, QPushButton, QFrame, QSizePolicy)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QAction
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QAction, QPen
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from core.trace_model import TraceModel
@@ -209,6 +209,37 @@ class EngineeringTimeAxisItem(pg.AxisItem):
             result.append((major / 2.0, 0))
         return result
 
+    def tickValues(self, minVal, maxVal, size):
+        levels = super().tickValues(minVal, maxVal, size)
+        self._tick_level_counts = [len(lvl[1]) for lvl in levels]
+        return levels
+
+    def generateDrawSpecs(self, p):
+        axisSpec, tickSpecs, textSpecs = super().generateDrawSpecs(p)
+        self._fix_subdiv_alpha(tickSpecs)
+        return axisSpec, tickSpecs, textSpecs
+
+    def _fix_subdiv_alpha(self, tickSpecs):
+        """Re-apply a density-independent alpha to level-1 (sub-div) tick specs.
+        pyqtgraph's built-in formula multiplies by 0.05*length/N which renders
+        fine sub-divisions nearly invisible.  We override to a fixed fraction."""
+        if self.grid is False or not tickSpecs:
+            return
+        counts = getattr(self, '_tick_level_counts', [])
+        if len(counts) < 2:
+            return   # only major level, nothing to boost
+        n_major = counts[0]
+        if len(tickSpecs) <= n_major:
+            return   # all specs are major
+        sub_alpha = max(20, int(self.grid * 0.55))
+        for idx in range(n_major, len(tickSpecs)):
+            pen, p1, p2 = tickSpecs[idx]
+            pen = QPen(pen)
+            c = pen.color()
+            c.setAlpha(sub_alpha)
+            pen.setColor(c)
+            tickSpecs[idx] = (pen, p1, p2)
+
     def set_smart_scale(self, settings: dict):
         ss = settings or {}
         self._smart       = bool(ss.get("enabled", False))
@@ -322,6 +353,37 @@ class EngineeringAxisItem(pg.AxisItem):
         elif px_per_major >= self._div_cfg.get("div_halves_px", 15):
             result.append((major / 2.0, 0))
         return result
+
+    def tickValues(self, minVal, maxVal, size):
+        levels = super().tickValues(minVal, maxVal, size)
+        self._tick_level_counts = [len(lvl[1]) for lvl in levels]
+        return levels
+
+    def generateDrawSpecs(self, p):
+        axisSpec, tickSpecs, textSpecs = super().generateDrawSpecs(p)
+        self._fix_subdiv_alpha(tickSpecs)
+        return axisSpec, tickSpecs, textSpecs
+
+    def _fix_subdiv_alpha(self, tickSpecs):
+        """Re-apply a density-independent alpha to level-1 (sub-div) tick specs.
+        pyqtgraph's built-in formula multiplies by 0.05*length/N which renders
+        fine sub-divisions nearly invisible.  We override to a fixed fraction."""
+        if self.grid is False or not tickSpecs:
+            return
+        counts = getattr(self, '_tick_level_counts', [])
+        if len(counts) < 2:
+            return
+        n_major = counts[0]
+        if len(tickSpecs) <= n_major:
+            return
+        sub_alpha = max(20, int(self.grid * 0.55))
+        for idx in range(n_major, len(tickSpecs)):
+            pen, p1, p2 = tickSpecs[idx]
+            pen = QPen(pen)
+            c = pen.color()
+            c.setAlpha(sub_alpha)
+            pen.setColor(c)
+            tickSpecs[idx] = (pen, p1, p2)
 
     def tickStrings(self, values, scale, spacing):
         if not self._unit or self._unit in ("raw", ""):

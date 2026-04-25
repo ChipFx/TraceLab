@@ -578,6 +578,7 @@ class MainWindow(QMainWindow):
         self._plot.set_min_lane_height(self._adv_ui.get("split_min_lane_height", 80))
         self._scope_status.set_statusbar_scroll_enabled(
             self._adv_ui.get("statusbar_scroll", True))
+        self._plot.set_div_settings(self._adv_ui)
         self._plot.set_smart_scale(self._smart_scale)
         self._plot.set_process_segments(self._process_segments)
         self._plot.set_segment_dim_opacity(self._segments_dim_opacity)

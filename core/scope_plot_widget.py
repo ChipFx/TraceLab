@@ -273,6 +273,8 @@ class EngineeringAxisItem(pg.AxisItem):
 
     def set_unit(self, unit: str):
         self._unit = unit or ""
+        self.picture = None   # invalidate cached axis rendering
+        self.update()         # schedule repaint so tickStrings() runs with new unit
 
     def tickStrings(self, values, scale, spacing):
         if not self._unit or self._unit in ("raw", ""):

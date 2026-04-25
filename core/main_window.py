@@ -497,6 +497,7 @@ class MainWindow(QMainWindow):
         self._channel_panel.reset_color_requested.connect(self._on_reset_trace_color)
         self._channel_panel.trace_renamed.connect(self._on_trace_renamed)
         self._channel_panel.segment_changed.connect(self._on_segment_changed)
+        self._channel_panel.unit_changed.connect(self._on_unit_changed)
         self._channel_panel.set_scroll_primaries(self._scroll_primaries)
         self._splitter.addWidget(self._channel_panel)
 
@@ -1940,6 +1941,15 @@ class MainWindow(QMainWindow):
         lane = self._plot._lanes.get(trace_name)
         if lane:
             lane.refresh_curve()
+
+    def _on_unit_changed(self, trace_name: str, *_):
+        """Refresh the y-axis label when a channel's unit is changed by the user."""
+        lane = self._plot._lanes.get(trace_name)
+        if lane:
+            lane.refresh_curve()   # _add_trace_curve already calls _y_axis.set_unit
+        else:
+            self._plot.refresh_all()   # overlay mode — _ov_y_axis picks up first visible unit
+        self._refresh_status_bar()     # keeps cursor-panel unit map current
 
     # ── Analysis ──────────────────────────────────────────────────────
 

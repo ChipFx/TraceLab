@@ -207,6 +207,7 @@ class EngineeringTimeAxisItem(pg.AxisItem):
             result.append((major / 5.0, 0))
         elif px_per_major >= self._div_cfg.get("div_halves_px", 15):
             result.append((major / 2.0, 0))
+        self._last_tick_result = result   # cache for status-bar readback
         return result
 
     def tickValues(self, minVal, maxVal, size):
@@ -352,6 +353,7 @@ class EngineeringAxisItem(pg.AxisItem):
             result.append((major / 5.0, 0))
         elif px_per_major >= self._div_cfg.get("div_halves_px", 15):
             result.append((major / 2.0, 0))
+        self._last_tick_result = result   # cache for status-bar readback
         return result
 
     def tickValues(self, minVal, maxVal, size):

@@ -1839,26 +1839,20 @@ class MainWindow(QMainWindow):
 
     def _get_x_major_tick(self) -> float:
         """Return the X tick spacing to show as div in the status bar.
-        Returns the major (coarsest) tick unless div_subdiv_label is enabled,
-        in which case the finest drawn level is used instead."""
+        Reads the cached result from the last axis render so the status bar
+        always agrees with what was actually drawn (no size mismatch)."""
         subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
             if self._plot._lanes:
-                lane = next(iter(self._plot._lanes.values()))
-                ax = lane.getPlotItem().getAxis('bottom')
-                vr = lane.getPlotItem().viewRange()[0]
-                w = lane.width() or 800
-                ticks = ax.tickSpacing(vr[0], vr[1], w)
-                if ticks:
-                    return float(ticks[-1][0] if subdiv_label else ticks[0][0])
+                ax = next(iter(self._plot._lanes.values())).getPlotItem().getAxis('bottom')
             elif self._plot._mode == "overlay":
-                pi = self._plot._overlay_widget.getPlotItem()
-                ax = pi.getAxis('bottom')
-                vr = pi.viewRange()[0]
-                w = self._plot._overlay_widget.width() or 800
-                ticks = ax.tickSpacing(vr[0], vr[1], w)
-                if ticks:
-                    return float(ticks[-1][0] if subdiv_label else ticks[0][0])
+                ax = self._plot._overlay_widget.getPlotItem().getAxis('bottom')
+            else:
+                ax = None
+            if ax is not None:
+                cached = getattr(ax, '_last_tick_result', None)
+                if cached:
+                    return float(cached[-1][0] if subdiv_label else cached[0][0])
         except Exception:
             pass
         x0, x1 = self._plot.get_current_view_range()
@@ -1866,13 +1860,17 @@ class MainWindow(QMainWindow):
 
     def _get_y_major_tick(self, lane) -> float:
         """Return the Y tick spacing to show as div in the status bar.
-        Returns the major (coarsest) tick unless div_subdiv_label is enabled,
-        in which case the finest drawn level is used instead."""
+        Reads the cached result from the last axis render so the status bar
+        always agrees with what was actually drawn (no size mismatch)."""
         subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
             ax = lane.getPlotItem().getAxis('left')
+            cached = getattr(ax, '_last_tick_result', None)
+            if cached:
+                return float(cached[-1][0] if subdiv_label else cached[0][0])
+            # Fallback before first render: ask the axis directly
             vr = lane.getPlotItem().viewRange()[1]
-            h = lane.height() or 300
+            h = lane.height() or 80
             ticks = ax.tickSpacing(vr[0], vr[1], h)
             if ticks:
                 return float(ticks[-1][0] if subdiv_label else ticks[0][0])

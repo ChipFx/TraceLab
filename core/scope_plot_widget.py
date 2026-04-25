@@ -185,6 +185,29 @@ class EngineeringTimeAxisItem(pg.AxisItem):
         self._smart_max_s = 300.0   # seconds above which → MM:SS
         self._smart_max_m = 120.0   # minutes above which → HH:MM:SS
         self._smart_max_h = 24.0    # hours   above which → DD:HH:MM:SS
+        self._div_cfg: dict = {}
+
+    def set_div_settings(self, cfg: dict):
+        self._div_cfg = cfg or {}
+        self.picture = None
+        self.update()
+
+    def tickSpacing(self, minVal, maxVal, size):
+        ticks = super().tickSpacing(minVal, maxVal, size)
+        if not ticks or maxVal <= minVal or size <= 0:
+            return ticks
+        major = ticks[0][0]
+        if major <= 0:
+            return ticks
+        px_per_major = size * major / (maxVal - minVal)
+        result = [(major, ticks[0][1])]
+        if px_per_major >= self._div_cfg.get("div_tenths_px", 60):
+            result.append((major / 10.0, 0))
+        elif px_per_major >= self._div_cfg.get("div_fifths_px", 30):
+            result.append((major / 5.0, 0))
+        elif px_per_major >= self._div_cfg.get("div_halves_px", 15):
+            result.append((major / 2.0, 0))
+        return result
 
     def set_smart_scale(self, settings: dict):
         ss = settings or {}
@@ -271,11 +294,34 @@ class EngineeringAxisItem(pg.AxisItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._unit = ""
+        self._div_cfg: dict = {}
 
     def set_unit(self, unit: str):
         self._unit = unit or ""
         self.picture = None   # invalidate cached axis rendering
         self.update()         # schedule repaint so tickStrings() runs with new unit
+
+    def set_div_settings(self, cfg: dict):
+        self._div_cfg = cfg or {}
+        self.picture = None
+        self.update()
+
+    def tickSpacing(self, minVal, maxVal, size):
+        ticks = super().tickSpacing(minVal, maxVal, size)
+        if not ticks or maxVal <= minVal or size <= 0:
+            return ticks
+        major = ticks[0][0]
+        if major <= 0:
+            return ticks
+        px_per_major = size * major / (maxVal - minVal)
+        result = [(major, ticks[0][1])]
+        if px_per_major >= self._div_cfg.get("div_tenths_px", 60):
+            result.append((major / 10.0, 0))
+        elif px_per_major >= self._div_cfg.get("div_fifths_px", 30):
+            result.append((major / 5.0, 0))
+        elif px_per_major >= self._div_cfg.get("div_halves_px", 15):
+            result.append((major / 2.0, 0))
+        return result
 
     def tickStrings(self, values, scale, spacing):
         if not self._unit or self._unit in ("raw", ""):
@@ -1332,6 +1378,8 @@ class ScopePlotWidget(QWidget):
         self._seg_dash_pattern: Optional[list] = None
         # Smart scale settings — applied to new lanes on rebuild
         self._smart_scale_settings: dict = {}
+        # Div sub-division settings — applied to new lanes on rebuild
+        self._div_settings: dict = {}
 
         layout = QVBoxLayout(self)
         layout.setSpacing(1)
@@ -1611,6 +1659,15 @@ class ScopePlotWidget(QWidget):
             lane._x_axis.set_smart_scale(settings)
             lane.refresh_curve()
 
+    def set_div_settings(self, cfg: dict):
+        """Propagate div sub-division settings to all axis items (X and Y, overlay and lanes)."""
+        self._div_settings = dict(cfg)
+        self._ov_x_axis.set_div_settings(cfg)
+        self._ov_y_axis.set_div_settings(cfg)
+        for lane in self._lanes.values():
+            lane._x_axis.set_div_settings(cfg)
+            lane._y_axis.set_div_settings(cfg)
+
     def set_process_segments(self, enabled: bool):
         """Enable/disable segment-aware rendering on all lanes."""
         self._seg_process = enabled
@@ -1717,6 +1774,9 @@ class ScopePlotWidget(QWidget):
             lane._segment_dash_pattern = self._seg_dash_pattern
             if self._smart_scale_settings:
                 lane._x_axis.set_smart_scale(self._smart_scale_settings)
+            if self._div_settings:
+                lane._x_axis.set_div_settings(self._div_settings)
+                lane._y_axis.set_div_settings(self._div_settings)
             lane.setMinimumHeight(self._min_lane_height)
             lane.viewport().installEventFilter(self)
             if first_lane is None:

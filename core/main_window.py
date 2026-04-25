@@ -450,7 +450,10 @@ class MainWindow(QMainWindow):
             "scroll_default":        "zoom",
             "arrow_mode":            "pan_time",
             "split_min_lane_height": 80,
-            "div_min_pixels":        8,
+            "div_halves_px":         15,
+            "div_fifths_px":         30,
+            "div_tenths_px":         60,
+            "div_subdiv_label":      False,
         }
         self._adv_ui: dict = {**_adv_defaults,
                               **self._settings.get("advanced_ui", {})}
@@ -1173,6 +1176,10 @@ class MainWindow(QMainWindow):
         split_view_menu.addAction("Minimum Trace Height…").triggered.connect(
             self._dlg_min_lane_height)
 
+        # ── Div Settings ───────────────────────────────────────────────
+        adv_ui_menu.addAction("Div Settings…").triggered.connect(
+            self._dlg_div_settings)
+
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Reload Plugins").triggered.connect(
@@ -1829,29 +1836,11 @@ class MainWindow(QMainWindow):
             self._traces, x_major_div, trig_info, y_major_divs,
             sinc_active, settings=self._settings)
 
-    def _finest_visible_tick(self, ticks: list, span: float, pixels: float) -> float:
-        """Return the finest tick level that occupies at least div_min_pixels px.
-
-        ticks  — list of (spacing, offset) from pyqtgraph tickSpacing(), coarsest→finest
-        span   — visible range in data units (e.g. seconds or volts)
-        pixels — axis length in pixels (width for X, height for Y)
-
-        Iterates finest→coarsest and returns the first level whose pixel spacing
-        meets the threshold from advanced_ui['div_min_pixels'] (default 8 px).
-        Falls back to the major (coarsest) level if nothing qualifies."""
-        if not ticks or span <= 0 or pixels <= 0:
-            return float(ticks[0][0]) if ticks else 0.0
-        min_px = float(self._adv_ui.get("div_min_pixels", 8))
-        for spacing, _ in reversed(ticks):   # finest → coarsest
-            if spacing <= 0:
-                continue
-            px = pixels * (spacing / span)
-            if px >= min_px:
-                return float(spacing)
-        return float(ticks[0][0])   # fallback: major tick
-
     def _get_x_major_tick(self) -> float:
-        """Return the finest X tick spacing that is visually resolvable."""
+        """Return the X tick spacing to show as div in the status bar.
+        Returns the major (coarsest) tick unless div_subdiv_label is enabled,
+        in which case the finest drawn level is used instead."""
+        subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
             if self._plot._lanes:
                 lane = next(iter(self._plot._lanes.values()))
@@ -1860,7 +1849,7 @@ class MainWindow(QMainWindow):
                 w = lane.width() or 800
                 ticks = ax.tickSpacing(vr[0], vr[1], w)
                 if ticks:
-                    return self._finest_visible_tick(ticks, vr[1] - vr[0], w)
+                    return float(ticks[-1][0] if subdiv_label else ticks[0][0])
             elif self._plot._mode == "overlay":
                 pi = self._plot._overlay_widget.getPlotItem()
                 ax = pi.getAxis('bottom')
@@ -1868,21 +1857,24 @@ class MainWindow(QMainWindow):
                 w = self._plot._overlay_widget.width() or 800
                 ticks = ax.tickSpacing(vr[0], vr[1], w)
                 if ticks:
-                    return self._finest_visible_tick(ticks, vr[1] - vr[0], w)
+                    return float(ticks[-1][0] if subdiv_label else ticks[0][0])
         except Exception:
             pass
         x0, x1 = self._plot.get_current_view_range()
         return (x1 - x0) / 10.0
 
     def _get_y_major_tick(self, lane) -> float:
-        """Return the finest Y tick spacing that is visually resolvable."""
+        """Return the Y tick spacing to show as div in the status bar.
+        Returns the major (coarsest) tick unless div_subdiv_label is enabled,
+        in which case the finest drawn level is used instead."""
+        subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
             ax = lane.getPlotItem().getAxis('left')
             vr = lane.getPlotItem().viewRange()[1]
             h = lane.height() or 300
             ticks = ax.tickSpacing(vr[0], vr[1], h)
             if ticks:
-                return self._finest_visible_tick(ticks, vr[1] - vr[0], h)
+                return float(ticks[-1][0] if subdiv_label else ticks[0][0])
         except Exception:
             pass
         return 0.0
@@ -2553,6 +2545,7 @@ class MainWindow(QMainWindow):
             self._adv_ui.get("split_min_lane_height", 80))
         self._scope_status.set_statusbar_scroll_enabled(
             self._adv_ui.get("statusbar_scroll", True))
+        self._plot.set_div_settings(self._adv_ui)
 
     def _toggle_statusbar_scroll(self, checked: bool):
         self._adv_ui["statusbar_scroll"] = checked
@@ -2598,6 +2591,58 @@ class MainWindow(QMainWindow):
             current, 40, 800, 10)
         if ok:
             self._adv_ui["split_min_lane_height"] = val
+            self._adv_ui_save()
+
+    def _dlg_div_settings(self):
+        from PyQt6.QtWidgets import (QDialog, QFormLayout, QSpinBox,
+                                     QCheckBox, QDialogButtonBox)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Div Settings")
+        form = QFormLayout(dlg)
+
+        sb_halves = QSpinBox()
+        sb_halves.setRange(1, 500)
+        sb_halves.setSuffix(" px")
+        sb_halves.setToolTip(
+            "Minimum major-tick pixel height/width to draw a midpoint (÷2) sub-division line.")
+        sb_halves.setValue(int(self._adv_ui.get("div_halves_px", 15)))
+        form.addRow("Show ÷2 sub-div above:", sb_halves)
+
+        sb_fifths = QSpinBox()
+        sb_fifths.setRange(1, 500)
+        sb_fifths.setSuffix(" px")
+        sb_fifths.setToolTip(
+            "Minimum major-tick pixel size to draw four (÷5) sub-division lines.")
+        sb_fifths.setValue(int(self._adv_ui.get("div_fifths_px", 30)))
+        form.addRow("Show ÷5 sub-div above:", sb_fifths)
+
+        sb_tenths = QSpinBox()
+        sb_tenths.setRange(1, 500)
+        sb_tenths.setSuffix(" px")
+        sb_tenths.setToolTip(
+            "Minimum major-tick pixel size to draw nine (÷10) sub-division lines.")
+        sb_tenths.setValue(int(self._adv_ui.get("div_tenths_px", 60)))
+        form.addRow("Show ÷10 sub-div above:", sb_tenths)
+
+        chk_subdiv = QCheckBox("Show /DIV status on sub-divisions")
+        chk_subdiv.setToolTip(
+            "When enabled, the status bar reports the finest visible sub-division spacing\n"
+            "instead of the major tick spacing.\n"
+            "Default off: the status bar always shows the major division.")
+        chk_subdiv.setChecked(bool(self._adv_ui.get("div_subdiv_label", False)))
+        form.addRow("", chk_subdiv)
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._adv_ui["div_halves_px"]    = sb_halves.value()
+            self._adv_ui["div_fifths_px"]    = sb_fifths.value()
+            self._adv_ui["div_tenths_px"]    = sb_tenths.value()
+            self._adv_ui["div_subdiv_label"] = chk_subdiv.isChecked()
             self._adv_ui_save()
 
     def _set_extrap_mode(self, mode: str) -> None:

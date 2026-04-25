@@ -68,7 +68,9 @@
     "admonition_note_bg":     "#d8e8f8",
     "admonition_note_border": "#1565c0",
     "admonition_warn_bg":     "#fdf0d0",
-    "admonition_warn_border": "#cc8800"
+    "admonition_warn_border": "#cc8800",
+    
+    "heading_color":          "#2255aa"
   },
   "trace_colors": [
     "#C07000",

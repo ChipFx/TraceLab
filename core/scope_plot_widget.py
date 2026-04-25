@@ -1325,6 +1325,8 @@ class ScopePlotWidget(QWidget):
         self._seg_process: bool = True
         self._seg_dim_opacity: float = 0.5
         self._seg_dash_pattern: Optional[list] = None
+        # Smart scale settings — applied to new lanes on rebuild
+        self._smart_scale_settings: dict = {}
 
         layout = QVBoxLayout(self)
         layout.setSpacing(1)
@@ -1597,9 +1599,12 @@ class ScopePlotWidget(QWidget):
             lane.setMinimumHeight(self._min_lane_height)
 
     def set_smart_scale(self, settings: dict):
-        """Propagate smart_scale settings to both time axis instances."""
-        self._x_axis.set_smart_scale(settings)
+        """Propagate smart_scale settings to overlay axis and all split-mode lanes."""
+        self._smart_scale_settings = dict(settings)
         self._ov_x_axis.set_smart_scale(settings)
+        for lane in self._lanes.values():
+            lane._x_axis.set_smart_scale(settings)
+            lane.refresh_curve()
 
     def set_process_segments(self, enabled: bool):
         """Enable/disable segment-aware rendering on all lanes."""
@@ -1705,6 +1710,8 @@ class ScopePlotWidget(QWidget):
             lane._process_segments = self._seg_process
             lane._segment_dim_opacity = self._seg_dim_opacity
             lane._segment_dash_pattern = self._seg_dash_pattern
+            if self._smart_scale_settings:
+                lane._x_axis.set_smart_scale(self._smart_scale_settings)
             lane.setMinimumHeight(self._min_lane_height)
             lane.viewport().installEventFilter(self)
             if first_lane is None:

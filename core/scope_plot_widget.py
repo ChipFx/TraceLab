@@ -192,6 +192,7 @@ class EngineeringTimeAxisItem(pg.AxisItem):
         self._smart_max_s = float(ss.get("max_seconds", 300))
         self._smart_max_m = float(ss.get("max_minutes", 120))
         self._smart_max_h = float(ss.get("max_hours",   24))
+        self.picture = None   # invalidate cached axis rendering
         self.update()
 
     def tickStrings(self, values, scale, spacing):

@@ -405,7 +405,41 @@ class ImportDialog(QDialog):
         sl = QVBoxLayout(sw)
         sl.setSpacing(2)
 
-        # Get trace colours from ThemeManager if available, else use safe defaults
+        # ── Build group map ────────────────────────────────────────────
+        # Source 1: per-column ColumnInfo.group string (set by parser plugin)
+        col_group_map: Dict[str, str] = {}
+        for cname, ci in self.load_result.column_infos.items():
+            if ci and getattr(ci, 'group', ''):
+                col_group_map[cname] = ci.group
+        # Source 2: ColumnGroup objects with index-based membership
+        _idx_to_name: Dict[int, str] = {}
+        for cname, ci in self.load_result.column_infos.items():
+            if ci and hasattr(ci, 'index'):
+                _idx_to_name[ci.index] = cname
+        for cg in self.load_result.column_groups:
+            for idx in cg.column_indices:
+                cname = _idx_to_name.get(idx)
+                if cname and cname not in col_group_map:
+                    col_group_map[cname] = cg.name
+
+        # Build ordered group→columns mapping (file column order preserved within group)
+        groups_order: List[str] = []        # group names in first-appearance order
+        groups_cols: Dict[str, List[str]] = {}
+        ungrouped: List[str] = []
+        for col_name in self.load_result.columns:
+            grp = col_group_map.get(col_name, "")
+            if grp:
+                if grp not in groups_cols:
+                    groups_order.append(grp)
+                    groups_cols[grp] = []
+                groups_cols[grp].append(col_name)
+            else:
+                ungrouped.append(col_name)
+
+        has_groups = bool(groups_order)
+        self._group_rows: Dict[str, List] = {}  # group_name -> [ColumnConfigRow, …]
+
+        # ── Get trace colours ──────────────────────────────────────────
         try:
             from core.theme_manager import ThemeManager
             import os
@@ -415,9 +449,8 @@ class ImportDialog(QDialog):
             _trace_palette = ["#F0C040","#40C0F0","#F04080","#40F080","#F08040",
                               "#A040F0","#40F0F0","#F0F040","#F04040","#4080F0"]
 
-        # First pass: assign color indices only to channels that are enabled by default,
-        # so that 4 enabled channels out of 32 all get distinct colours rather than
-        # landing on the same colour after cycling through the disabled ones.
+        # First pass: assign color indices only to enabled-by-default columns so
+        # that 4 selected channels out of 32 all get distinct colours.
         _enabled_color: dict = {}
         _cidx = 0
         for col_name, data in self.load_result.columns.items():
@@ -428,7 +461,8 @@ class ImportDialog(QDialog):
                 _enabled_color[col_name] = _cidx
                 _cidx += 1
 
-        for i, (col_name, data) in enumerate(self.load_result.columns.items()):
+        def _add_col_row(col_name: str, group_rows_list=None):
+            data = self.load_result.columns[col_name]
             is_time = col_name == self.load_result.suggested_time_col
             color = _trace_palette[_enabled_color.get(col_name, 0) % len(_trace_palette)]
             col_info = self.load_result.column_infos.get(col_name)
@@ -436,12 +470,32 @@ class ImportDialog(QDialog):
                                   is_time_candidate=is_time, metadata=meta,
                                   col_info=col_info)
             self._col_rows[col_name] = row
-            if i > 0 and i % 5 == 0:
-                line = QFrame()
-                line.setFrameShape(QFrame.Shape.HLine)
-                line.setStyleSheet("color: #333;")
-                sl.addWidget(line)
+            if group_rows_list is not None:
+                group_rows_list.append(row)
             sl.addWidget(row)
+
+        if has_groups:
+            # ── Grouped layout: one header per group, then its columns ──
+            for grp in groups_order:
+                self._group_rows[grp] = []
+                sl.addWidget(_make_group_header(grp, self._group_rows[grp]))
+                for col_name in groups_cols[grp]:
+                    _add_col_row(col_name, self._group_rows[grp])
+            if ungrouped:
+                self._group_rows["__ungrouped__"] = []
+                sl.addWidget(_make_group_header("Ungrouped",
+                                                self._group_rows["__ungrouped__"]))
+                for col_name in ungrouped:
+                    _add_col_row(col_name, self._group_rows["__ungrouped__"])
+        else:
+            # ── Flat layout: divider every 5 rows ─────────────────────
+            for i, col_name in enumerate(self.load_result.columns):
+                if i > 0 and i % 5 == 0:
+                    line = QFrame()
+                    line.setFrameShape(QFrame.Shape.HLine)
+                    line.setStyleSheet("color: #333;")
+                    sl.addWidget(line)
+                _add_col_row(col_name)
 
         sl.addStretch()
         scroll.setWidget(sw)
@@ -526,6 +580,36 @@ class ImportDialog(QDialog):
             r.toggled.connect(self._update_duration_label)
         self.combo_time_col.currentTextChanged.connect(self._update_duration_label)
         self._update_duration_label()
+
+        # Wall-clock anchor override
+        wc_box = QGroupBox("Wall-Clock Anchor (t=0)")
+        wcl = QVBoxLayout(wc_box)
+        wc_row = QHBoxLayout()
+        self.chk_t0_override = QCheckBox("Override t=0 wall clock")
+        self.chk_t0_override.setChecked(
+            self._settings.get("import_t0_override_enabled", False))
+        self.chk_t0_override.setToolTip(
+            "Enter an ISO 8601 datetime to use as the real-world moment\n"
+            "corresponding to t=0, overriding any value from the parser.")
+        wc_row.addWidget(self.chk_t0_override)
+        self.edit_t0_wallclock = QLineEdit()
+        self.edit_t0_wallclock.setPlaceholderText(
+            "e.g.  2024-03-15T14:23:00  or  2024-03-15 14:23:00.000")
+        self.edit_t0_wallclock.setMinimumWidth(260)
+        self.edit_t0_wallclock.setToolTip(
+            "ISO 8601: YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD HH:MM:SS[.mmm]\n"
+            "Leave blank to keep the parser-supplied wall-clock anchor.")
+        wc_row.addWidget(self.edit_t0_wallclock)
+        wc_row.addStretch()
+        wcl.addLayout(wc_row)
+        if self.load_result.t0_wall_clock:
+            _hint = QLabel(f"Parser supplied: {self.load_result.t0_wall_clock}")
+            _hint.setStyleSheet("color: #6060a0; font-size: 9px;")
+            wcl.addWidget(_hint)
+        self.edit_t0_wallclock.setEnabled(self.chk_t0_override.isChecked())
+        self.chk_t0_override.toggled.connect(self.edit_t0_wallclock.setEnabled)
+        tl.addWidget(wc_box)
+
         tl.addStretch()
         tabs.addTab(time_tab, "Time Base")
 
@@ -556,6 +640,14 @@ class ImportDialog(QDialog):
         self.chk_remove_cursors.setToolTip(
             "Clear both cursors and their readouts when import completes.")
         og.addWidget(self.chk_remove_cursors)
+        self.chk_honor_skip_rows = QCheckBox("Honor parser skip-row hints")
+        self.chk_honor_skip_rows.setChecked(
+            self._settings.get("import_honor_skip_rows", True))
+        self.chk_honor_skip_rows.setToolTip(
+            "If the parser plugin marks certain rows to skip (e.g. repeated\n"
+            "headers between segments), they are dropped during file load.\n"
+            "Change takes effect on the next import.")
+        og.addWidget(self.chk_honor_skip_rows)
         og.addStretch()
         layout.addWidget(opt_box)
 
@@ -690,6 +782,11 @@ class ImportDialog(QDialog):
         t0_sample = int(self.edit_t0_sample.get_value(0))
         t0_time   = self.edit_t0_time.get_value(0.0)
 
+        # Wall-clock anchor override (blank string = no override)
+        _wc_override = ""
+        if self.chk_t0_override.isChecked():
+            _wc_override = self.edit_t0_wallclock.text().strip()
+
         traces = []
         for col_name, row in self._col_rows.items():
             if not row.chk_enable.isChecked():
@@ -760,8 +857,8 @@ class ImportDialog(QDialog):
                 source_file=self.load_result.filename,
                 original_col_name=col_name,
                 col_group=col_info.group if col_info else "",
-                # Wall-clock time anchor — per-trace first, file-level fallback
-                t0_wall_clock=_trace_t0wc,
+                # Wall-clock time anchor: dialog override beats per-trace, beats file-level
+                t0_wall_clock=(_wc_override if _wc_override else _trace_t0wc),
                 source_time_format=self.load_result.source_time_format,
                 # Segment metadata — per-trace if available, file-level fallback
                 segments=(self.load_result.trace_segments.get(col_name)
@@ -788,6 +885,9 @@ class ImportDialog(QDialog):
         self.reset_view          = self.chk_reset_view.isChecked()
         self.reset_retrigger     = self.chk_reset_retrigger.isChecked()
         self.remove_cursors      = self.chk_remove_cursors.isChecked()
+        self.honor_skip_rows     = self.chk_honor_skip_rows.isChecked()
+        self._settings["import_honor_skip_rows"]    = self.honor_skip_rows
+        self._settings["import_t0_override_enabled"] = self.chk_t0_override.isChecked()
         # Persist last-used global scale values
         self._settings["last_gain"]   = self.edit_global_gain.text().strip()
         self._settings["last_offset"] = self.edit_global_offset.text().strip()
@@ -796,6 +896,46 @@ class ImportDialog(QDialog):
         if not use_time_col:
             self._settings["default_sample_rate"] = sps
         self.accept()
+
+
+def _make_group_header(group_name: str, rows_list: list) -> QWidget:
+    """Styled group header bar with ✓ All / ✗ None buttons.
+    rows_list is populated with ColumnConfigRow refs after this returns;
+    the button lambdas close over the list object by reference."""
+    hdr = QWidget()
+    hdr.setFixedHeight(28)
+    hdr.setStyleSheet(
+        "background: #1a1a30; border-top: 1px solid #3a3a6a; "
+        "border-bottom: 1px solid #3a3a6a;")
+    hl = QHBoxLayout(hdr)
+    hl.setContentsMargins(8, 3, 4, 3)
+    lbl = QLabel(f"▶  {group_name}")
+    lbl.setStyleSheet(
+        "color: #8080c0; font-weight: bold; font-size: 10px; "
+        "background: transparent; border: none;")
+    hl.addWidget(lbl)
+    hl.addStretch()
+    btn_all = QPushButton("✓ All")
+    btn_all.setFixedSize(52, 18)
+    btn_all.setStyleSheet(
+        "QPushButton { font-size: 9px; color: #60a060; background: #1a2a1a; "
+        "border: 1px solid #3a5a3a; border-radius: 2px; } "
+        "QPushButton:hover { background: #2a3a2a; }")
+    btn_none = QPushButton("✗ None")
+    btn_none.setFixedSize(52, 18)
+    btn_none.setStyleSheet(
+        "QPushButton { font-size: 9px; color: #a06060; background: #2a1a1a; "
+        "border: 1px solid #5a3a3a; border-radius: 2px; } "
+        "QPushButton:hover { background: #3a2a2a; }")
+    btn_all.clicked.connect(
+        lambda: [r.chk_enable.setChecked(True)
+                 for r in rows_list if r.chk_enable.isEnabled()])
+    btn_none.clicked.connect(
+        lambda: [r.chk_enable.setChecked(False)
+                 for r in rows_list if r.chk_enable.isEnabled()])
+    hl.addWidget(btn_all)
+    hl.addWidget(btn_none)
+    return hdr
 
 
 def _fmt_duration(dur: float) -> str:

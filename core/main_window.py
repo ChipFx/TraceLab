@@ -353,6 +353,8 @@ class MainWindow(QMainWindow):
         s["viewport_preset_max"]     = self._limits_config.get("preset_max", 50_000)
         s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
         s["advanced_ui"] = dict(self._adv_ui)
+        s["smart_scale"] = dict(self._smart_scale)
+        s["process_segments"] = self._process_segments
         s["lane_label_size"] = self._lane_label_size
         s["show_lane_labels"] = self._show_lane_labels
         s["allow_theme_force_labels"] = self._allow_theme_force_labels
@@ -451,6 +453,20 @@ class MainWindow(QMainWindow):
         self._adv_ui: dict = {**_adv_defaults,
                               **self._settings.get("advanced_ui", {})}
 
+        # ── Smart time-axis scale settings ────────────────────────────────────
+        _smart_defaults = {
+            "enabled":     False,
+            "max_seconds": 300,
+            "max_minutes": 120,
+            "max_hours":   24,
+        }
+        self._smart_scale: dict = {**_smart_defaults,
+                                   **self._settings.get("smart_scale", {})}
+
+        # ── Segment view rendering ────────────────────────────────────────────
+        self._process_segments: bool = bool(
+            self._settings.get("process_segments", True))
+
         # ── Periodicity estimation ────────────────────────────────────────────
         # Migrate any old method names that may live in settings.json
         _tier_migrate = {
@@ -476,6 +492,8 @@ class MainWindow(QMainWindow):
         self._channel_panel.order_changed.connect(self._on_channel_order_changed)
         self._channel_panel.interp_changed.connect(self._on_channel_interp_changed)
         self._channel_panel.reset_color_requested.connect(self._on_reset_trace_color)
+        self._channel_panel.trace_renamed.connect(self._on_trace_renamed)
+        self._channel_panel.segment_changed.connect(self._on_segment_changed)
         self._splitter.addWidget(self._channel_panel)
 
         self._interp_mode = self._settings.get("interp_mode", "linear")
@@ -551,6 +569,11 @@ class MainWindow(QMainWindow):
         self._plot.set_min_lane_height(self._adv_ui.get("split_min_lane_height", 80))
         self._scope_status.set_statusbar_scroll_enabled(
             self._adv_ui.get("statusbar_scroll", True))
+        self._plot.set_smart_scale(self._smart_scale)
+        self._plot.set_process_segments(self._process_segments)
+        self._plot.set_segment_dim_opacity(self._segments_dim_opacity)
+        self._plot.set_segment_dash_pattern(
+            self._segments_dash_size, self._segments_gap_size)
 
         self._plot_container = plot_container
         self._splitter.addWidget(plot_container)
@@ -711,6 +734,14 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         seg_view_menu = view_menu.addMenu("Segments")
         seg_view_menu.setToolTipsVisible(True)
+        self._act_process_segments = seg_view_menu.addAction("Process Segments")
+        self._act_process_segments.setCheckable(True)
+        self._act_process_segments.setChecked(self._process_segments)
+        self._act_process_segments.setToolTip(
+            "When enabled, only the primary segment is drawn as the main trace;\n"
+            "other segments are shown according to their non-primary view mode.")
+        self._act_process_segments.toggled.connect(self._toggle_process_segments)
+        seg_view_menu.addSeparator()
         seg_view_menu.addAction("Dim Opacity…").triggered.connect(
             self._dlg_segments_dim_opacity)
         seg_dash_menu = seg_view_menu.addMenu("Dash Settings")
@@ -718,6 +749,19 @@ class MainWindow(QMainWindow):
             self._dlg_segments_dash_size)
         seg_dash_menu.addAction("Gap Size…").triggered.connect(
             self._dlg_segments_gap_size)
+
+        view_menu.addSeparator()
+        time_scale_menu = view_menu.addMenu("Time Scale")
+        self._act_smart_scale = time_scale_menu.addAction("Smart Scale  (MM:SS / HH:MM:SS…)")
+        self._act_smart_scale.setCheckable(True)
+        self._act_smart_scale.setChecked(self._smart_scale.get("enabled", False))
+        self._act_smart_scale.setToolTip(
+            "When enabled, long time axes display as MM:SS, HH:MM:SS, or DD:HH:MM:SS\n"
+            "instead of kilo-seconds.")
+        self._act_smart_scale.toggled.connect(self._toggle_smart_scale)
+        time_scale_menu.addSeparator()
+        time_scale_menu.addAction("Settings…").triggered.connect(
+            self._dlg_smart_scale_settings)
 
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
@@ -1215,7 +1259,9 @@ class MainWindow(QMainWindow):
 
         result = load_csv(path,
                           rejection_enabled=self._rejection_enabled,
-                          rejection_max_lines=self._rejection_max_lines)
+                          rejection_max_lines=self._rejection_max_lines,
+                          honor_skip_rows=self._settings.get(
+                              "import_honor_skip_rows", True))
         if result.error:
             QMessageBox.critical(self, "Load Error", result.error)
             return
@@ -1235,6 +1281,7 @@ class MainWindow(QMainWindow):
         self._settings["import_reset_view"]       = self._import_reset_view
         self._settings["import_reset_retrigger"]  = dlg.reset_retrigger
         self._settings["import_remove_cursors"]   = dlg.remove_cursors
+        self._settings["import_honor_skip_rows"]  = dlg.honor_skip_rows
 
         if dlg.reset_retrigger:
             self._set_retrigger_mode(MODE_OFF)
@@ -1636,6 +1683,50 @@ class MainWindow(QMainWindow):
         self._settings["export_segments_mode"] = mode
         self._save_settings()
 
+    def _toggle_process_segments(self, enabled: bool):
+        self._process_segments = enabled
+        self._plot.set_process_segments(enabled)
+        self._save_settings()
+
+    def _toggle_smart_scale(self, enabled: bool):
+        self._smart_scale["enabled"] = enabled
+        self._plot.set_smart_scale(self._smart_scale)
+        self._save_settings()
+
+    def _dlg_smart_scale_settings(self):
+        from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox, QLineEdit
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Smart Scale Settings")
+        fl = QFormLayout(dlg)
+        fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        e_s = QLineEdit(str(self._smart_scale.get("max_seconds", 300)))
+        e_m = QLineEdit(str(self._smart_scale.get("max_minutes", 120)))
+        e_h = QLineEdit(str(self._smart_scale.get("max_hours",   24)))
+        fl.addRow("Switch to MM:SS above (seconds):", e_s)
+        fl.addRow("Switch to HH:MM:SS above (minutes):", e_m)
+        fl.addRow("Switch to DD:HH:MM:SS above (hours):", e_h)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        fl.addRow(bb)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            try:
+                self._smart_scale["max_seconds"] = float(e_s.text())
+            except ValueError:
+                pass
+            try:
+                self._smart_scale["max_minutes"] = float(e_m.text())
+            except ValueError:
+                pass
+            try:
+                self._smart_scale["max_hours"] = float(e_h.text())
+            except ValueError:
+                pass
+            self._plot.set_smart_scale(self._smart_scale)
+            self._save_settings()
+
     def _dlg_segments_dim_opacity(self):
         val, ok = QInputDialog.getInt(
             self, "Segments — Dim Opacity",
@@ -1644,6 +1735,7 @@ class MainWindow(QMainWindow):
         if ok:
             self._segments_dim_opacity = val
             self._settings["segments_dim_opacity"] = val
+            self._plot.set_segment_dim_opacity(val)
             self._save_settings()
 
     def _dlg_segments_dash_size(self):
@@ -1654,6 +1746,8 @@ class MainWindow(QMainWindow):
         if ok:
             self._segments_dash_size = val
             self._settings["segments_dash_size"] = val
+            self._plot.set_segment_dash_pattern(
+                self._segments_dash_size, self._segments_gap_size)
             self._save_settings()
 
     def _dlg_segments_gap_size(self):
@@ -1664,6 +1758,8 @@ class MainWindow(QMainWindow):
         if ok:
             self._segments_gap_size = val
             self._settings["segments_gap_size"] = val
+            self._plot.set_segment_dash_pattern(
+                self._segments_dash_size, self._segments_gap_size)
             self._save_settings()
 
     # ── Cursors ────────────────────────────────────────────────────────
@@ -1818,6 +1914,17 @@ class MainWindow(QMainWindow):
         self._plot.refresh_all()
         self._refresh_status_bar()
 
+    def _on_trace_renamed(self, _trace_name: str, _new_label: str):
+        """Propagate a label change from the channel panel to plot and status bar."""
+        self._plot.refresh_all()      # redraws overlay legend / lane labels
+        self._refresh_status_bar()    # status bar block uses trace.label
+
+    def _on_segment_changed(self, trace_name: str):
+        """Refresh the lane for a trace whose primary_segment or viewmode changed."""
+        lane = self._plot._lanes.get(trace_name)
+        if lane:
+            lane.refresh_curve()
+
     # ── Analysis ──────────────────────────────────────────────────────
 
     def _show_fft(self):
@@ -1853,21 +1960,57 @@ class MainWindow(QMainWindow):
     # ── Plugins ───────────────────────────────────────────────────────
 
     def _update_plugin_menu(self):
+        # Remove all dynamic entries (including any submenus we created before)
         actions = self._plugins_menu.actions()
         for act in actions[self._plugin_actions_start:]:
+            if act.menu():          # submenu — clean up the child QMenu too
+                act.menu().deleteLater()
             self._plugins_menu.removeAction(act)
 
+        from core.plugin_manager import _group_canonical
         plugins = self._plugins.get_plugins()
         if not plugins:
             a = QAction("(No plugins found)", self)
             a.setEnabled(False)
             self._plugins_menu.addAction(a)
         else:
+            # Separate grouped from ungrouped; preserve first-seen order per group
+            groups_order = []                      # display names in first-seen order
+            groups_map   = {}                      # canonical_key → (display, [plugins])
+            ungrouped    = []
             for p in plugins:
-                a = QAction(f"{p.name} [{p.plugin_type}]", self)
-                a.setStatusTip(p.description)
-                a.triggered.connect(lambda checked, _p=p: self._run_plugin(_p))
-                self._plugins_menu.addAction(a)
+                if not p.group:
+                    ungrouped.append(p)
+                else:
+                    key = _group_canonical(p.group)
+                    if key not in groups_map:
+                        groups_map[key] = (p.group, [])
+                        groups_order.append(key)
+                    groups_map[key][1].append(p)
+
+            def _plugin_action(parent, plug):
+                a = QAction(f"{plug.name}  [{plug.plugin_type}]", parent)
+                a.setStatusTip(plug.description)
+                a.triggered.connect(lambda checked, _p=plug: self._run_plugin(_p))
+                return a
+
+            # Add one sub-menu per named group
+            for key in groups_order:
+                display, group_plugins = groups_map[key]
+                sub = self._plugins_menu.addMenu(display)
+                for gp in group_plugins:
+                    sub.addAction(_plugin_action(sub, gp))
+
+            # Ungrouped: sub-menu if named groups also exist, else flat
+            if ungrouped:
+                if groups_order:
+                    self._plugins_menu.addSeparator()
+                    sub = self._plugins_menu.addMenu("Ungrouped")
+                    for p in ungrouped:
+                        sub.addAction(_plugin_action(sub, p))
+                else:
+                    for p in ungrouped:
+                        self._plugins_menu.addAction(_plugin_action(self, p))
 
         if self._plugins.load_errors:
             self._plugins_menu.addSeparator()

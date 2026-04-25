@@ -177,27 +177,89 @@ def _eng_format(value: float, unit: str) -> str:
 
 
 class EngineeringTimeAxisItem(pg.AxisItem):
-    """X-axis that labels ticks with SI time prefixes: ns, µs, ms, s, ks."""
+    """X-axis with SI time prefixes (ns/µs/ms/s/ks) or smart MM:SS / HH:MM:SS display."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._smart       = False
+        self._smart_max_s = 300.0   # seconds above which → MM:SS
+        self._smart_max_m = 120.0   # minutes above which → HH:MM:SS
+        self._smart_max_h = 24.0    # hours   above which → DD:HH:MM:SS
+
+    def set_smart_scale(self, settings: dict):
+        ss = settings or {}
+        self._smart       = bool(ss.get("enabled", False))
+        self._smart_max_s = float(ss.get("max_seconds", 300))
+        self._smart_max_m = float(ss.get("max_minutes", 120))
+        self._smart_max_h = float(ss.get("max_hours",   24))
+        self.update()
+
     def tickStrings(self, values, scale, spacing):
-        results = []
+        if not values:
+            return []
+        if not self._smart:
+            return self._eng_strings(values)
+
+        max_abs = max(abs(float(v)) for v in values)
+        if max_abs < self._smart_max_s:
+            return self._eng_strings(values)   # still in seconds range — keep SI
+
+        show_ms   = spacing < 1.0
+        max_m_thr = self._smart_max_m * 60.0
+        max_h_thr = self._smart_max_h * 3600.0
+
+        # Shared-prefix optimisation: when all visible ticks share the same
+        # whole-minute (or whole-hour) value, show only the seconds portion
+        # after the first tick to reduce label clutter.
+        use_prefix = False
+        if len(values) > 1 and max_abs >= max_m_thr and spacing < 60:
+            prefix_mins = [int(abs(float(v))) // 60 for v in values]
+            use_prefix = (len(set(prefix_mins)) == 1)
+
+        return [self._fmt_smart(float(v), max_abs, max_m_thr, max_h_thr,
+                                show_ms, use_prefix and i > 0)
+                for i, v in enumerate(values)]
+
+    @staticmethod
+    def _fmt_smart(t: float, max_abs: float,
+                   max_m_thr: float, max_h_thr: float,
+                   show_ms: bool, prefix_only: bool = False) -> str:
+        sign = "\u2212" if t < 0 else ""   # proper minus sign
+        a    = abs(t)
+        ms_str = f".{int(round((a % 1.0) * 1000)):03d}" if show_ms else ""
+        secs   = int(a) % 60
+        mins   = int(a) // 60 % 60
+        hours  = int(a) // 3600 % 24
+        days   = int(a) // 86400
+
+        if max_abs < max_m_thr:
+            total_mins = int(a) // 60
+            if prefix_only:
+                return f":{secs:02d}{ms_str}"
+            return f"{sign}{total_mins}:{secs:02d}{ms_str}"
+        elif max_abs < max_h_thr:
+            if prefix_only:
+                return f":{secs:02d}{ms_str}"
+            return f"{sign}{hours}:{mins:02d}:{secs:02d}{ms_str}"
+        else:
+            if prefix_only:
+                return f":{secs:02d}"
+            return f"{sign}{days}d {hours:02d}:{mins:02d}:{secs:02d}"
+
+    @staticmethod
+    def _eng_strings(values) -> list:
+        out = []
         for v in values:
             t = float(v)
             a = abs(t)
-            if a == 0:
-                results.append("0 s")
-            elif a < 1e-9:
-                results.append(f"{t*1e12:.4g} ps")
-            elif a < 1e-6:
-                results.append(f"{t*1e9:.4g} ns")
-            elif a < 1e-3:
-                results.append(f"{t*1e6:.4g} µs")
-            elif a < 1.0:
-                results.append(f"{t*1e3:.4g} ms")
-            elif a < 1e3:
-                results.append(f"{t:.4g} s")
-            else:
-                results.append(f"{t/1e3:.4g} ks")
-        return results
+            if   a == 0:   out.append("0 s")
+            elif a < 1e-9: out.append(f"{t*1e12:.4g} ps")
+            elif a < 1e-6: out.append(f"{t*1e9:.4g} ns")
+            elif a < 1e-3: out.append(f"{t*1e6:.4g} µs")
+            elif a < 1.0:  out.append(f"{t*1e3:.4g} ms")
+            elif a < 1e3:  out.append(f"{t:.4g} s")
+            else:           out.append(f"{t/1e3:.4g} ks")
+        return out
 
 
 class EngineeringAxisItem(pg.AxisItem):
@@ -360,6 +422,10 @@ class TraceLane(pg.PlotWidget):
         self._limits_config: dict = dict(limits_config) if limits_config else dict(DEFAULT_LIMITS_CONFIG)
         self._suppress_view_redraws = False   # set True by ScopePlotWidget during batch zoom
         self._sinc_active = False         # True when sinc was actually used this draw
+        self._segment_curves: list = []   # non-primary segment overlay curves
+        self._process_segments: bool = True  # when False, render full trace ignoring segments
+        self._segment_dim_opacity: float = 0.5   # 0–1, for "dimmed" non-primary segments
+        self._segment_dash_pattern: Optional[list] = None  # Qt dash pattern for "dashed"
         self._render_t = np.array([])
         self._render_y = np.array([])
         self._visible_samples = 0
@@ -586,9 +652,29 @@ class TraceLane(pg.PlotWidget):
     def _add_trace_curve(self):
         if self._curve is not None:
             self.removeItem(self._curve)
+        # Clean up non-primary segment curves from previous render
+        for sc in self._segment_curves:
+            try:
+                self.removeItem(sc)
+            except Exception:
+                pass
+        self._segment_curves = []
+
         t_full = self.trace.time_axis
         y_full = self.trace.processed_data
         self._sinc_active = False
+
+        # Determine segment processing state
+        segs = getattr(self.trace, 'segments', None)
+        primary = getattr(self.trace, 'primary_segment', None)
+        viewmode = (getattr(self.trace, 'non_primary_viewmode', '') or '').strip()
+        process_segs = (self._process_segments
+                        and segs is not None and len(segs) > 1
+                        and primary is not None and 0 <= primary < len(segs))
+        if process_segs:
+            p_start, p_end = segs[primary][0], segs[primary][1]
+            t_full = t_full[p_start:p_end]
+            y_full = y_full[p_start:p_end]
 
         # Window to the currently visible x-range FIRST — for all interp modes.
         # Downsampling must operate on visible samples only; applying it to the
@@ -633,6 +719,45 @@ class TraceLane(pg.PlotWidget):
         if self._persist_curves:
             # Always keep main curve above all persistence ghost layers
             self._curve.setZValue(len(self._persist_curves) + 1)
+
+        # Non-primary segment overlays
+        if process_segs and viewmode != "hide":
+            t_all = self.trace.time_axis
+            y_all = self.trace.processed_data
+            color = self._display_color()
+            width_px = float(self.getPlotItem().vb.width())
+            seg_max_pts = _resolve_display_limit(self._limits_config, width_px)
+            for i, seg in enumerate(segs):
+                if i == primary:
+                    continue
+                s_s, s_e = seg[0], seg[1]
+                t_seg = t_all[s_s:s_e]
+                y_seg = y_all[s_s:s_e]
+                seg_mask = (t_seg >= x0) & (t_seg <= x1)
+                if int(seg_mask.sum()) >= 2:
+                    t_seg = t_seg[seg_mask]
+                    y_seg = y_seg[seg_mask]
+                if len(t_seg) < 2:
+                    continue
+                t_ds, y_ds = downsample_for_display(t_seg, y_seg, seg_max_pts)
+                if viewmode == "dimmed":
+                    c = QColor(color)
+                    c.setAlphaF(self._segment_dim_opacity)
+                    seg_pen = pg.mkPen(color=c, width=1)
+                elif viewmode == "dashed":
+                    seg_pen = pg.mkPen(color=color, width=1)
+                    if self._segment_dash_pattern:
+                        seg_pen.setStyle(Qt.PenStyle.CustomDashLine)
+                        seg_pen.setDashPattern(self._segment_dash_pattern)
+                    else:
+                        seg_pen.setStyle(Qt.PenStyle.DashLine)
+                else:
+                    seg_pen = pg.mkPen(color=color, width=1)
+                sc = self.plot(t_ds, y_ds, pen=seg_pen, antialias=False)
+                sc.setDownsampling(auto=True, method="peak")
+                sc.setClipToView(True)
+                self._segment_curves.append(sc)
+
         if self.y_lock_auto:
             self.getPlotItem().enableAutoRange(axis="y")
         self._redraw_labels()
@@ -1196,6 +1321,10 @@ class ScopePlotWidget(QWidget):
         # Persistence / retrigger state — reapplied after every rebuild
         self._persist_state: Dict[str, tuple] = {}       # name->(layers, t_ref)
         self._retrigger_curve_state: Dict[str, tuple] = {}  # name->(t_abs, data)
+        # Segment rendering state — applied to new lanes on rebuild
+        self._seg_process: bool = True
+        self._seg_dim_opacity: float = 0.5
+        self._seg_dash_pattern: Optional[list] = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(1)
@@ -1467,6 +1596,34 @@ class ScopePlotWidget(QWidget):
         for lane in self._lanes.values():
             lane.setMinimumHeight(self._min_lane_height)
 
+    def set_smart_scale(self, settings: dict):
+        """Propagate smart_scale settings to both time axis instances."""
+        self._x_axis.set_smart_scale(settings)
+        self._ov_x_axis.set_smart_scale(settings)
+
+    def set_process_segments(self, enabled: bool):
+        """Enable/disable segment-aware rendering on all lanes."""
+        self._seg_process = enabled
+        for lane in self._lanes.values():
+            lane._process_segments = enabled
+            lane.refresh_curve()
+
+    def set_segment_dim_opacity(self, opacity_pct: int):
+        """Set dim opacity (10–90%) for non-primary segments and refresh."""
+        opacity = max(0.1, min(0.9, opacity_pct / 100.0))
+        self._seg_dim_opacity = opacity
+        for lane in self._lanes.values():
+            lane._segment_dim_opacity = opacity
+            lane.refresh_curve()
+
+    def set_segment_dash_pattern(self, dash_size: int, gap_size: int):
+        """Set custom dash pattern for dashed non-primary segments and refresh."""
+        pattern = [float(dash_size), float(gap_size)]
+        self._seg_dash_pattern = pattern
+        for lane in self._lanes.values():
+            lane._segment_dash_pattern = pattern
+            lane.refresh_curve()
+
     def eventFilter(self, obj, event):
         """Intercept wheel events on TraceLane / overlay viewports.
         Decides whether to zoom (pass to pyqtgraph) or scroll the lane list."""
@@ -1545,6 +1702,9 @@ class ScopePlotWidget(QWidget):
                               allow_theme_force_labels=self._allow_theme_force_labels,
                               limits_config=self._limits_config)
             lane.viewport_min_pts = self.viewport_min_pts
+            lane._process_segments = self._seg_process
+            lane._segment_dim_opacity = self._seg_dim_opacity
+            lane._segment_dash_pattern = self._seg_dash_pattern
             lane.setMinimumHeight(self._min_lane_height)
             lane.viewport().installEventFilter(self)
             if first_lane is None:

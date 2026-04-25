@@ -3,15 +3,95 @@ core/channel_panel.py
 Left-side channel list: toggle visibility, color, drag-to-reorder.
 """
 
+import fnmatch
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QCheckBox, QScrollArea, QMenu, QColorDialog, QSizePolicy,
-    QAbstractItemView, QListWidget, QListWidgetItem, QFrame
+    QAbstractItemView, QListWidget, QListWidgetItem, QFrame,
+    QDialog, QRadioButton, QButtonGroup, QLineEdit, QGroupBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QMimeData, QObject, QEvent, QPoint
 from PyQt6.QtGui import QColor, QFont, QDrag, QPixmap, QPainter, QCursor
-from typing import List, Dict
+from typing import Dict, List, Set
 from core.trace_model import TraceModel
+
+
+# ── Grouping dialog ───────────────────────────────────────────────────────────
+
+class _GroupingDialog(QDialog):
+    """Dialog for regrouping channels by unit or wildcard pattern."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Group Channels")
+        self.setMinimumWidth(440)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+
+        method_box = QGroupBox("Grouping method")
+        ml = QVBoxLayout(method_box)
+
+        self.radio_unit = QRadioButton(
+            "By Unit  —  group channels by their assigned unit (V, °C, A, …)")
+        self.radio_unit.setChecked(True)
+        ml.addWidget(self.radio_unit)
+
+        pat_row = QHBoxLayout()
+        self.radio_pattern = QRadioButton("By Pattern:")
+        pat_row.addWidget(self.radio_pattern)
+        self.edit_pattern = QLineEdit()
+        self.edit_pattern.setPlaceholderText("e.g.  3??   or   internal*")
+        self.edit_pattern.setEnabled(False)
+        self.edit_pattern.setToolTip(
+            "Wildcard: * matches any text, ? matches one character.\n"
+            "Case-insensitive. Matched against the channel display label.")
+        pat_row.addWidget(self.edit_pattern)
+        ml.addLayout(pat_row)
+
+        bg_method = QButtonGroup(self)
+        bg_method.addButton(self.radio_unit)
+        bg_method.addButton(self.radio_pattern)
+        self.radio_pattern.toggled.connect(self.edit_pattern.setEnabled)
+
+        layout.addWidget(method_box)
+
+        mode_box = QGroupBox("When matches are found")
+        mode_l = QVBoxLayout(mode_box)
+        self.radio_create_new = QRadioButton(
+            "Create new group(s)  —  matched channels leave their current group")
+        self.radio_create_new.setChecked(True)
+        mode_l.addWidget(self.radio_create_new)
+        self.radio_create_inside = QRadioButton(
+            "Create sub-group inside existing group  —  "
+            "unmatched channels stay in the original")
+        mode_l.addWidget(self.radio_create_inside)
+        bg_mode = QButtonGroup(self)
+        bg_mode.addButton(self.radio_create_new)
+        bg_mode.addButton(self.radio_create_inside)
+        layout.addWidget(mode_box)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_cancel = QPushButton("Cancel")
+        btn_apply = QPushButton("Apply")
+        btn_apply.setStyleSheet(
+            "background: #2060a0; color: white; padding: 4px 16px; font-weight: bold;")
+        btn_apply.setDefault(True)
+        btn_cancel.clicked.connect(self.reject)
+        btn_apply.clicked.connect(self.accept)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_apply)
+        layout.addLayout(btn_row)
+
+    def get_config(self):
+        """Returns (method: str, pattern: str, create_inside: bool).
+        method is 'unit' or 'pattern'."""
+        method = 'unit' if self.radio_unit.isChecked() else 'pattern'
+        pattern = self.edit_pattern.text().strip()
+        create_inside = self.radio_create_inside.isChecked()
+        return method, pattern, create_inside
 
 
 class _LabelClickFilter(QObject):
@@ -228,6 +308,8 @@ class ChannelRow(QWidget):
 
 class _ChannelGroupHeader(QWidget):
     """Compact group header: collapse toggle + group name + All/None buttons."""
+    rename_requested = pyqtSignal(str)   # group_name
+
     def __init__(self, group_name: str, rows_ref: list,
                  on_toggle_collapse, parent=None):
         super().__init__(parent)
@@ -280,6 +362,16 @@ class _ChannelGroupHeader(QWidget):
             lambda: [r.chk_vis.setChecked(False) for r in self._rows_ref])
         hl.addWidget(btn_none)
 
+        btn_rename = QPushButton("✎")
+        btn_rename.setFixedSize(16, 16)
+        btn_rename.setToolTip("Rename group")
+        btn_rename.setStyleSheet(
+            "QPushButton { font-size: 9px; color: #a0a060; border: none; "
+            "background: transparent; padding: 0; } "
+            "QPushButton:hover { color: #e0e080; }")
+        btn_rename.clicked.connect(lambda: self.rename_requested.emit(self.group_name))
+        hl.addWidget(btn_rename)
+
     def _toggle(self):
         self._collapsed = not self._collapsed
         self._btn_collapse.setText("▶" if self._collapsed else "▼")
@@ -307,6 +399,7 @@ class ChannelPanel(QWidget):
     reset_color_requested  = pyqtSignal(str)     # trace name
     trace_renamed          = pyqtSignal(str, str)  # (trace_name, new_label)
     segment_changed        = pyqtSignal(str)       # trace_name
+    group_renamed          = pyqtSignal(str, str)  # (old_name, new_name)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -381,6 +474,16 @@ class ChannelPanel(QWidget):
         ctrl2.addWidget(btn_sinc)
         layout.addLayout(ctrl2)
 
+        ctrl3 = QHBoxLayout()
+        ctrl3.setContentsMargins(4, 0, 4, 4)
+        btn_group = QPushButton("Group…")
+        btn_group.setFixedHeight(20)
+        btn_group.setToolTip("Group channels by unit or name pattern")
+        btn_group.setStyleSheet("font-size: 9px;")
+        btn_group.clicked.connect(self._open_grouping_dialog)
+        ctrl3.addWidget(btn_group)
+        layout.addLayout(ctrl3)
+
     def _insert_group_header(self, group: str, at_row: int):
         """Insert a non-draggable group header item at the given list row."""
         if group not in self._group_hdr_rows:
@@ -388,6 +491,7 @@ class ChannelPanel(QWidget):
         hdr_widget = _ChannelGroupHeader(
             group, self._group_hdr_rows[group],
             on_toggle_collapse=self._on_group_collapse)
+        hdr_widget.rename_requested.connect(self._on_group_rename)
         item = QListWidgetItem()
         item.setData(_GROUP_HEADER_ROLE, group)       # marks it as a group header
         item.setSizeHint(QSize(0, 24))
@@ -529,3 +633,108 @@ class ChannelPanel(QWidget):
         for row in self._rows.values():
             row.trace._interp_mode_override = mode
             self.interp_changed.emit(row.trace.name, mode)
+
+    # ── Grouping ──────────────────────────────────────────────────────────────
+
+    def _full_rebuild(self):
+        """Rebuild the list widget entirely from current trace.col_group state."""
+        ordered_traces = [self._rows[n].trace
+                          for n in self._trace_order if n in self._rows]
+        self._list.clear()
+        self._rows.clear()
+        self._trace_order.clear()
+        self._group_rows.clear()
+        self._group_items.clear()
+        self._group_hdr_rows.clear()
+        for trace in ordered_traces:
+            self.add_trace(trace)
+
+    def _open_grouping_dialog(self):
+        dlg = _GroupingDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        method, pattern, create_inside = dlg.get_config()
+        if method == 'unit':
+            self._apply_group_by_unit(create_inside)
+        else:
+            if not pattern:
+                return
+            self._apply_group_by_pattern(pattern, create_inside)
+
+    def _on_group_rename(self, old_name: str):
+        from PyQt6.QtWidgets import QInputDialog
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Group", "New group name:", text=old_name)
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+        new_name = new_name.strip()
+        for tname in list(self._group_rows.get(old_name, [])):
+            if tname in self._rows:
+                self._rows[tname].trace.col_group = new_name
+        self._full_rebuild()
+        self.group_renamed.emit(old_name, new_name)
+
+    def _apply_group_by_unit(self, create_inside: bool):
+        ordered_traces = [self._rows[n].trace
+                          for n in self._trace_order if n in self._rows]
+        if create_inside:
+            # Find unique units per existing group
+            group_units: Dict[str, Set[str]] = {}
+            for trace in ordered_traces:
+                g = trace.col_group or "__ungrouped__"
+                unit = trace.unit.strip() or "Other"
+                group_units.setdefault(g, set()).add(unit)
+            # Assign new group names only where a group has mixed units
+            for trace in ordered_traces:
+                old_g = trace.col_group or "__ungrouped__"
+                unit = trace.unit.strip() or "Other"
+                if len(group_units.get(old_g, set())) > 1:
+                    if old_g == "__ungrouped__":
+                        trace.col_group = unit
+                    else:
+                        trace.col_group = f"{old_g}_{unit}"
+                # else: single unit in group → leave col_group unchanged
+        else:
+            # Create new: group every trace by its unit, ignoring existing groups
+            for trace in ordered_traces:
+                trace.col_group = trace.unit.strip() or "Other"
+        self._full_rebuild()
+
+    def _apply_group_by_pattern(self, pattern: str, create_inside: bool):
+        pat_lower = pattern.lower()
+        # Human-readable representation of the pattern for group naming
+        name_repr = pattern.replace('*', '(ALL)')
+
+        ordered_traces = [self._rows[n].trace
+                          for n in self._trace_order if n in self._rows]
+
+        def _matches(trace) -> bool:
+            label = (trace.label or trace.name or "").lower()
+            return fnmatch.fnmatch(label, pat_lower)
+
+        if create_inside:
+            # Find which existing groups have at least one non-match
+            group_has_nonmatch: Dict[str, bool] = {}
+            for trace in ordered_traces:
+                g = trace.col_group or "__ungrouped__"
+                if not _matches(trace):
+                    group_has_nonmatch[g] = True
+            # Move only the matching traces to a sub-group when the group
+            # has mixed membership (at least one non-match stays behind)
+            for trace in ordered_traces:
+                if not _matches(trace):
+                    continue
+                old_g = trace.col_group or "__ungrouped__"
+                if group_has_nonmatch.get(old_g):
+                    if old_g == "__ungrouped__":
+                        trace.col_group = f"Group_{name_repr}"
+                    else:
+                        trace.col_group = f"{old_g}_{name_repr}"
+                # else: whole group matches → keep original group name
+        else:
+            # Create new: all matching traces go to one new group
+            group_name = f"Group_{name_repr}"
+            for trace in ordered_traces:
+                if _matches(trace):
+                    trace.col_group = group_name
+        self._full_rebuild()

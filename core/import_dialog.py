@@ -353,6 +353,12 @@ class ImportDialog(QDialog):
             b = QPushButton(label)
             b.clicked.connect(fn)
             tb.addWidget(b)
+        tb.addSpacing(16)
+        self.chk_group_by_unit = QCheckBox("Group by Unit on import")
+        self.chk_group_by_unit.setToolTip(
+            "When checked, imported traces are grouped by their unit field\n"
+            "(overrides any parser-supplied grouping).")
+        tb.addWidget(self.chk_group_by_unit)
         tb.addStretch()
         cl.addLayout(tb)
 

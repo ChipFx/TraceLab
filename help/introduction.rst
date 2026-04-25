@@ -23,6 +23,21 @@ But we cannot "demand" you do under the base implications of Apache 2.0.
 Please check the **Help → About TraceLab** section from the Menu Bar, or read the
 LICENSE.md and NOTICE.md in the project's root.
 
+Test Data
+---------
+
+TraceLab comes with a small tool created by Claude Code back when it was just a
+fun little tool to inspect one specific source of CSV capture data.
+This tool allows you to generate a test_data.csv file to play with if you don't
+immediately have any data available.
+
+Run:
+
+``python generate_test_data.py``
+
+Mini Notice
+-----------
+
 TraceLab makes use of the following open-source libraries:
 
 +-------------+---------------------+------------------------------------+

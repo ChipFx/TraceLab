@@ -352,6 +352,7 @@ class MainWindow(QMainWindow):
         s["viewport_preset_min"]     = self._limits_config.get("preset_min", 2048)
         s["viewport_preset_max"]     = self._limits_config.get("preset_max", 50_000)
         s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
+        s["advanced_ui"] = dict(self._adv_ui)
         s["lane_label_size"] = self._lane_label_size
         s["show_lane_labels"] = self._show_lane_labels
         s["allow_theme_force_labels"] = self._allow_theme_force_labels
@@ -379,6 +380,8 @@ class MainWindow(QMainWindow):
         self._set_display_mode(self._display_mode, save=False)
         # Set branding on status bar
         self._scope_status.set_branding(self._get_branding_path())
+        # Window icon — render a square version of the branding SVG
+        self._set_window_icon()
 
     # ── UI Construction ────────────────────────────────────────────────
 
@@ -434,6 +437,19 @@ class MainWindow(QMainWindow):
         self._epoch_anchor_ch:    str   = ""
         self._epoch_anchor_level: float = 0.0
         self._epoch_anchor_edge:  int   = -1
+
+        # ── Advanced UI settings ──────────────────────────────────────────────
+        _adv_defaults = {
+            "statusbar_scroll":      True,
+            "scroll_zoom_enabled":   True,
+            "scroll_list_enabled":   True,
+            "scroll_modifier_keys":  ["ctrl", "alt", "shift"],
+            "scroll_default":        "zoom",
+            "arrow_mode":            "pan_time",
+            "split_min_lane_height": 80,
+        }
+        self._adv_ui: dict = {**_adv_defaults,
+                              **self._settings.get("advanced_ui", {})}
 
         # ── Periodicity estimation ────────────────────────────────────────────
         # Migrate any old method names that may live in settings.json
@@ -499,6 +515,13 @@ class MainWindow(QMainWindow):
         self._plot.view_changed.connect(self._refresh_status_bar)
         self._plot.view_changed.connect(self._on_view_changed_retrigger)
 
+        # 0-ms single-shot timer coalesces rapid back-to-back _refresh_status_bar
+        # calls (e.g. hiding all 32 channels) into one actual redraw.
+        self._status_bar_refresh_timer = QTimer()
+        self._status_bar_refresh_timer.setSingleShot(True)
+        self._status_bar_refresh_timer.setInterval(0)
+        self._status_bar_refresh_timer.timeout.connect(self._do_refresh_status_bar)
+
         # Wrap plot + status bar in a vertical container
         plot_container = QWidget()
         pcl = QVBoxLayout(plot_container)
@@ -522,6 +545,12 @@ class MainWindow(QMainWindow):
         self._plot._range_bar.setParent(None)  # detach from plot's layout
         pcl.addWidget(self._scope_status)
         pcl.addWidget(self._plot._range_bar)
+
+        # Propagate advanced-UI settings to plot and status bar
+        self._plot.set_scroll_settings(self._adv_ui)
+        self._plot.set_min_lane_height(self._adv_ui.get("split_min_lane_height", 80))
+        self._scope_status.set_statusbar_scroll_enabled(
+            self._adv_ui.get("statusbar_scroll", True))
 
         self._plot_container = plot_container
         self._splitter.addWidget(plot_container)
@@ -556,6 +585,11 @@ class MainWindow(QMainWindow):
         self._splitter.setStretchFactor(2, 0)
         self._splitter.setSizes([180, 820, 310])
         main_layout.addWidget(self._splitter)
+
+        # Install app-level event filter so arrow keys work regardless of
+        # which child widget (e.g. pyqtgraph ViewBox) currently holds focus.
+        from PyQt6.QtWidgets import QApplication as _QApp
+        _QApp.instance().installEventFilter(self)
 
     def _build_menus(self):
         mb = self.menuBar()
@@ -985,6 +1019,103 @@ class MainWindow(QMainWindow):
         self._act_export_seg_primary.triggered.connect(
             lambda: self._set_export_segments_mode("primary_only"))
 
+        settings_menu.addSeparator()
+        adv_ui_menu = settings_menu.addMenu("Advanced UI")
+        adv_ui_menu.setToolTipsVisible(True)
+
+        # ── Mouse → Scroll submenu ────────────────────────��────────────
+        scroll_menu = adv_ui_menu.addMenu("Mouse → Scroll")
+        scroll_menu.setToolTipsVisible(True)
+
+        self._act_statusbar_scroll = scroll_menu.addAction("Enable Status Bar Scrolling")
+        self._act_statusbar_scroll.setCheckable(True)
+        self._act_statusbar_scroll.setChecked(self._adv_ui.get("statusbar_scroll", True))
+        self._act_statusbar_scroll.setToolTip(
+            "Mouse wheel scrolls the channel-block status bar horizontally.\n"
+            "Wheel tilt (if present) snaps one block at a time.")
+        self._act_statusbar_scroll.triggered.connect(self._toggle_statusbar_scroll)
+
+        scroll_menu.addSeparator()
+
+        self._act_scroll_zoom = scroll_menu.addAction("Zoom with Scroll Wheel")
+        self._act_scroll_zoom.setCheckable(True)
+        self._act_scroll_zoom.setChecked(self._adv_ui.get("scroll_zoom_enabled", True))
+        self._act_scroll_zoom.setToolTip(
+            "Mouse wheel zooms the trace view (pyqtgraph default).")
+        self._act_scroll_zoom.triggered.connect(self._toggle_scroll_zoom)
+
+        self._act_scroll_list = scroll_menu.addAction("Scroll Trace List with Scroll Wheel")
+        self._act_scroll_list.setCheckable(True)
+        self._act_scroll_list.setChecked(self._adv_ui.get("scroll_list_enabled", True))
+        self._act_scroll_list.setToolTip(
+            "Mouse wheel can scroll the split-view trace list vertically\n"
+            "(controlled by modifier keys or default action).")
+        self._act_scroll_list.triggered.connect(self._toggle_scroll_list)
+
+        scroll_menu.addSeparator()
+        scroll_default_menu = scroll_menu.addMenu("Default Scroll Action")
+        scroll_default_menu.setToolTipsVisible(True)
+        _sdg = QActionGroup(self)
+        _sdg.setExclusive(True)
+        self._act_scroll_default_zoom = scroll_default_menu.addAction("Zoom (no modifier)")
+        self._act_scroll_default_zoom.setCheckable(True)
+        self._act_scroll_default_zoom.setChecked(
+            self._adv_ui.get("scroll_default", "zoom") == "zoom")
+        self._act_scroll_default_zoom.setToolTip(
+            "Without a modifier key → zoom; with modifier → scroll list.")
+        _sdg.addAction(self._act_scroll_default_zoom)
+        self._act_scroll_default_list = scroll_default_menu.addAction("Scroll List (no modifier)")
+        self._act_scroll_default_list.setCheckable(True)
+        self._act_scroll_default_list.setChecked(
+            self._adv_ui.get("scroll_default", "zoom") == "scroll_list")
+        self._act_scroll_default_list.setToolTip(
+            "Without a modifier key → scroll list; with modifier → zoom.")
+        _sdg.addAction(self._act_scroll_default_list)
+        self._act_scroll_default_zoom.triggered.connect(
+            lambda: self._set_scroll_default("zoom"))
+        self._act_scroll_default_list.triggered.connect(
+            lambda: self._set_scroll_default("scroll_list"))
+
+        scroll_menu.addSeparator()
+        scroll_menu.addAction("Set Modifier Keys…").triggered.connect(
+            self._dlg_scroll_modifier_keys)
+
+        # ── Keyboard → Arrows submenu ──────────────────────────────────
+        arrows_menu = adv_ui_menu.addMenu("Keyboard → Arrows")
+        arrows_menu.setToolTipsVisible(True)
+        _akg = QActionGroup(self)
+        _akg.setExclusive(True)
+        arrow_mode = self._adv_ui.get("arrow_mode", "pan_time")
+        self._act_arrow_off = arrows_menu.addAction("Off / do not use")
+        self._act_arrow_off.setCheckable(True)
+        self._act_arrow_off.setChecked(arrow_mode == "off")
+        self._act_arrow_off.setToolTip("Arrow keys have no effect on the plot.")
+        _akg.addAction(self._act_arrow_off)
+        self._act_arrow_pan = arrows_menu.addAction("Pan time axis (Left / Right)")
+        self._act_arrow_pan.setCheckable(True)
+        self._act_arrow_pan.setChecked(arrow_mode == "pan_time")
+        self._act_arrow_pan.setToolTip(
+            "Left/Right arrows pan the time axis by 10% of the visible span.\n"
+            "Up/Down arrows scroll the split-view trace list.")
+        _akg.addAction(self._act_arrow_pan)
+        self._act_arrow_statusbar = arrows_menu.addAction("Pan status bar by 1 block")
+        self._act_arrow_statusbar.setCheckable(True)
+        self._act_arrow_statusbar.setChecked(arrow_mode == "scroll_statusbar")
+        self._act_arrow_statusbar.setToolTip(
+            "Left/Right arrows snap the status bar one channel block at a time.")
+        _akg.addAction(self._act_arrow_statusbar)
+        self._act_arrow_off.triggered.connect(
+            lambda: self._set_arrow_mode("off"))
+        self._act_arrow_pan.triggered.connect(
+            lambda: self._set_arrow_mode("pan_time"))
+        self._act_arrow_statusbar.triggered.connect(
+            lambda: self._set_arrow_mode("scroll_statusbar"))
+
+        # ── Split View submenu ─────────────────────────────────────────
+        split_view_menu = adv_ui_menu.addMenu("Split View")
+        split_view_menu.addAction("Minimum Trace Height…").triggered.connect(
+            self._dlg_min_lane_height)
+
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Reload Plugins").triggered.connect(
@@ -1344,6 +1475,60 @@ class MainWindow(QMainWindow):
 
         return ""
 
+    def _set_window_icon(self):
+        """Load icon.svg (icon.svg → branding_Dark.svg → nothing) and apply
+        to both the window title bar and the OS taskbar / program bar.
+
+        On Windows, also sets the AppUserModelID so the OS assigns our icon
+        to the taskbar button instead of grouping it under the Python icon.
+        """
+        base   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        assets = os.path.join(base, "assets")
+
+        # Resolution order: dedicated icon first, branding fallback second
+        icon_path = None
+        for name in ("icon.svg", "branding_Dark.svg"):
+            candidate = os.path.join(assets, name)
+            if os.path.exists(candidate):
+                icon_path = candidate
+                break
+        if icon_path is None:
+            return
+
+        try:
+            from PyQt6.QtSvg import QSvgRenderer
+            from PyQt6.QtCore import QRectF
+            from PyQt6.QtGui import QPainter
+            from PyQt6.QtWidgets import QApplication
+            renderer = QSvgRenderer(icon_path)
+            if not renderer.isValid():
+                return
+            # Build a multi-resolution QIcon so it looks sharp at every DPI
+            icon = QIcon()
+            bg = QColor("#060610")
+            for size in (16, 32, 48, 64, 128, 256):
+                px = QPixmap(size, size)
+                px.fill(bg)
+                p = QPainter(px)
+                renderer.render(p, QRectF(0, 0, size, size))
+                p.end()
+                icon.addPixmap(px)
+            # Title-bar icon
+            self.setWindowIcon(icon)
+            # Taskbar / program-bar icon (all platforms)
+            QApplication.instance().setWindowIcon(icon)
+            # Windows: set AppUserModelID so the OS replaces the Python
+            # interpreter icon with ours in the taskbar
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                        "ChipFX.TraceLab.1")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # ── Display / Theme ────────────────────────────────────────────────
 
     def _set_display_mode(self, mode: str, save: bool = True):
@@ -1499,6 +1684,12 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
 
     def _refresh_status_bar(self):
+        """Schedule a status-bar refresh on the next event loop tick.
+        Multiple calls within the same synchronous call stack coalesce into one."""
+        if hasattr(self, '_status_bar_refresh_timer'):
+            self._status_bar_refresh_timer.start()
+
+    def _do_refresh_status_bar(self):
         if not hasattr(self, '_scope_status'):
             return
         x0, x1 = self._plot.get_current_view_range()
@@ -2138,6 +2329,83 @@ class MainWindow(QMainWindow):
             current, 1.0, 300.0, 1)
         if ok:
             self._settings["periodicity_estimation_timeout"] = val
+
+    # ── Status bar navigation helper ───────────────────────────────────
+
+    def _statusbar_snap(self, direction: int):
+        """Scroll the status bar to the next whole block edge.
+        direction: +1 = towards higher scroll value (right), -1 = towards left.
+        Always moves at least one edge even if already on a boundary."""
+        sb   = self._scope_status._ch_scroll.horizontalScrollBar()
+        step = 122   # BLOCK_W(120) + SEP_W(2)
+        pos  = sb.value()
+        if direction > 0:
+            new_pos = (pos // step + 1) * step
+        else:
+            if pos % step == 0:
+                new_pos = max(0, pos - step)
+            else:
+                new_pos = (pos // step) * step
+        sb.setValue(new_pos)
+
+    # ── Advanced UI helpers ────────────────────────────────────────────
+
+    def _adv_ui_save(self):
+        self._adv_ui_apply()
+        self._settings["advanced_ui"] = dict(self._adv_ui)
+
+    def _adv_ui_apply(self):
+        self._plot.set_scroll_settings(self._adv_ui)
+        self._plot.set_min_lane_height(
+            self._adv_ui.get("split_min_lane_height", 80))
+        self._scope_status.set_statusbar_scroll_enabled(
+            self._adv_ui.get("statusbar_scroll", True))
+
+    def _toggle_statusbar_scroll(self, checked: bool):
+        self._adv_ui["statusbar_scroll"] = checked
+        self._adv_ui_save()
+
+    def _toggle_scroll_zoom(self, checked: bool):
+        self._adv_ui["scroll_zoom_enabled"] = checked
+        self._adv_ui_save()
+
+    def _toggle_scroll_list(self, checked: bool):
+        self._adv_ui["scroll_list_enabled"] = checked
+        self._adv_ui_save()
+
+    def _set_scroll_default(self, action: str):
+        self._adv_ui["scroll_default"] = action
+        self._adv_ui_save()
+
+    def _set_arrow_mode(self, mode: str):
+        self._adv_ui["arrow_mode"] = mode
+        self._adv_ui_save()
+
+    def _dlg_scroll_modifier_keys(self):
+        current = ", ".join(self._adv_ui.get("scroll_modifier_keys",
+                                             ["ctrl", "alt", "shift"]))
+        text, ok = QInputDialog.getText(
+            self, "Scroll Modifier Keys",
+            "Comma-separated list of modifier keys that switch the scroll action.\n"
+            "Valid values: ctrl, alt, shift  (e.g. 'ctrl, alt')\n\n"
+            "Any one of the listed keys triggers the alternate scroll mode:",
+            text=current)
+        if ok:
+            keys = [k.strip().lower() for k in text.split(",")]
+            keys = [k for k in keys if k in ("ctrl", "alt", "shift")]
+            self._adv_ui["scroll_modifier_keys"] = keys or ["ctrl"]
+            self._adv_ui_save()
+
+    def _dlg_min_lane_height(self):
+        current = int(self._adv_ui.get("split_min_lane_height", 80))
+        val, ok = QInputDialog.getInt(
+            self, "Minimum Trace Height",
+            "Minimum height of each split-view trace lane (pixels).\n"
+            "Smaller values let you view more traces at once on a small screen.",
+            current, 40, 800, 10)
+        if ok:
+            self._adv_ui["split_min_lane_height"] = val
+            self._adv_ui_save()
 
     def _set_extrap_mode(self, mode: str) -> None:
         """Switch extrapolation behaviour and re-render."""
@@ -2963,6 +3231,50 @@ class MainWindow(QMainWindow):
         self._rebuild_theme_menu()
         self._status_lbl.setText(
             f"Themes reloaded: {len(self.theme.available_themes)} found.")
+
+    def eventFilter(self, _obj, event):
+        """App-level event filter — intercepts arrow keys globally so they work
+        regardless of which child widget (pyqtgraph ViewBox etc.) has focus.
+
+        Only fires when this window is the active top-level window and no text-
+        entry widget has focus (so typing in QLineEdit / QSpinBox is unaffected)."""
+        from PyQt6.QtCore import QEvent as _QEvent
+        from PyQt6.QtWidgets import (QApplication as _QApp,
+                                      QLineEdit, QTextEdit,
+                                      QAbstractSpinBox, QAbstractItemView)
+        if event.type() != _QEvent.Type.KeyPress:
+            return False
+        # Only handle when this window is the active window
+        if not self.isActiveWindow():
+            return False
+        # Don't steal keys from text-entry or list widgets
+        fw = _QApp.instance().focusWidget()
+        if isinstance(fw, (QLineEdit, QTextEdit, QAbstractSpinBox,
+                           QAbstractItemView)):
+            return False
+
+        key  = event.key()
+        mode = self._adv_ui.get("arrow_mode", "pan_time")
+
+        if mode == "pan_time":
+            if key == Qt.Key.Key_Left:
+                self._plot.pan_x(-0.1); return True
+            if key == Qt.Key.Key_Right:
+                self._plot.pan_x(0.1);  return True
+            if key == Qt.Key.Key_Up:
+                sb = self._plot._scroll.verticalScrollBar()
+                sb.setValue(sb.value() - 80); return True
+            if key == Qt.Key.Key_Down:
+                sb = self._plot._scroll.verticalScrollBar()
+                sb.setValue(sb.value() + 80); return True
+
+        elif mode == "scroll_statusbar":
+            if key == Qt.Key.Key_Left:
+                self._statusbar_snap(-1); return True
+            if key == Qt.Key.Key_Right:
+                self._statusbar_snap(+1); return True
+
+        return False
 
     def closeEvent(self, event):
         self._save_settings()

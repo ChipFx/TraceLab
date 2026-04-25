@@ -9,7 +9,7 @@ from pyqtgraph import InfiniteLine
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QMenu, QColorDialog, QInputDialog,
                                QLineEdit, QPushButton, QFrame, QSizePolicy)
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QAction
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -1190,6 +1190,9 @@ class ScopePlotWidget(QWidget):
         }
         self._overlay_visuals: Dict[str, OverlayTraceVisual] = {}
         self._overlay_z_order: List[str] = []  # for bring-to-front
+        # Scroll / min-height settings (updated via set_scroll_settings / set_min_lane_height)
+        self._scroll_settings: dict = {}
+        self._min_lane_height: int = 80
         # Persistence / retrigger state — reapplied after every rebuild
         self._persist_state: Dict[str, tuple] = {}       # name->(layers, t_ref)
         self._retrigger_curve_state: Dict[str, tuple] = {}  # name->(t_abs, data)
@@ -1216,6 +1219,8 @@ class ScopePlotWidget(QWidget):
         self._overlay_widget.hide()
         layout.addWidget(self._overlay_widget)
         self._setup_overlay()
+        # Intercept wheel events on overlay viewport for modifier-key scroll
+        self._overlay_widget.viewport().installEventFilter(self)
 
         # Range bar
         self._range_bar = RangeBar()
@@ -1228,6 +1233,15 @@ class ScopePlotWidget(QWidget):
         self._range_timer.setInterval(100)
         self._range_timer.timeout.connect(self._update_range_bar)
         self._range_timer.timeout.connect(self.view_changed)
+
+        # Debounce timer for visibility-driven rebuilds (0 ms = next event tick).
+        # Coalesces rapid back-to-back set_trace_visible calls (e.g. "None" with
+        # 32 channels) into a single _rebuild, preventing O(n²) widget churn.
+        self._rebuild_timer = QTimer()
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.setInterval(0)
+        self._rebuild_timer.timeout.connect(self._rebuild)
+
         self._theme_manager.themeChanged.connect(self._on_theme_changed)
 
     def _setup_overlay(self):
@@ -1406,7 +1420,9 @@ class ScopePlotWidget(QWidget):
         for t in self.traces:
             if t.name == trace_name:
                 t.visible = visible
-        self._rebuild()
+        # Defer the rebuild so rapid back-to-back calls (e.g. "None" button
+        # on 32 channels) only trigger one rebuild instead of n² widget churn.
+        self._rebuild_timer.start()
 
     def set_interp_mode_for_trace(self, trace_name: str, mode: str):
         """Set per-trace interpolation override."""
@@ -1441,6 +1457,52 @@ class ScopePlotWidget(QWidget):
         else:
             self._refresh_overlay_visuals()
 
+    def set_scroll_settings(self, settings: dict):
+        """Update modifier-key scroll behaviour from Advanced UI settings."""
+        self._scroll_settings = dict(settings)
+
+    def set_min_lane_height(self, height: int):
+        """Change minimum trace height; applies to all current and future lanes."""
+        self._min_lane_height = max(40, int(height))
+        for lane in self._lanes.values():
+            lane.setMinimumHeight(self._min_lane_height)
+
+    def eventFilter(self, obj, event):
+        """Intercept wheel events on TraceLane / overlay viewports.
+        Decides whether to zoom (pass to pyqtgraph) or scroll the lane list."""
+        if event.type() != QEvent.Type.Wheel:
+            return False
+
+        s = self._scroll_settings
+        zoom_on  = s.get("scroll_zoom_enabled", True)
+        list_on  = s.get("scroll_list_enabled", True)
+        default  = s.get("scroll_default", "zoom")
+        mod_keys = s.get("scroll_modifier_keys", ["ctrl", "alt", "shift"])
+
+        mods = event.modifiers()
+        modifier_held = (
+            ("ctrl"  in mod_keys and bool(mods & Qt.KeyboardModifier.ControlModifier)) or
+            ("alt"   in mod_keys and bool(mods & Qt.KeyboardModifier.AltModifier))    or
+            ("shift" in mod_keys and bool(mods & Qt.KeyboardModifier.ShiftModifier))
+        )
+
+        # Determine requested action
+        if default == "zoom":
+            action = "scroll_list" if modifier_held else "zoom"
+        else:
+            action = "zoom" if modifier_held else "scroll_list"
+
+        if action == "scroll_list" and list_on and self._mode == "split":
+            sb    = self._scroll.verticalScrollBar()
+            delta = event.angleDelta().y()
+            sb.setValue(sb.value() - delta * 3 // 8)
+            return True   # consumed — pyqtgraph won't zoom
+
+        if action == "zoom" and not zoom_on:
+            return True   # zoom disabled — consume silently
+
+        return False      # let pyqtgraph handle
+
     def set_limits_config(self, cfg: dict) -> None:
         """Hot-update the display-limit config and refresh all curves."""
         self._limits_config = dict(cfg)
@@ -1463,6 +1525,7 @@ class ScopePlotWidget(QWidget):
 
     def _rebuild_split(self):
         for lane in self._lanes.values():
+            lane.hide()          # must hide BEFORE setParent(None) or it flashes as a top-level window
             lane.setParent(None)
             lane.deleteLater()
         self._lanes.clear()
@@ -1482,7 +1545,8 @@ class ScopePlotWidget(QWidget):
                               allow_theme_force_labels=self._allow_theme_force_labels,
                               limits_config=self._limits_config)
             lane.viewport_min_pts = self.viewport_min_pts
-            lane.setMinimumHeight(80)
+            lane.setMinimumHeight(self._min_lane_height)
+            lane.viewport().installEventFilter(self)
             if first_lane is None:
                 first_lane = lane
             else:

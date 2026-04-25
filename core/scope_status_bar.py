@@ -11,7 +11,7 @@ Layout: [Logo] | [Time+Trig] | [Ch1][Ch2]...(scrollable)
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QScrollArea, QFrame
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRectF
+from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QEvent
 from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPixmap, QCursor
 from typing import List
 
@@ -178,6 +178,10 @@ class ScopeStatusBar(QWidget):
         self._outer.addWidget(self._ch_scroll, stretch=1)
         self._update_scroll_style()
 
+        self._statusbar_scroll_enabled = True
+        # Intercept wheel events on the scroll area's viewport
+        self._ch_scroll.viewport().installEventFilter(self)
+
     def _apply_style(self):
         bg  = self._pal.get("bar_bg",  "#0a0a14")
         sep = self._pal.get("sep",     "#1e1e38")
@@ -205,6 +209,56 @@ class ScopeStatusBar(QWidget):
     # Keep old name for compatibility
     def set_theme(self, theme_name_ignored: str):
         pass   # palette is set via set_palette(); theme_name no longer used here
+
+    def set_statusbar_scroll_enabled(self, enabled: bool):
+        self._statusbar_scroll_enabled = enabled
+
+    def eventFilter(self, obj, event):
+        if (self._statusbar_scroll_enabled and
+                event.type() == QEvent.Type.Wheel):
+            self._handle_statusbar_scroll(event)
+            return True   # consume; don't let QScrollArea process it
+        return False
+
+    def wheelEvent(self, event):
+        """Wheel over logo / time-trig area — same handling."""
+        if self._statusbar_scroll_enabled:
+            self._handle_statusbar_scroll(event)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def _handle_statusbar_scroll(self, event):
+        """Scroll the channel-block area.
+        Vertical wheel → smooth horizontal scroll.
+        Horizontal wheel (tilt) → snap to next whole block edge."""
+        sb  = self._ch_scroll.horizontalScrollBar()
+        dx  = event.angleDelta().x()
+        dy  = event.angleDelta().y()
+        if dx == 0 and dy == 0:
+            return
+        if abs(dx) > abs(dy) and dx != 0:
+            # Tilt left/right: snap to nearest block edge in that direction.
+            # dx < 0 → tilt right → scroll right (higher value)
+            self._snap_to_block(sb, +1 if dx < 0 else -1)
+        elif dy != 0:
+            # Vertical wheel: smooth horizontal scroll
+            # angleDelta().y() is positive for scroll-up; scroll left for up
+            sb.setValue(sb.value() - dy * 3 // 8)
+
+    def _snap_to_block(self, sb, direction: int):
+        """Snap scrollbar to the next whole-block boundary.
+        direction: +1 = higher value (right), -1 = lower value (left)."""
+        step = BLOCK_W + SEP_W
+        pos  = sb.value()
+        if direction > 0:
+            new_pos = (pos // step + 1) * step
+        else:
+            if pos % step == 0:
+                new_pos = max(0, pos - step)
+            else:
+                new_pos = (pos // step) * step
+        sb.setValue(new_pos)
 
     def set_branding(self, svg_path: str):
         self._svg_path = svg_path

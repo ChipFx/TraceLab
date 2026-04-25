@@ -789,6 +789,9 @@ class ImportDialog(QDialog):
 
             col_info = self.load_result.column_infos.get(col_name)
             _trace_name = row.edit_label.text().strip() or col_name
+            _col_group = (row.edit_unit.text().strip() or "Other"
+                          if self.chk_group_by_unit.isChecked()
+                          else (col_info.group if col_info else ""))
 
             # Per-trace sample rate from #trace_meta= takes precedence over
             # the file-level value derived from the time column / UI spinboxes.
@@ -821,7 +824,7 @@ class ImportDialog(QDialog):
                 # Source provenance — available to trace-manipulation plugins
                 source_file=self.load_result.filename,
                 original_col_name=col_name,
-                col_group=col_info.group if col_info else "",
+                col_group=_col_group,
                 # Wall-clock time anchor: dialog override beats per-trace, beats file-level
                 t0_wall_clock=(_wc_override if _wc_override else _trace_t0wc),
                 source_time_format=self.load_result.source_time_format,

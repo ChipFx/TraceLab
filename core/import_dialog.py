@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QRadioButton, QButtonGroup, QFrame
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QFont
 import numpy as np
 from typing import Dict, List, Optional
 from core.data_loader import LoadResult, is_numeric_column, CsvMetadata, parse_value
@@ -90,7 +90,7 @@ def _normalise_decimal(s: str) -> str:
 # ── Column config row ─────────────────────────────────────────────────────────
 
 class ColumnConfigRow(QWidget):
-    def __init__(self, col_name: str, data: np.ndarray, color: str,
+    def __init__(self, col_name: str, data: np.ndarray,
                  is_time_candidate: bool = False,
                  metadata: CsvMetadata = None,
                  col_info=None,          # ColumnInfo from parser plugin, or None
@@ -182,16 +182,7 @@ class ColumnConfigRow(QWidget):
         layout.addWidget(self.edit_unit)
 
         layout.addStretch()
-
-        # Color swatch
-        self.color = color
-        self.btn_color = QPushButton()
-        self.btn_color.setFixedSize(22, 20)
-        self.btn_color.setStyleSheet(
-            f"background-color: {color}; border: 1px solid #555;")
-        self.btn_color.clicked.connect(self._pick_color)
-        layout.addWidget(self.btn_color)
-        # (Stats moved to tooltip on the column name label above)
+        # (Stats shown as tooltip on the column name label above)
 
         if not self._is_numeric:
             self.chk_enable.setChecked(False)
@@ -212,13 +203,6 @@ class ColumnConfigRow(QWidget):
     def _toggle_scaling(self, enabled: bool):
         self.scale_widget.setEnabled(enabled)
 
-    def _pick_color(self):
-        from PyQt6.QtWidgets import QColorDialog
-        c = QColorDialog.getColor(QColor(self.color), self, "Pick Trace Color")
-        if c.isValid():
-            self.color = c.name()
-            self.btn_color.setStyleSheet(
-                f"background-color: {self.color}; border: 1px solid #555;")
 
     def get_scaling(self) -> ScalingConfig:
         gain   = self.edit_gain.get_value(1.0)
@@ -387,7 +371,6 @@ class ImportDialog(QDialog):
             ("Scale",         50, 0),
             ("Gain / Offset", 160, 1),
             ("Unit",          38, 0),
-            ("",              22, 0),   # color swatch column
         ]:
             _h = QLabel(_txt)
             _h.setStyleSheet(_hdr_style)
@@ -439,34 +422,11 @@ class ImportDialog(QDialog):
         has_groups = bool(groups_order)
         self._group_rows: Dict[str, List] = {}  # group_name -> [ColumnConfigRow, …]
 
-        # ── Get trace colours ──────────────────────────────────────────
-        try:
-            from core.theme_manager import ThemeManager
-            import os
-            _tm_tmp = ThemeManager()
-            _trace_palette = _tm_tmp.trace_colors
-        except Exception:
-            _trace_palette = ["#F0C040","#40C0F0","#F04080","#40F080","#F08040",
-                              "#A040F0","#40F0F0","#F0F040","#F04040","#4080F0"]
-
-        # First pass: assign color indices only to enabled-by-default columns so
-        # that 4 selected channels out of 32 all get distinct colours.
-        _enabled_color: dict = {}
-        _cidx = 0
-        for col_name, data in self.load_result.columns.items():
-            _is_time = col_name == self.load_result.suggested_time_col
-            _ci = self.load_result.column_infos.get(col_name)
-            _skip = _ci.skip if _ci is not None else False
-            if is_numeric_column(data) and not _is_time and not _skip:
-                _enabled_color[col_name] = _cidx
-                _cidx += 1
-
         def _add_col_row(col_name: str, group_rows_list=None):
             data = self.load_result.columns[col_name]
             is_time = col_name == self.load_result.suggested_time_col
-            color = _trace_palette[_enabled_color.get(col_name, 0) % len(_trace_palette)]
             col_info = self.load_result.column_infos.get(col_name)
-            row = ColumnConfigRow(col_name, data, color,
+            row = ColumnConfigRow(col_name, data,
                                   is_time_candidate=is_time, metadata=meta,
                                   col_info=col_info)
             self._col_rows[col_name] = row
@@ -845,7 +805,6 @@ class ImportDialog(QDialog):
                 time_data=td,
                 sample_rate=_trace_sps,
                 dt=_trace_dt,
-                color=row.color,
                 label=row.edit_label.text().strip() or col_name,
                 unit=scaling.unit,
                 scaling=scaling,

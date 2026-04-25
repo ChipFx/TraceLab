@@ -2017,16 +2017,13 @@ class MainWindow(QMainWindow):
                 for gp in group_plugins:
                     sub.addAction(_plugin_action(sub, gp))
 
-            # Ungrouped: sub-menu if named groups also exist, else flat
+            # Ungrouped: always put in an "Ungrouped" sub-menu
             if ungrouped:
                 if groups_order:
                     self._plugins_menu.addSeparator()
-                    sub = self._plugins_menu.addMenu("Ungrouped")
-                    for p in ungrouped:
-                        sub.addAction(_plugin_action(sub, p))
-                else:
-                    for p in ungrouped:
-                        self._plugins_menu.addAction(_plugin_action(self, p))
+                sub = self._plugins_menu.addMenu("Ungrouped")
+                for p in ungrouped:
+                    sub.addAction(_plugin_action(sub, p))
 
         if self._plugins.load_errors:
             self._plugins_menu.addSeparator()

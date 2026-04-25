@@ -665,16 +665,13 @@ class TraceLane(pg.PlotWidget):
         self._sinc_active = False
 
         # Determine segment processing state.
-        # primary_segment=None means "no explicit primary chosen" — when
-        # process_segments is enabled we treat it as 0 (first segment).
+        # primary_segment=None means no explicit primary; per spec this is
+        # equivalent to "show all segments as regular" — no slicing or styling.
         segs = getattr(self.trace, 'segments', None)
         primary = getattr(self.trace, 'primary_segment', None)
         viewmode = (getattr(self.trace, 'non_primary_viewmode', '') or '').strip()
-        has_multi_segs = segs is not None and len(segs) > 1
-        if has_multi_segs and primary is None and self._process_segments:
-            primary = 0   # implicit first-segment default
         process_segs = (self._process_segments
-                        and has_multi_segs
+                        and segs is not None and len(segs) > 1
                         and primary is not None and 0 <= primary < len(segs))
         if process_segs:
             p_start, p_end = segs[primary][0], segs[primary][1]

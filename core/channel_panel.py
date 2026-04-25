@@ -20,18 +20,66 @@ from core.trace_model import TraceModel
 # ── Grouping dialog ───────────────────────────────────────────────────────────
 
 class _GroupingDialog(QDialog):
-    """Dialog for regrouping channels by unit or wildcard pattern."""
+    """Dialog for regrouping channels by unit, wildcard pattern, or visibility."""
 
-    def __init__(self, parent=None):
+    # Explicit radio-button indicators so they're always visible on dark backgrounds
+    _STYLE = """
+        QGroupBox {
+            color: #a0a0c0;
+            border: 1px solid #3a3a6a;
+            border-radius: 4px;
+            margin-top: 14px;
+            padding-top: 8px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            color: #8080c0;
+        }
+        QRadioButton {
+            color: #c0c0e0;
+            spacing: 8px;
+        }
+        QRadioButton::indicator {
+            width: 13px;
+            height: 13px;
+            border: 2px solid #5050a0;
+            border-radius: 7px;
+            background: #0e0e22;
+        }
+        QRadioButton::indicator:checked {
+            background: #4060c0;
+            border: 2px solid #90a0f0;
+        }
+        QRadioButton::indicator:hover {
+            border: 2px solid #9090f0;
+        }
+        QRadioButton:disabled { color: #505070; }
+        QLineEdit {
+            background: #1a1a2e;
+            color: #c0c0e0;
+            border: 1px solid #4040a0;
+            border-radius: 3px;
+            padding: 2px 4px;
+        }
+        QLabel { color: #a0a0c0; }
+    """
+
+    def __init__(self, existing_group_names: set = None, parent=None):
         super().__init__(parent)
+        self._existing = existing_group_names or set()
         self.setWindowTitle("Group Channels")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(480)
         self.setModal(True)
+        self.setStyleSheet(self._STYLE)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(8)
 
+        # ── Method ─────────────────────────────────────────────────────────────
         method_box = QGroupBox("Grouping method")
         ml = QVBoxLayout(method_box)
+        ml.setSpacing(6)
 
         self.radio_unit = QRadioButton(
             "By Unit  —  group channels by their assigned unit (V, °C, A, …)")
@@ -46,19 +94,27 @@ class _GroupingDialog(QDialog):
         self.edit_pattern.setEnabled(False)
         self.edit_pattern.setToolTip(
             "Wildcard: * matches any text, ? matches one character.\n"
-            "Case-insensitive. Matched against the channel display label.")
+            "Case-insensitive.  Matched against the channel display label.")
         pat_row.addWidget(self.edit_pattern)
         ml.addLayout(pat_row)
+
+        self.radio_enabled = QRadioButton(
+            "Group enabled (visible) channels  —  "
+            "collect all currently-checked channels into one group")
+        ml.addWidget(self.radio_enabled)
 
         bg_method = QButtonGroup(self)
         bg_method.addButton(self.radio_unit)
         bg_method.addButton(self.radio_pattern)
+        bg_method.addButton(self.radio_enabled)
         self.radio_pattern.toggled.connect(self.edit_pattern.setEnabled)
 
         layout.addWidget(method_box)
 
+        # ── Mode ───────────────────────────────────────────────────────────────
         mode_box = QGroupBox("When matches are found")
         mode_l = QVBoxLayout(mode_box)
+        mode_l.setSpacing(6)
         self.radio_create_new = QRadioButton(
             "Create new group(s)  —  matched channels leave their current group")
         self.radio_create_new.setChecked(True)
@@ -72,6 +128,20 @@ class _GroupingDialog(QDialog):
         bg_mode.addButton(self.radio_create_inside)
         layout.addWidget(mode_box)
 
+        # ── Optional name override ─────────────────────────────────────────────
+        name_box = QGroupBox("New Group Name  (optional)")
+        nl = QHBoxLayout(name_box)
+        nl.addWidget(QLabel("Name:"))
+        self.edit_name = QLineEdit()
+        self.edit_name.setPlaceholderText("Leave blank for auto-generated name")
+        self.edit_name.setToolTip(
+            "Override the auto-generated group name.\n"
+            "If the name already exists, a _001 … _999 suffix is added automatically.\n"
+            "For multi-unit grouping this becomes a prefix: Name_V, Name_°C, …")
+        nl.addWidget(self.edit_name)
+        layout.addWidget(name_box)
+
+        # ── Buttons ────────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         btn_cancel = QPushButton("Cancel")
@@ -86,12 +156,18 @@ class _GroupingDialog(QDialog):
         layout.addLayout(btn_row)
 
     def get_config(self):
-        """Returns (method: str, pattern: str, create_inside: bool).
-        method is 'unit' or 'pattern'."""
-        method = 'unit' if self.radio_unit.isChecked() else 'pattern'
+        """Returns (method, pattern, create_inside, custom_name).
+        method: 'unit' | 'pattern' | 'enabled'"""
+        if self.radio_unit.isChecked():
+            method = 'unit'
+        elif self.radio_pattern.isChecked():
+            method = 'pattern'
+        else:
+            method = 'enabled'
         pattern = self.edit_pattern.text().strip()
         create_inside = self.radio_create_inside.isChecked()
-        return method, pattern, create_inside
+        custom_name = self.edit_name.text().strip()
+        return method, pattern, create_inside, custom_name
 
 
 class _LabelClickFilter(QObject):
@@ -128,6 +204,7 @@ class ChannelRow(QWidget):
     reset_color        = pyqtSignal(str)         # name
     renamed            = pyqtSignal(str, str)    # (trace_name, new_label)
     segment_changed    = pyqtSignal(str)         # trace_name — primary or viewmode changed
+    unit_changed       = pyqtSignal(str, str)    # (trace_name, new_unit)
 
     def __init__(self, trace: TraceModel, parent=None):
         super().__init__(parent)
@@ -222,6 +299,7 @@ class ChannelRow(QWidget):
             a.triggered.connect(lambda _, _m=m: self._set_interp(_m))
         menu.addSeparator()
         menu.addAction("Rename…").triggered.connect(self._rename)
+        menu.addAction("Change Unit…").triggered.connect(self._change_unit)
         # Segment submenu — only shown when the trace has 2+ segments
         segs = getattr(self.trace, 'segments', None)
         if segs and len(segs) >= 2:
@@ -278,6 +356,17 @@ class ChannelRow(QWidget):
             self.lbl.setText(new_label)
             self.renamed.emit(self.trace.name, new_label)
 
+    def _change_unit(self):
+        from PyQt6.QtWidgets import QInputDialog
+        new_unit, ok = QInputDialog.getText(
+            self, "Change Unit", "New unit:", text=self.trace.unit)
+        if ok:
+            new_unit = new_unit.strip()
+            self.trace.unit = new_unit
+            if self.trace.scaling:
+                self.trace.scaling.unit = new_unit
+            self.unit_changed.emit(self.trace.name, new_unit)
+
     def _set_interp(self, mode: str):
         self.trace._interp_mode_override = mode
         self.interp_changed.emit(self.trace.name, mode)
@@ -307,8 +396,18 @@ class ChannelRow(QWidget):
 
 
 class _ChannelGroupHeader(QWidget):
-    """Compact group header: collapse toggle + group name + All/None buttons."""
-    rename_requested = pyqtSignal(str)   # group_name
+    """Group header bar.
+    Left-click  → fold / unfold
+    Double-click → toggle visibility of all channels in group
+    Right-click  → context menu (Show All / Hide All / Rename / Change All Units)
+    """
+    rename_requested           = pyqtSignal(str)        # group_name
+    change_all_units_requested = pyqtSignal(str, str)   # group_name, new_unit
+
+    _BTN = (
+        "QPushButton {{ font-size: {fs}px; color: {fg}; border: none; "
+        "background: transparent; padding: 0; }} "
+        "QPushButton:hover {{ color: {hfg}; }}")
 
     def __init__(self, group_name: str, rows_ref: list,
                  on_toggle_collapse, parent=None):
@@ -317,65 +416,102 @@ class _ChannelGroupHeader(QWidget):
         self._rows_ref    = rows_ref           # shared list; populated after creation
         self._collapsed   = False
         self._on_toggle   = on_toggle_collapse
-        self.setFixedHeight(24)
+        self.setFixedHeight(30)
         self.setStyleSheet(
             "background: #161630; border-bottom: 1px solid #3a3a6a;")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
         hl = QHBoxLayout(self)
-        hl.setContentsMargins(4, 2, 4, 2)
+        hl.setContentsMargins(6, 2, 4, 2)
         hl.setSpacing(4)
 
-        self._btn_collapse = QPushButton("▼")
-        self._btn_collapse.setFixedSize(16, 16)
-        self._btn_collapse.setStyleSheet(
-            "QPushButton { color: #8080c0; border: none; font-size: 9px; "
-            "background: transparent; padding: 0; } "
-            "QPushButton:hover { color: #c0c0ff; }")
-        self._btn_collapse.setToolTip("Collapse/expand group")
-        self._btn_collapse.clicked.connect(self._toggle)
-        hl.addWidget(self._btn_collapse)
+        # Fold indicator — non-interactive, part of the click-to-fold area
+        self._lbl_arrow = QLabel("▼")
+        self._lbl_arrow.setFixedWidth(14)
+        self._lbl_arrow.setStyleSheet(
+            "color: #8080c0; font-size: 11px; "
+            "background: transparent; border: none;")
+        hl.addWidget(self._lbl_arrow)
 
-        lbl = QLabel(group_name)
-        lbl.setFont(QFont("Courier New", 8))
-        lbl.setStyleSheet(
-            "color: #8080c0; font-weight: bold; background: transparent; border: none;")
-        hl.addWidget(lbl, 1)
+        self._lbl_name = QLabel(group_name)
+        self._lbl_name.setFont(QFont("Courier New", 9))
+        self._lbl_name.setStyleSheet(
+            "color: #8080c0; font-weight: bold; "
+            "background: transparent; border: none;")
+        hl.addWidget(self._lbl_name, 1)
 
         btn_all = QPushButton("✓")
-        btn_all.setFixedSize(16, 16)
-        btn_all.setToolTip("Enable all in group")
-        btn_all.setStyleSheet(
-            "QPushButton { font-size: 9px; color: #60a060; border: none; "
-            "background: transparent; padding: 0; } "
-            "QPushButton:hover { color: #80e080; }")
+        btn_all.setFixedSize(22, 22)
+        btn_all.setToolTip("Enable all in group  (right-click for more options)")
+        btn_all.setStyleSheet(self._BTN.format(fs=13, fg="#60a060", hfg="#90e090"))
         btn_all.clicked.connect(
             lambda: [r.chk_vis.setChecked(True) for r in self._rows_ref])
         hl.addWidget(btn_all)
 
         btn_none = QPushButton("✕")
-        btn_none.setFixedSize(16, 16)
-        btn_none.setToolTip("Disable all in group")
-        btn_none.setStyleSheet(
-            "QPushButton { font-size: 9px; color: #a06060; border: none; "
-            "background: transparent; padding: 0; } "
-            "QPushButton:hover { color: #e08080; }")
+        btn_none.setFixedSize(22, 22)
+        btn_none.setToolTip("Disable all in group  (right-click for more options)")
+        btn_none.setStyleSheet(self._BTN.format(fs=13, fg="#a06060", hfg="#e08080"))
         btn_none.clicked.connect(
             lambda: [r.chk_vis.setChecked(False) for r in self._rows_ref])
         hl.addWidget(btn_none)
 
-        btn_rename = QPushButton("✎")
-        btn_rename.setFixedSize(16, 16)
-        btn_rename.setToolTip("Rename group")
-        btn_rename.setStyleSheet(
-            "QPushButton { font-size: 9px; color: #a0a060; border: none; "
-            "background: transparent; padding: 0; } "
-            "QPushButton:hover { color: #e0e080; }")
-        btn_rename.clicked.connect(lambda: self.rename_requested.emit(self.group_name))
-        hl.addWidget(btn_rename)
+    # ── Click handling ────────────────────────────────────────────────────────
 
     def _toggle(self):
         self._collapsed = not self._collapsed
-        self._btn_collapse.setText("▶" if self._collapsed else "▼")
+        self._lbl_arrow.setText("▶" if self._collapsed else "▼")
         self._on_toggle(self.group_name, self._collapsed)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            child = self.childAt(event.pos())
+            if not isinstance(child, QPushButton):
+                self._toggle()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            child = self.childAt(event.pos())
+            if not isinstance(child, QPushButton):
+                # Toggle: if any visible → hide all; if all hidden → show all
+                any_vis = any(r.chk_vis.isChecked() for r in self._rows_ref)
+                for r in self._rows_ref:
+                    r.chk_vis.setChecked(not any_vis)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.addAction("Show All").triggered.connect(
+            lambda: [r.chk_vis.setChecked(True) for r in self._rows_ref])
+        menu.addAction("Hide All").triggered.connect(
+            lambda: [r.chk_vis.setChecked(False) for r in self._rows_ref])
+        menu.addSeparator()
+        menu.addAction("Rename Group…").triggered.connect(
+            lambda: self.rename_requested.emit(self.group_name))
+        menu.addSeparator()
+        menu.addAction("Change All Units…").triggered.connect(
+            self._change_all_units)
+        menu.exec(event.globalPos())
+
+    def _change_all_units(self):
+        from PyQt6.QtWidgets import QInputDialog
+        current = next((r.trace.unit for r in self._rows_ref), "")
+        new_unit, ok = QInputDialog.getText(
+            self, "Change All Units",
+            f"New unit for all {len(self._rows_ref)} channel(s) in '{self.group_name}':",
+            text=current)
+        if ok:
+            new_unit = new_unit.strip()
+            for r in self._rows_ref:
+                r.trace.unit = new_unit
+                if r.trace.scaling:
+                    r.trace.scaling.unit = new_unit
+            self.change_all_units_requested.emit(self.group_name, new_unit)
 
 
 # ── Channel-panel sentinel for group-header list items ─────────────────────────
@@ -400,6 +536,7 @@ class ChannelPanel(QWidget):
     trace_renamed          = pyqtSignal(str, str)  # (trace_name, new_label)
     segment_changed        = pyqtSignal(str)       # trace_name
     group_renamed          = pyqtSignal(str, str)  # (old_name, new_name)
+    unit_changed           = pyqtSignal(str, str)  # (trace_name, new_unit)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -492,9 +629,10 @@ class ChannelPanel(QWidget):
             group, self._group_hdr_rows[group],
             on_toggle_collapse=self._on_group_collapse)
         hdr_widget.rename_requested.connect(self._on_group_rename)
+        hdr_widget.change_all_units_requested.connect(self._on_group_change_units)
         item = QListWidgetItem()
         item.setData(_GROUP_HEADER_ROLE, group)       # marks it as a group header
-        item.setSizeHint(QSize(0, 24))
+        item.setSizeHint(QSize(0, 30))
         item.setFlags(Qt.ItemFlag.ItemIsEnabled)      # no drag, no select
         self._list.insertItem(at_row, item)
         self._list.setItemWidget(item, hdr_widget)
@@ -523,6 +661,7 @@ class ChannelPanel(QWidget):
         row.reset_color.connect(self.reset_color_requested)
         row.renamed.connect(self.trace_renamed)
         row.segment_changed.connect(self.segment_changed)
+        row.unit_changed.connect(self.unit_changed)
 
         group = getattr(trace, "col_group", "") or ""
 
@@ -650,16 +789,32 @@ class ChannelPanel(QWidget):
             self.add_trace(trace)
 
     def _open_grouping_dialog(self):
-        dlg = _GroupingDialog(self)
+        existing = set(self._group_rows.keys())
+        dlg = _GroupingDialog(existing_group_names=existing, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        method, pattern, create_inside = dlg.get_config()
+        method, pattern, create_inside, custom_name = dlg.get_config()
         if method == 'unit':
-            self._apply_group_by_unit(create_inside)
-        else:
+            self._apply_group_by_unit(create_inside, custom_name)
+        elif method == 'pattern':
             if not pattern:
                 return
-            self._apply_group_by_pattern(pattern, create_inside)
+            self._apply_group_by_pattern(pattern, create_inside, custom_name)
+        elif method == 'enabled':
+            self._apply_group_enabled(custom_name)
+
+    def _unique_group_name(self, base: str, also_exclude: set = None) -> str:
+        """Return base if not already a group, else base_001 … base_999."""
+        existing = set(self._group_rows.keys())
+        if also_exclude:
+            existing |= also_exclude
+        if base not in existing:
+            return base
+        for i in range(1, 1000):
+            candidate = f"{base}_{i:03d}"
+            if candidate not in existing:
+                return candidate
+        return base
 
     def _on_group_rename(self, old_name: str):
         from PyQt6.QtWidgets import QInputDialog
@@ -674,36 +829,65 @@ class ChannelPanel(QWidget):
         self._full_rebuild()
         self.group_renamed.emit(old_name, new_name)
 
-    def _apply_group_by_unit(self, create_inside: bool):
+    def _on_group_change_units(self, group_name: str, new_unit: str):
+        """Propagate unit_changed for all traces in the group."""
+        for tname in self._group_rows.get(group_name, []):
+            self.unit_changed.emit(tname, new_unit)
+
+    def _apply_group_by_unit(self, create_inside: bool, custom_name: str = ""):
         ordered_traces = [self._rows[n].trace
                           for n in self._trace_order if n in self._rows]
+        # Pre-compute target names to avoid calling unique_group_name per trace
+        target_map: Dict[tuple, str] = {}   # (old_g, unit) → new col_group
+        allocated: set = set()
+
+        def _alloc(base: str) -> str:
+            name = self._unique_group_name(base, allocated)
+            allocated.add(name)
+            return name
+
         if create_inside:
-            # Find unique units per existing group
             group_units: Dict[str, Set[str]] = {}
             for trace in ordered_traces:
                 g = trace.col_group or "__ungrouped__"
                 unit = trace.unit.strip() or "Other"
                 group_units.setdefault(g, set()).add(unit)
-            # Assign new group names only where a group has mixed units
-            for trace in ordered_traces:
-                old_g = trace.col_group or "__ungrouped__"
-                unit = trace.unit.strip() or "Other"
-                if len(group_units.get(old_g, set())) > 1:
+            for old_g, units in group_units.items():
+                if len(units) <= 1:
+                    continue  # homogeneous group → no split
+                for unit in units:
+                    suffix = f"{custom_name}_{unit}" if custom_name else unit
                     if old_g == "__ungrouped__":
-                        trace.col_group = unit
+                        base = suffix
                     else:
-                        trace.col_group = f"{old_g}_{unit}"
-                # else: single unit in group → leave col_group unchanged
-        else:
-            # Create new: group every trace by its unit, ignoring existing groups
+                        base = f"{old_g}_{suffix}"
+                    target_map[(old_g, unit)] = _alloc(base)
             for trace in ordered_traces:
-                trace.col_group = trace.unit.strip() or "Other"
+                key = (trace.col_group or "__ungrouped__",
+                       trace.unit.strip() or "Other")
+                if key in target_map:
+                    trace.col_group = target_map[key]
+        else:
+            unit_target: Dict[str, str] = {}
+            for trace in ordered_traces:
+                unit = trace.unit.strip() or "Other"
+                if unit not in unit_target:
+                    base = f"{custom_name}_{unit}" if custom_name else unit
+                    unit_target[unit] = _alloc(base)
+            for trace in ordered_traces:
+                trace.col_group = unit_target[trace.unit.strip() or "Other"]
         self._full_rebuild()
 
-    def _apply_group_by_pattern(self, pattern: str, create_inside: bool):
+    def _apply_group_by_pattern(self, pattern: str, create_inside: bool,
+                                custom_name: str = ""):
         pat_lower = pattern.lower()
-        # Human-readable representation of the pattern for group naming
         name_repr = pattern.replace('*', '(ALL)')
+        allocated: set = set()
+
+        def _alloc(base: str) -> str:
+            name = self._unique_group_name(base, allocated)
+            allocated.add(name)
+            return name
 
         ordered_traces = [self._rows[n].trace
                           for n in self._trace_order if n in self._rows]
@@ -713,28 +897,38 @@ class ChannelPanel(QWidget):
             return fnmatch.fnmatch(label, pat_lower)
 
         if create_inside:
-            # Find which existing groups have at least one non-match
             group_has_nonmatch: Dict[str, bool] = {}
             for trace in ordered_traces:
                 g = trace.col_group or "__ungrouped__"
                 if not _matches(trace):
                     group_has_nonmatch[g] = True
-            # Move only the matching traces to a sub-group when the group
-            # has mixed membership (at least one non-match stays behind)
+            # Pre-compute one target name per source group that has mixed membership
+            group_target: Dict[str, str] = {}
+            for g, has_nm in group_has_nonmatch.items():
+                suffix = custom_name or name_repr
+                base = suffix if g == "__ungrouped__" else f"{g}_{suffix}"
+                group_target[g] = _alloc(base)
             for trace in ordered_traces:
                 if not _matches(trace):
                     continue
                 old_g = trace.col_group or "__ungrouped__"
-                if group_has_nonmatch.get(old_g):
-                    if old_g == "__ungrouped__":
-                        trace.col_group = f"Group_{name_repr}"
-                    else:
-                        trace.col_group = f"{old_g}_{name_repr}"
-                # else: whole group matches → keep original group name
+                if old_g in group_target:
+                    trace.col_group = group_target[old_g]
         else:
-            # Create new: all matching traces go to one new group
-            group_name = f"Group_{name_repr}"
+            base = custom_name or f"Group_{name_repr}"
+            group_name = _alloc(base)
             for trace in ordered_traces:
                 if _matches(trace):
                     trace.col_group = group_name
+        self._full_rebuild()
+
+    def _apply_group_enabled(self, custom_name: str = ""):
+        """Collect all currently-visible traces into one new group."""
+        base = custom_name or "Enabled"
+        group_name = self._unique_group_name(base)
+        ordered_traces = [self._rows[n].trace
+                          for n in self._trace_order if n in self._rows]
+        for trace in ordered_traces:
+            if trace.visible:
+                trace.col_group = group_name
         self._full_rebuild()

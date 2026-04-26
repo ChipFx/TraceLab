@@ -1782,7 +1782,9 @@ class MainWindow(QMainWindow):
         """Build the real-time axis settings dict from current state."""
         enabled = (self._time_scale_mode == "real_time")
         t0_str = self._get_active_t0_wall_clock() if enabled else ""
-        return {"enabled": enabled, "t0_wall_clock": t0_str}
+        accent = getattr(self, "theme", None)
+        accent = accent.pv("accent") if accent is not None else "#1e88e5"
+        return {"enabled": enabled, "t0_wall_clock": t0_str, "accent_color": accent}
 
     def _get_active_t0_wall_clock(self) -> str:
         """Return t0_wall_clock ISO string from the first trace that has one."""

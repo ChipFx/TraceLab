@@ -329,6 +329,19 @@ class ThemeManager(QObject):
         }}
         QSplitter::handle {{ background: {c.get('border','#2a2a2a')}; }}
         QRadioButton {{ color: {c.get('text','#e0e0e0')}; }}
+        QRadioButton::indicator {{
+            width: 12px; height: 12px;
+            border: 1px solid {c.get('border','#2a2a2a')};
+            border-radius: 7px;
+            background: {c.get('bg','#0d0d0d')};
+        }}
+        QRadioButton::indicator:checked {{
+            background: {c.get('accent','#1e88e5')};
+            border-color: {c.get('accent','#1e88e5')};
+        }}
+        QRadioButton::indicator:hover {{
+            border-color: {c.get('accent','#1e88e5')};
+        }}
         QDockWidget {{
             background-color: {c.get('bg_panel','#141414')};
             color: {c.get('text','#e0e0e0')};

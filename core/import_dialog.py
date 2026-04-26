@@ -116,10 +116,13 @@ def _parse_wallclock_input(text: str, epoch_local: bool = False) -> str:
     try:
         epoch = float(text)
         if epoch_local:
-            # Interpret as local time: build a naive datetime from local clock,
-            # then attach the local timezone and convert to UTC.
+            # The number represents "seconds since 1970-01-01 00:00:00" in local
+            # wall-clock time (not UTC).  Build a naive datetime from that count,
+            # attach the local timezone, then convert to UTC for storage.
+            from datetime import timedelta
+            naive_dt = datetime(1970, 1, 1, 0, 0, 0) + timedelta(seconds=epoch)
             local_tz = datetime.now().astimezone().tzinfo
-            dt = datetime.fromtimestamp(epoch, tz=local_tz).astimezone(timezone.utc)
+            dt = naive_dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
         else:
             dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
         return dt.isoformat()

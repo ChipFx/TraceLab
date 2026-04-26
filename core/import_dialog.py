@@ -867,17 +867,19 @@ class ImportDialog(QDialog):
 
 
 def _make_group_header(group_name: str, rows_list: list) -> QWidget:
-    """Styled group header bar with ✓ All / ✗ None buttons.
+    """Styled group header bar with fold toggle and ✓ All / ✗ None buttons.
     rows_list is populated with ColumnConfigRow refs after this returns;
-    the button lambdas close over the list object by reference."""
+    the button/click lambdas close over the list object by reference."""
+    from PyQt6.QtCore import Qt as _Qt
     hdr = QWidget()
     hdr.setFixedHeight(28)
     hdr.setStyleSheet(
         "background: #1a1a30; border-top: 1px solid #3a3a6a; "
         "border-bottom: 1px solid #3a3a6a;")
+    hdr.setCursor(_Qt.CursorShape.PointingHandCursor)
     hl = QHBoxLayout(hdr)
     hl.setContentsMargins(8, 3, 4, 3)
-    lbl = QLabel(f"▶  {group_name}")
+    lbl = QLabel(f"▼  {group_name}")
     lbl.setStyleSheet(
         "color: #8080c0; font-weight: bold; font-size: 10px; "
         "background: transparent; border: none;")
@@ -903,6 +905,18 @@ def _make_group_header(group_name: str, rows_list: list) -> QWidget:
                  for r in rows_list if r.chk_enable.isEnabled()])
     hl.addWidget(btn_all)
     hl.addWidget(btn_none)
+
+    # Fold/unfold on click anywhere on the header (buttons handle their own clicks)
+    _collapsed = [False]
+
+    def _toggle_fold(_event):
+        # Only fold on left-click; let buttons handle their own events normally
+        _collapsed[0] = not _collapsed[0]
+        lbl.setText(f"{'▶' if _collapsed[0] else '▼'}  {group_name}")
+        for r in rows_list:
+            r.setVisible(not _collapsed[0])
+
+    hdr.mousePressEvent = _toggle_fold
     return hdr
 
 

@@ -842,6 +842,7 @@ class MainWindow(QMainWindow):
         self._act_rt_averaging.setChecked(self._retrigger_mode == MODE_AVERAGING)
         self._act_rt_averaging.setToolTip(
             "Average multiple trigger-aligned segments to reduce noise.")
+        persist_group.addAction(self._act_rt_averaging)
         self._act_rt_averaging.triggered.connect(
             self._toggle_retrigger_averaging)
 
@@ -852,6 +853,7 @@ class MainWindow(QMainWindow):
         self._act_rt_interp.setToolTip(
             "Interleave multiple trigger-aligned segments to increase "
             "effective sample resolution.")
+        persist_group.addAction(self._act_rt_interp)
         self._act_rt_interp.triggered.connect(
             self._toggle_retrigger_interpolation)
 
@@ -1376,6 +1378,7 @@ class MainWindow(QMainWindow):
         self._plot.batch_add_traces(traces)
         self._refresh_trigger_channels()
         self._refresh_status_bar()
+        self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
         # Start async period estimation for every trace (after UI is live)
         for trace in traces:
             self._estimate_period_async(trace)
@@ -1407,6 +1410,7 @@ class MainWindow(QMainWindow):
         self._estimate_period_async(trace)
         self._refresh_trigger_channels()
         self._refresh_status_bar()
+        self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
 
     def _remove_trace(self, trace_name: str):
         self._traces = [t for t in self._traces if t.name != trace_name]
@@ -1414,6 +1418,7 @@ class MainWindow(QMainWindow):
         self._plot.remove_trace(trace_name)
         self._refresh_trigger_channels()
         self._update_status()
+        self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
 
     def _clear_all(self, confirm: bool = True):
         if confirm and self._traces:
@@ -2710,12 +2715,6 @@ class MainWindow(QMainWindow):
         elif mode == MODE_PERSIST_PAST:
             self._persist_settings["selection"] = "last"
             self._persist_settings["emphasis"]  = "last"
-        self._act_rt_averaging.blockSignals(True)
-        self._act_rt_averaging.setChecked(False)
-        self._act_rt_averaging.blockSignals(False)
-        self._act_rt_interp.blockSignals(True)
-        self._act_rt_interp.setChecked(False)
-        self._act_rt_interp.blockSignals(False)
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()
@@ -2729,12 +2728,6 @@ class MainWindow(QMainWindow):
         if checked:
             self._retrigger_mode = MODE_AVERAGING
             self._epoch_anchor_idx = None   # re-anchor at the new trigger pos
-            self._act_persist_off.blockSignals(True)
-            self._act_persist_off.setChecked(True)
-            self._act_persist_off.blockSignals(False)
-            self._act_rt_interp.blockSignals(True)
-            self._act_rt_interp.setChecked(False)
-            self._act_rt_interp.blockSignals(False)
         else:
             self._retrigger_mode = MODE_OFF
         self._plot.clear_persistence_layers()
@@ -2750,12 +2743,6 @@ class MainWindow(QMainWindow):
         if checked:
             self._retrigger_mode = MODE_INTERPOLATION
             self._epoch_anchor_idx = None   # re-anchor at the new trigger pos
-            self._act_persist_off.blockSignals(True)
-            self._act_persist_off.setChecked(True)
-            self._act_persist_off.blockSignals(False)
-            self._act_rt_averaging.blockSignals(True)
-            self._act_rt_averaging.setChecked(False)
-            self._act_rt_averaging.blockSignals(False)
         else:
             self._retrigger_mode = MODE_OFF
         self._plot.clear_persistence_layers()

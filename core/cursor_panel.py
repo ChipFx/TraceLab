@@ -231,6 +231,10 @@ class CursorPanel(QWidget):
             self.lbl_freq.setText("---")
 
         # Update per-trace table
+        self._rebuild_table()
+
+    def _rebuild_table(self):
+        """Re-render the trace value table from current internal state."""
         vals_a = self._trace_values.get(0, {})
         vals_b = self._trace_values.get(1, {})
         all_names = set(vals_a.keys()) | set(vals_b.keys())
@@ -264,8 +268,9 @@ class CursorPanel(QWidget):
         self.table.setRowCount(0)
 
     def set_trace_order(self, names: List[str]):
-        """Update the display order for cursor value table."""
+        """Update the display order for cursor value table and re-render immediately."""
         self._trace_display_order = list(names)
+        self._rebuild_table()
 
     def set_trace_units(self, unit_map: Dict[str, str]):
         """Update unit strings per trace name for smart formatting."""

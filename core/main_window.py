@@ -1829,6 +1829,7 @@ class MainWindow(QMainWindow):
         sinc_active = self._plot.get_sinc_active()
         unit_map = {t.name: getattr(t, 'unit', '') for t in self._traces}
         self._cursor_panel.set_trace_units(unit_map)
+        self._cursor_panel.set_y_spacings(y_major_divs)
         interp_map = {t.name: getattr(t, '_interp_mode_override',
                                        self._interp_mode)
                       for t in self._traces}

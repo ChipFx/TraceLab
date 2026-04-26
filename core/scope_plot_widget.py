@@ -342,6 +342,10 @@ class EngineeringAxisItem(pg.AxisItem):
         super().__init__(*args, **kwargs)
         self._unit = ""
         self._div_cfg: dict = {}
+        self._ch_name: str = ""
+
+    def set_ch_name(self, name: str):
+        self._ch_name = name or ""
 
     def set_unit(self, unit: str):
         self._unit = unit or ""
@@ -383,7 +387,13 @@ class EngineeringAxisItem(pg.AxisItem):
 
     def generateDrawSpecs(self, p):
         axisSpec, tickSpecs, textSpecs = super().generateDrawSpecs(p)
+        n_before = len(textSpecs)
         textSpecs = _filter_dense_labels(textSpecs)
+        n_after = len(textSpecs)
+        if n_before == 0 and tickSpecs:
+            print(f"DBG_LABELS {self._ch_name}: pyqtgraph gave 0 labels, {len(tickSpecs)} ticks")
+        elif n_after == 0 and n_before > 0:
+            print(f"DBG_LABELS {self._ch_name}: filter dropped all {n_before} labels, {len(tickSpecs)} ticks")
         self._fix_subdiv_alpha(tickSpecs)
         return axisSpec, tickSpecs, textSpecs
 
@@ -420,22 +430,29 @@ class EngineeringAxisItem(pg.AxisItem):
 
 
 def _filter_dense_labels(textSpecs: list) -> list:
-    """Drop Y-axis tick labels whose bounding rects would overlap or touch.
+    """Drop Y-axis tick labels that genuinely overlap (with a small tolerance).
 
     pyqtgraph returns textSpecs as [(QRectF, flags, text), ...].
-    The rects are already computed from the real font metrics, so this filter
-    is automatically correct for any font size or label width.
-    Gridlines are in tickSpecs (separate list) and are never affected.
+    The rects are computed from actual font metrics, so this is font-size-
+    independent.  Gridlines (in tickSpecs) are never affected.
+
+    Tolerance: a new label is accepted if its top edge is within one label-
+    height of the previous label's bottom, i.e. up to 100% overlap is allowed
+    before a label is dropped.  This preserves labels at tight zoom levels
+    while preventing genuinely identical-position collisions.
     """
     if len(textSpecs) <= 1:
         return textSpecs
     # Sort top-to-bottom by rect vertical centre
     by_y = sorted(textSpecs, key=lambda s: s[0].center().y())
+    # Compute typical label height from the first rect
+    label_h = by_y[0][0].height() if by_y[0][0].height() > 0 else 12.0
     kept = [by_y[0]]
     for spec in by_y[1:]:
-        # Allow a 2 px gap between the bottom of the last kept label
-        # and the top of the candidate; drop the candidate otherwise.
-        if spec[0].top() >= kept[-1][0].bottom() - 2:
+        # Accept if the candidate's top is at or below (prev_bottom - label_h).
+        # This means we only drop when two labels would be at essentially the
+        # same screen position (overlap > one full label height).
+        if spec[0].top() >= kept[-1][0].bottom() - label_h:
             kept.append(spec)
     return kept
 
@@ -556,6 +573,7 @@ class TraceLane(pg.PlotWidget):
         self._x_axis = EngineeringTimeAxisItem(orientation="bottom")
         unit = getattr(trace, 'unit', '') or ''
         self._y_axis.set_unit(unit)
+        self._y_axis.set_ch_name(getattr(trace, 'name', ''))
         super().__init__(parent=parent,
                          background=style_context.plot_colors["background"],
                          axisItems={"left": self._y_axis,

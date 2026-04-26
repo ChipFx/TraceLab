@@ -31,8 +31,14 @@ def _fmt_time(t: float) -> str:
     return f"{t:.6g} s"
 
 
-def _fmt_val(v: float, unit: str = "") -> str:
-    """Format a measurement value with SI prefix if a unit is known."""
+def _fmt_val(v: float, unit: str = "", spacing: float = None) -> str:
+    """Format a measurement value with SI prefix if a unit is known.
+
+    When ``spacing`` is supplied (the current Y-axis tick interval in the same
+    units as v), the number of decimal places is computed so the displayed value
+    is never rounded coarser than the tick grid.  Without it a short heuristic
+    is used, which can round 22.461 to "22.5".
+    """
     if v is None:
         return "---"
     try:
@@ -58,14 +64,23 @@ def _fmt_val(v: float, unit: str = "") -> str:
             return f"{v/1e3:.4g} k"
         return f"{v:.5g}"
     # With unit — full SI prefix
+    import math as _math
     abs_v = abs(v)
     for scale, prefix in [(1e12,'T'),(1e9,'G'),(1e6,'M'),(1e3,'k'),
                            (1,''),(1e-3,'m'),(1e-6,'µ'),(1e-9,'n'),(1e-12,'p')]:
         if abs_v >= scale * 0.9999:
             s = v / scale
-            if abs(s) >= 100:   txt = f"{s:.0f}"
-            elif abs(s) >= 10:  txt = f"{s:.1f}".rstrip('0').rstrip('.')
-            else:               txt = f"{s:.3f}".rstrip('0').rstrip('.')
+            if spacing is not None and spacing > 0:
+                scaled_sp = abs(spacing / scale)
+                dp = max(0, -int(_math.floor(_math.log10(scaled_sp)))) if scaled_sp < 1 else 0
+                dp = min(dp, 9)
+                txt = f"{s:.{dp}f}"
+            elif abs(s) >= 100:
+                txt = f"{s:.0f}"
+            elif abs(s) >= 10:
+                txt = f"{s:.1f}".rstrip('0').rstrip('.')
+            else:
+                txt = f"{s:.3f}".rstrip('0').rstrip('.')
             return f"{txt} {prefix}{unit}"
     return f"{v:.4e} {unit}"
 
@@ -85,6 +100,7 @@ class CursorPanel(QWidget):
         self._trace_values: Dict[int, Dict] = {}  # cursor_id -> {name: value}
         self._trace_display_order: List[str] = []  # set by main window
         self._trace_units: Dict[str, str] = {}     # name -> unit string
+        self._y_spacings: Dict[str, float] = {}    # name -> current Y tick spacing
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -226,13 +242,14 @@ class CursorPanel(QWidget):
         self.table.setRowCount(len(trace_names))
         for i, name in enumerate(trace_names):
             unit = self._trace_units.get(name, "")
+            spacing = self._y_spacings.get(name)
             self.table.setItem(i, 0, QTableWidgetItem(name))
             va = vals_a.get(name)
             vb = vals_b.get(name)
             self.table.setItem(i, 1, QTableWidgetItem(
-                _fmt_val(va, unit) if va is not None else "---"))
+                _fmt_val(va, unit, spacing) if va is not None else "---"))
             self.table.setItem(i, 2, QTableWidgetItem(
-                _fmt_val(vb, unit) if vb is not None else "---"))
+                _fmt_val(vb, unit, spacing) if vb is not None else "---"))
 
     def clear_readout(self):
         """Clear all cursor time/value readouts (called when cursors are removed)."""
@@ -251,6 +268,10 @@ class CursorPanel(QWidget):
     def set_trace_units(self, unit_map: Dict[str, str]):
         """Update unit strings per trace name for smart formatting."""
         self._trace_units = dict(unit_map)
+
+    def set_y_spacings(self, spacings: Dict[str, float]):
+        """Update per-trace Y tick spacing so cursor values display at matching precision."""
+        self._y_spacings = dict(spacings)
 
     def _export_csv(self):
         path, _ = QFileDialog.getSaveFileName(

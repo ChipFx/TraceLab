@@ -72,6 +72,66 @@ class SciLineEdit(QLineEdit):
             return default
 
 
+def _is_plain_epoch(text: str) -> bool:
+    """Return True if text looks like a bare Unix epoch number (no date separators)."""
+    t = text.strip()
+    if not t:
+        return False
+    try:
+        float(t)
+        # If fromisoformat also accepts it, it's not a plain number
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(t)
+            return False   # it parsed as ISO → not a bare epoch
+        except ValueError:
+            return True    # float but not ISO → bare epoch
+    except ValueError:
+        return False
+
+
+def _parse_wallclock_input(text: str, epoch_local: bool = False) -> str:
+    """Parse a wall-clock string and return a normalised ISO 8601 string.
+
+    Accepts:
+      ISO 8601   — "2024-03-15T14:23:00", "2024-03-15 14:23:00.000"
+      Unix epoch — a plain integer or float
+                   e.g. 1713450000  or  1713450000.123
+                   epoch_local=False (default) → treat as UTC
+                   epoch_local=True            → treat as local wall-clock time,
+                                                 convert to UTC for storage
+
+    Raises ValueError if neither format succeeds.
+    """
+    from datetime import datetime, timezone
+    text = text.strip()
+    if not text:
+        raise ValueError("empty input")
+    # Try ISO 8601 first (handles most datetime strings including with T separator)
+    try:
+        return datetime.fromisoformat(text).isoformat()
+    except ValueError:
+        pass
+    # Try as a plain Unix epoch number
+    try:
+        epoch = float(text)
+        if epoch_local:
+            # Interpret as local time: build a naive datetime from local clock,
+            # then attach the local timezone and convert to UTC.
+            local_tz = datetime.now().astimezone().tzinfo
+            dt = datetime.fromtimestamp(epoch, tz=local_tz).astimezone(timezone.utc)
+        else:
+            dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        return dt.isoformat()
+    except (ValueError, OSError, OverflowError, TypeError):
+        pass
+    raise ValueError(
+        f"Cannot parse '{text}' as ISO 8601 or Unix epoch.\n"
+        "ISO examples: 2024-03-15T14:23:00  or  2024-03-15 14:23:00.000\n"
+        "Epoch example: 1713450000  or  1713450000.123"
+    )
+
+
 def _normalise_decimal(s: str) -> str:
     """Convert locale decimal comma to dot for parse_value."""
     import re
@@ -560,20 +620,49 @@ class ImportDialog(QDialog):
         wc_row.addWidget(self.chk_t0_override)
         self.edit_t0_wallclock = QLineEdit()
         self.edit_t0_wallclock.setPlaceholderText(
-            "e.g.  2024-03-15T14:23:00  or  2024-03-15 14:23:00.000")
-        self.edit_t0_wallclock.setMinimumWidth(260)
+            "ISO: 2024-03-15T14:23:00   or   Unix epoch: 1713450000")
+        self.edit_t0_wallclock.setMinimumWidth(280)
         self.edit_t0_wallclock.setToolTip(
             "ISO 8601: YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD HH:MM:SS[.mmm]\n"
+            "Unix epoch: plain integer or decimal seconds since 1970-01-01 00:00 UTC\n"
+            "  e.g. 1713450000  or  1713450000.123\n"
             "Leave blank to keep the parser-supplied wall-clock anchor.")
         wc_row.addWidget(self.edit_t0_wallclock)
         wc_row.addStretch()
         wcl.addLayout(wc_row)
+
+        # Epoch timezone row — shown only when the field contains a bare epoch number
+        self._epoch_tz_widget = QWidget()
+        epoch_tz_row = QHBoxLayout(self._epoch_tz_widget)
+        epoch_tz_row.setContentsMargins(0, 0, 0, 0)
+        epoch_tz_row.addSpacing(20)
+        epoch_tz_row.addWidget(QLabel("If Epoch:"))
+        self.rb_epoch_utc   = QRadioButton("GMT / UTC")
+        self.rb_epoch_local = QRadioButton("Local time")
+        self._epoch_tz_group = QButtonGroup(self)
+        self._epoch_tz_group.addButton(self.rb_epoch_utc,   0)
+        self._epoch_tz_group.addButton(self.rb_epoch_local, 1)
+        _epoch_local_saved = self._settings.get("import_epoch_local", False)
+        self.rb_epoch_local.setChecked(_epoch_local_saved)
+        self.rb_epoch_utc.setChecked(not _epoch_local_saved)
+        epoch_tz_row.addWidget(self.rb_epoch_utc)
+        epoch_tz_row.addWidget(self.rb_epoch_local)
+        epoch_tz_row.addStretch()
+        self._epoch_tz_widget.setVisible(False)
+        wcl.addWidget(self._epoch_tz_widget)
+
+        _hint_parts = []
         if self.load_result.t0_wall_clock:
-            _hint = QLabel(f"Parser supplied: {self.load_result.t0_wall_clock}")
+            _hint_parts.append(f"Parser supplied: {self.load_result.t0_wall_clock}")
+        if self.load_result.source_time_format == "unix_epoch":
+            _hint_parts.append("(time column was Unix epoch — already converted)")
+        if _hint_parts:
+            _hint = QLabel("  ".join(_hint_parts))
             _hint.setStyleSheet("color: #6060a0; font-size: 9px;")
             wcl.addWidget(_hint)
         self.edit_t0_wallclock.setEnabled(self.chk_t0_override.isChecked())
         self.chk_t0_override.toggled.connect(self.edit_t0_wallclock.setEnabled)
+        self.edit_t0_wallclock.textChanged.connect(self._validate_t0_wallclock_input)
         tl.addWidget(wc_box)
 
         tl.addStretch()
@@ -631,6 +720,20 @@ class ImportDialog(QDialog):
         btn_layout.addWidget(btn_cancel)
         btn_layout.addWidget(btn_ok)
         layout.addLayout(btn_layout)
+
+    def _validate_t0_wallclock_input(self, text: str):
+        """Live red-highlight when the wall-clock override field can't be parsed."""
+        text = text.strip()
+        if not text:
+            self.edit_t0_wallclock.setStyleSheet("")
+            self._epoch_tz_widget.setVisible(False)
+            return
+        self._epoch_tz_widget.setVisible(_is_plain_epoch(text))
+        try:
+            _parse_wallclock_input(text)
+            self.edit_t0_wallclock.setStyleSheet("")
+        except ValueError:
+            self.edit_t0_wallclock.setStyleSheet("background: #3a1010;")
 
     def _sps_changed(self):
         try:
@@ -751,7 +854,15 @@ class ImportDialog(QDialog):
         # Wall-clock anchor override (blank string = no override)
         _wc_override = ""
         if self.chk_t0_override.isChecked():
-            _wc_override = self.edit_t0_wallclock.text().strip()
+            _raw_wc = self.edit_t0_wallclock.text().strip()
+            if _raw_wc:
+                _epoch_local = (self._epoch_tz_widget.isVisible() and
+                                self.rb_epoch_local.isChecked())
+                try:
+                    _wc_override = _parse_wallclock_input(_raw_wc, epoch_local=_epoch_local)
+                except ValueError as e:
+                    QMessageBox.warning(self, "Invalid Wall-Clock Value", str(e))
+                    return
 
         traces = []
         for col_name, row in self._col_rows.items():
@@ -856,6 +967,7 @@ class ImportDialog(QDialog):
         self.honor_skip_rows     = self.chk_honor_skip_rows.isChecked()
         self._settings["import_honor_skip_rows"]    = self.honor_skip_rows
         self._settings["import_t0_override_enabled"] = self.chk_t0_override.isChecked()
+        self._settings["import_epoch_local"]         = self.rb_epoch_local.isChecked()
         # Persist last-used global scale values
         self._settings["last_gain"]   = self.edit_global_gain.text().strip()
         self._settings["last_offset"] = self.edit_global_offset.text().strip()

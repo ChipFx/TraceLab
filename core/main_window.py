@@ -1321,7 +1321,7 @@ class MainWindow(QMainWindow):
 
         # Pass persistent settings to dialog
         dlg = ImportDialog(result, persistent_settings=self._settings,
-                           parent=self)
+                           theme=self.theme, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 

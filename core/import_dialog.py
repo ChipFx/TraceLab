@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
+from core.grouping_dialog import GroupingDialog
 import numpy as np
 from typing import Dict, List, Optional
 from core.data_loader import LoadResult, is_numeric_column, CsvMetadata, parse_value
@@ -163,6 +164,8 @@ class ColumnConfigRow(QWidget):
         meta = metadata or CsvMetadata()
         # col_info overrides the global CsvMetadata for per-column defaults
         self._col_info = col_info
+        # Group assignment — updated by the import dialog's grouping dialog
+        self.col_group: str = col_info.group if (col_info and getattr(col_info, "group", "")) else ""
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -289,12 +292,13 @@ class ColumnConfigRow(QWidget):
 
 class ImportDialog(QDialog):
     def __init__(self, load_result: LoadResult,
-                 persistent_settings: dict = None, parent=None):
+                 persistent_settings: dict = None, theme=None, parent=None):
         super().__init__(parent)
         self.load_result = load_result
         self.result_traces: List[TraceModel] = []
         self._col_rows: Dict[str, ColumnConfigRow] = {}
         self._settings = persistent_settings or {}
+        self._theme = theme          # ThemeData / ThemeManager — for GroupingDialog
 
         self.setWindowTitle(f"Import: {load_result.filename}")
         self.setMinimumSize(900, 580)
@@ -415,11 +419,12 @@ class ImportDialog(QDialog):
             b.clicked.connect(fn)
             tb.addWidget(b)
         tb.addSpacing(16)
-        self.chk_group_by_unit = QCheckBox("Group by Unit on import")
-        self.chk_group_by_unit.setToolTip(
-            "When checked, imported traces are grouped by their unit field\n"
-            "(overrides any parser-supplied grouping).")
-        tb.addWidget(self.chk_group_by_unit)
+        btn_group = QPushButton("Group…")
+        btn_group.setToolTip(
+            "Group columns by unit, name pattern, or enabled state.\n"
+            "Assigned groups are used when traces are added to the channel panel.")
+        btn_group.clicked.connect(self._open_grouping_dialog)
+        tb.addWidget(btn_group)
         tb.addStretch()
         cl.addLayout(tb)
 
@@ -822,6 +827,122 @@ class ImportDialog(QDialog):
             row.edit_offset.setText(offset)
             row.edit_unit.setText(unit)
 
+    # ── Grouping ──────────────────────────────────────────────────────────────
+
+    def _open_grouping_dialog(self):
+        existing = {row.col_group for row in self._col_rows.values() if row.col_group}
+        dlg = GroupingDialog(existing_group_names=existing,
+                             theme=self._theme, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        method, pattern, create_inside, custom_name = dlg.get_config()
+        if method == "unit":
+            self._apply_import_group_by_unit(create_inside, custom_name)
+        elif method == "pattern":
+            if not pattern:
+                return
+            self._apply_import_group_by_pattern(pattern, create_inside, custom_name)
+        elif method == "enabled":
+            self._apply_import_group_enabled(custom_name)
+
+    def _unique_import_group_name(self, base: str, allocated: set = None) -> str:
+        existing = {row.col_group for row in self._col_rows.values() if row.col_group}
+        if allocated:
+            existing |= allocated
+        if base not in existing:
+            return base
+        for i in range(1, 1000):
+            candidate = f"{base}_{i:03d}"
+            if candidate not in existing:
+                return candidate
+        return base
+
+    def _apply_import_group_by_unit(self, create_inside: bool, custom_name: str = ""):
+        rows = list(self._col_rows.values())
+        allocated: set = set()
+
+        def _alloc(base: str) -> str:
+            name = self._unique_import_group_name(base, allocated)
+            allocated.add(name)
+            return name
+
+        if create_inside:
+            group_units: Dict[str, set] = {}
+            for row in rows:
+                g = row.col_group or "__ungrouped__"
+                unit = row.edit_unit.text().strip() or "Other"
+                group_units.setdefault(g, set()).add(unit)
+            target_map: Dict[tuple, str] = {}
+            for old_g, units in group_units.items():
+                if len(units) <= 1:
+                    continue
+                for unit in units:
+                    suffix = f"{custom_name}_{unit}" if custom_name else unit
+                    base = suffix if old_g == "__ungrouped__" else f"{old_g}_{suffix}"
+                    target_map[(old_g, unit)] = _alloc(base)
+            for row in rows:
+                key = (row.col_group or "__ungrouped__",
+                       row.edit_unit.text().strip() or "Other")
+                if key in target_map:
+                    row.col_group = target_map[key]
+        else:
+            unit_target: Dict[str, str] = {}
+            for row in rows:
+                unit = row.edit_unit.text().strip() or "Other"
+                if unit not in unit_target:
+                    base = f"{custom_name}_{unit}" if custom_name else unit
+                    unit_target[unit] = _alloc(base)
+            for row in rows:
+                row.col_group = unit_target[row.edit_unit.text().strip() or "Other"]
+
+    def _apply_import_group_by_pattern(self, pattern: str, create_inside: bool,
+                                        custom_name: str = ""):
+        import fnmatch as _fnmatch
+        pat_lower = pattern.lower()
+        name_repr = pattern.replace("*", "(ALL)")
+        rows = list(self._col_rows.values())
+        allocated: set = set()
+
+        def _alloc(base: str) -> str:
+            name = self._unique_import_group_name(base, allocated)
+            allocated.add(name)
+            return name
+
+        def _matches(row) -> bool:
+            label = (row.edit_label.text().strip() or row.col_name).lower()
+            return _fnmatch.fnmatch(label, pat_lower)
+
+        if create_inside:
+            group_has_nonmatch: Dict[str, bool] = {}
+            for row in rows:
+                g = row.col_group or "__ungrouped__"
+                if not _matches(row):
+                    group_has_nonmatch[g] = True
+            group_target: Dict[str, str] = {}
+            for g, _ in group_has_nonmatch.items():
+                suffix = custom_name or name_repr
+                base = suffix if g == "__ungrouped__" else f"{g}_{suffix}"
+                group_target[g] = _alloc(base)
+            for row in rows:
+                if not _matches(row):
+                    continue
+                old_g = row.col_group or "__ungrouped__"
+                if old_g in group_target:
+                    row.col_group = group_target[old_g]
+        else:
+            base = custom_name or f"Group_{name_repr}"
+            group_name = _alloc(base)
+            for row in rows:
+                if _matches(row):
+                    row.col_group = group_name
+
+    def _apply_import_group_enabled(self, custom_name: str = ""):
+        base = custom_name or "Enabled"
+        group_name = self._unique_import_group_name(base)
+        for row in self._col_rows.values():
+            if row.chk_enable.isChecked():
+                row.col_group = group_name
+
     def _do_import(self):
         use_time_col = self.radio_time_col.isChecked()
         time_col_name = self.combo_time_col.currentText() if use_time_col else None
@@ -901,9 +1022,7 @@ class ImportDialog(QDialog):
 
             col_info = self.load_result.column_infos.get(col_name)
             _trace_name = row.edit_label.text().strip() or col_name
-            _col_group = (row.edit_unit.text().strip() or "Other"
-                          if self.chk_group_by_unit.isChecked()
-                          else (col_info.group if col_info else ""))
+            _col_group = row.col_group
 
             # Per-trace sample rate from #trace_meta= takes precedence over
             # the file-level value derived from the time column / UI spinboxes.

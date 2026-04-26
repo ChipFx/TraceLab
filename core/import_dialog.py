@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QComboBox, QCheckBox, QPushButton, QScrollArea,
     QWidget, QGroupBox, QTabWidget, QApplication,
-    QMessageBox, QRadioButton, QButtonGroup, QFrame
+    QMessageBox, QRadioButton, QButtonGroup, QFrame, QInputDialog
 )
 from PyQt6.QtCore import Qt, QMimeData, QPoint
 from PyQt6.QtGui import QFont, QDrag, QPixmap, QPainter, QColor
@@ -203,6 +203,7 @@ class ColumnConfigRow(QWidget):
                  is_time_candidate: bool = False,
                  metadata: CsvMetadata = None,
                  col_info=None,          # ColumnInfo from parser plugin, or None
+                 drop_callback=None,     # callable(dragged_col_name, target_group) or None
                  parent=None):
         super().__init__(parent)
         self.col_name = col_name
@@ -215,6 +216,10 @@ class ColumnConfigRow(QWidget):
         self.col_group: str = col_info.group if (col_info and getattr(col_info, "group", "")) else ""
         # Drag state — row initiates drag from anywhere (no click action on the row)
         self._drag_start: QPoint | None = None
+        # Drop callback — set by ImportDialog so the row can act as a drop target
+        self._drop_callback = drop_callback
+        if drop_callback is not None:
+            self.setAcceptDrops(True)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -348,6 +353,25 @@ class ColumnConfigRow(QWidget):
         drag.setHotSpot(QPoint(8, 10))
         drag.exec(Qt.DropAction.MoveAction)
         self._drag_start = None
+
+    # ── Row as drop target ────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if (event.mimeData().hasFormat(_COL_DRAG_MIME) and
+                event.mimeData().data(_COL_DRAG_MIME).data().decode() != self.col_name):
+            event.acceptProposedAction()
+            self.setStyleSheet("border: 1px solid #6060c0;")
+
+    def dragLeaveEvent(self, event):
+        super().dragLeaveEvent(event)
+        self.setStyleSheet("")
+
+    def dropEvent(self, event):
+        self.setStyleSheet("")
+        col_name = event.mimeData().data(_COL_DRAG_MIME).data().decode()
+        if self._drop_callback and col_name != self.col_name:
+            self._drop_callback(col_name, self.col_group)
+        event.acceptProposedAction()
 
     def _toggle_scaling(self, enabled: bool):
         self.scale_widget.setEnabled(enabled)
@@ -510,6 +534,12 @@ class ImportDialog(QDialog):
             "Assigned groups are used when traces are added to the channel panel.")
         btn_group.clicked.connect(self._open_grouping_dialog)
         tb.addWidget(btn_group)
+        btn_new_group = QPushButton("New Group…")
+        btn_new_group.setToolTip(
+            "Create an empty named group.\n"
+            "Drag channels onto the group banner to assign them.")
+        btn_new_group.clicked.connect(self._create_empty_group)
+        tb.addWidget(btn_new_group)
         tb.addStretch()
         cl.addLayout(tb)
 
@@ -545,6 +575,9 @@ class ImportDialog(QDialog):
         self._col_scroll_layout = QVBoxLayout(sw)
         self._col_scroll_layout.setSpacing(2)
 
+        self._group_fold_state: Dict[str, bool] = {}   # group_name → collapsed
+        self._manual_groups: List[str] = []            # groups created without any columns yet
+
         # ── Create all ColumnConfigRow widgets (no layout placement yet) ──
         # col_group is initialised from parser-supplied group info inside
         # ColumnConfigRow.__init__ (via col_info.group).
@@ -554,7 +587,8 @@ class ImportDialog(QDialog):
             col_info = self.load_result.column_infos.get(col_name)
             row = ColumnConfigRow(col_name, data,
                                   is_time_candidate=is_time, metadata=meta,
-                                  col_info=col_info)
+                                  col_info=col_info,
+                                  drop_callback=self._on_col_dropped_on_group)
             row.setParent(sw)
             self._col_rows[col_name] = row
 
@@ -860,6 +894,9 @@ class ImportDialog(QDialog):
 
     # ── Column list rebuild ───────────────────────────────────────────────────
 
+    def _on_group_fold_changed(self, group_name: str, collapsed: bool):
+        self._group_fold_state[group_name] = collapsed
+
     def _on_col_dropped_on_group(self, col_name: str, group_name: str):
         """Called when a ColumnConfigRow drag is dropped onto a group header."""
         row = self._col_rows.get(col_name)
@@ -900,30 +937,45 @@ class ImportDialog(QDialog):
             else:
                 ungrouped.append(col_name)
 
+        # Include manually created groups that may still be empty
+        for mg in self._manual_groups:
+            if mg not in groups_cols:
+                groups_order.append(mg)
+                groups_cols[mg] = []
+
         self._group_rows = {}
 
         if groups_order:
             for grp in groups_order:
                 self._group_rows[grp] = []
-                sl.addWidget(_ImportGroupHeader(
+                hdr = _ImportGroupHeader(
                     grp, self._group_rows[grp],
                     on_drop=self._on_col_dropped_on_group,
-                    theme=self._theme))
+                    on_fold_changed=self._on_group_fold_changed,
+                    theme=self._theme)
+                sl.addWidget(hdr)
                 for col_name in groups_cols[grp]:
                     row = self._col_rows[col_name]
                     self._group_rows[grp].append(row)
                     sl.addWidget(row)
                     row.show()
+                if self._group_fold_state.get(grp, False):
+                    hdr.set_collapsed(True)
             if ungrouped:
                 self._group_rows["__ungrouped__"] = []
-                sl.addWidget(_ImportGroupHeader(
+                hdr = _ImportGroupHeader(
                     "Ungrouped", self._group_rows["__ungrouped__"],
-                    on_drop=self._on_col_dropped_on_group))
+                    on_drop=self._on_col_dropped_on_group,
+                    on_fold_changed=self._on_group_fold_changed,
+                    theme=self._theme)
+                sl.addWidget(hdr)
                 for col_name in ungrouped:
                     row = self._col_rows[col_name]
                     self._group_rows["__ungrouped__"].append(row)
                     sl.addWidget(row)
                     row.show()
+                if self._group_fold_state.get("__ungrouped__", False):
+                    hdr.set_collapsed(True)
         else:
             for i, col_name in enumerate(self.load_result.columns):
                 row = self._col_rows.get(col_name)
@@ -940,6 +992,25 @@ class ImportDialog(QDialog):
         sl.addStretch()
 
     # ── Grouping ──────────────────────────────────────────────────────────────
+
+    def _create_empty_group(self):
+        """Prompt for a name and add an empty group banner to the column list."""
+        existing = {row.col_group for row in self._col_rows.values() if row.col_group}
+        existing |= set(self._manual_groups)
+        name, ok = QInputDialog.getText(self, "New Group", "Group name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        # Deduplicate: append a numeric suffix if the name is already taken
+        base = name
+        suffix = 1
+        while name in existing:
+            name = f"{base}_{suffix:03d}"
+            suffix += 1
+        self._manual_groups.append(name)
+        self._rebuild_column_list()
 
     def _open_grouping_dialog(self):
         existing = {row.col_group for row in self._col_rows.values() if row.col_group}
@@ -1225,12 +1296,13 @@ class _ImportGroupHeader(QWidget):
     """
 
     def __init__(self, group_name: str, rows_list: list,
-                 on_drop=None, theme=None, parent=None):
+                 on_drop=None, on_fold_changed=None, theme=None, parent=None):
         super().__init__(parent)
-        self._group_name = group_name
-        self._rows_list  = rows_list
-        self._on_drop    = on_drop
-        self._collapsed  = False
+        self._group_name      = group_name
+        self._rows_list       = rows_list
+        self._on_drop         = on_drop
+        self._on_fold_changed = on_fold_changed
+        self._collapsed       = False
 
         # Derive colours from theme; fall back to mid-neutral values that work
         # reasonably on any background rather than hardcoded dark-only colours.
@@ -1284,12 +1356,17 @@ class _ImportGroupHeader(QWidget):
         hl.addWidget(btn_all)
         hl.addWidget(btn_none)
 
+    def set_collapsed(self, collapsed: bool):
+        self._collapsed = collapsed
+        self._lbl.setText(f"{'▶' if collapsed else '▼'}  {self._group_name}")
+        for r in self._rows_list:
+            r.setVisible(not collapsed)
+
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
-        self._collapsed = not self._collapsed
-        self._lbl.setText(f"{'▶' if self._collapsed else '▼'}  {self._group_name}")
-        for r in self._rows_list:
-            r.setVisible(not self._collapsed)
+        self.set_collapsed(not self._collapsed)
+        if self._on_fold_changed:
+            self._on_fold_changed(self._group_name, self._collapsed)
 
     # ── Drag-drop target ──────────────────────────────────────────────────────
 

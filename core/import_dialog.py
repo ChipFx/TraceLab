@@ -9,8 +9,8 @@ from PyQt6.QtWidgets import (
     QWidget, QGroupBox, QTabWidget, QApplication,
     QMessageBox, QRadioButton, QButtonGroup, QFrame, QInputDialog
 )
-from PyQt6.QtCore import Qt, QMimeData, QPoint
-from PyQt6.QtGui import QFont, QDrag, QPixmap, QPainter, QColor
+from PyQt6.QtCore import Qt, QMimeData, QPoint, QTimer, QObject
+from PyQt6.QtGui import QFont, QDrag, QPixmap, QPainter, QColor, QCursor
 from core.grouping_dialog import GroupingDialog
 import numpy as np
 from typing import Dict, List, Optional
@@ -152,15 +152,57 @@ def _normalise_decimal(s: str) -> str:
 _COL_DRAG_MIME = "application/x-tl-import-col"
 
 
+# ── Auto-scroll helper ────────────────────────────────────────────────────────
+
+class _DragScrollHelper(QObject):
+    """Scrolls a QScrollArea while a drag is active near its top/bottom edge.
+
+    Usage: call start() just before drag.exec(), stop() immediately after.
+    The helper polls QCursor.pos() on a timer — no event-filter wiring needed.
+    """
+    _EDGE_PX   = 50    # px from viewport edge that triggers scrolling
+    _TICK_MS   = 20    # timer interval (ms)
+    _MAX_SPEED = 18    # pixels per tick at the very edge
+
+    def __init__(self, scroll_area, parent=None):
+        super().__init__(parent)
+        self._sa = scroll_area
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+
+    def _tick(self):
+        vp  = self._sa.viewport()
+        y   = vp.mapFromGlobal(QCursor.pos()).y()
+        h   = vp.height()
+        dy  = 0
+        if 0 <= y < self._EDGE_PX:
+            frac = 1.0 - y / self._EDGE_PX
+            dy   = -max(1, int(frac * self._MAX_SPEED))
+        elif h - self._EDGE_PX < y <= h:
+            frac = (y - (h - self._EDGE_PX)) / self._EDGE_PX
+            dy   = max(1, int(frac * self._MAX_SPEED))
+        if dy:
+            sb = self._sa.verticalScrollBar()
+            sb.setValue(sb.value() + dy)
+
+
 # ── Drag handle for ColumnConfigRow ──────────────────────────────────────────
 
 class _ColDragHandle(QLabel):
     """Small grip icon that initiates a QDrag carrying the column name."""
 
-    def __init__(self, col_name: str, parent=None):
+    def __init__(self, col_name: str, scroll_helper=None, parent=None):
         super().__init__("⠿", parent)
         self._col_name = col_name
         self._drag_start: QPoint | None = None
+        self._scroll_helper = scroll_helper
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setFixedWidth(14)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -192,7 +234,11 @@ class _ColDragHandle(QLabel):
         drag.setMimeData(mime)
         drag.setPixmap(pm)
         drag.setHotSpot(QPoint(8, 10))
+        if self._scroll_helper:
+            self._scroll_helper.start()
         drag.exec(Qt.DropAction.MoveAction)
+        if self._scroll_helper:
+            self._scroll_helper.stop()
         self._drag_start = None
 
 
@@ -204,6 +250,7 @@ class ColumnConfigRow(QWidget):
                  metadata: CsvMetadata = None,
                  col_info=None,          # ColumnInfo from parser plugin, or None
                  drop_callback=None,     # callable(dragged_col_name, target_group) or None
+                 scroll_helper=None,     # _DragScrollHelper — auto-scroll during drag
                  parent=None):
         super().__init__(parent)
         self.col_name = col_name
@@ -220,12 +267,14 @@ class ColumnConfigRow(QWidget):
         self._drop_callback = drop_callback
         if drop_callback is not None:
             self.setAcceptDrops(True)
+        # Auto-scroll helper shared with the containing scroll area
+        self._scroll_helper = scroll_helper
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(8)
 
-        layout.addWidget(_ColDragHandle(col_name))
+        layout.addWidget(_ColDragHandle(col_name, scroll_helper=scroll_helper))
 
         # Default-skip: plugin may mark alarm/marker columns as skip=True
         _plugin_skip = col_info.skip if col_info is not None else False
@@ -351,7 +400,11 @@ class ColumnConfigRow(QWidget):
         drag.setMimeData(mime)
         drag.setPixmap(pm)
         drag.setHotSpot(QPoint(8, 10))
+        if self._scroll_helper:
+            self._scroll_helper.start()
         drag.exec(Qt.DropAction.MoveAction)
+        if self._scroll_helper:
+            self._scroll_helper.stop()
         self._drag_start = None
 
     # ── Row as drop target ────────────────────────────────────────────────────
@@ -571,6 +624,7 @@ class ImportDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        self._drag_scroll = _DragScrollHelper(scroll, parent=self)
         sw = QWidget()
         self._col_scroll_layout = QVBoxLayout(sw)
         self._col_scroll_layout.setSpacing(2)
@@ -588,7 +642,8 @@ class ImportDialog(QDialog):
             row = ColumnConfigRow(col_name, data,
                                   is_time_candidate=is_time, metadata=meta,
                                   col_info=col_info,
-                                  drop_callback=self._on_col_dropped_on_group)
+                                  drop_callback=self._on_col_dropped_on_group,
+                                  scroll_helper=self._drag_scroll)
             row.setParent(sw)
             self._col_rows[col_name] = row
 

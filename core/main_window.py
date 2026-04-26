@@ -1861,19 +1861,19 @@ class MainWindow(QMainWindow):
     def _get_y_major_tick(self, lane) -> float:
         """Return the Y tick spacing to show as div in the status bar.
         Reads the cached result from the last axis render so the status bar
-        always agrees with what was actually drawn (no size mismatch)."""
+        always agrees with what was actually drawn (no size mismatch).
+        Falls back to span/10 before the first render — never calls tickSpacing
+        directly so the cache is never poisoned by the wrong axis size."""
         subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
             ax = lane.getPlotItem().getAxis('left')
             cached = getattr(ax, '_last_tick_result', None)
             if cached:
                 return float(cached[-1][0] if subdiv_label else cached[0][0])
-            # Fallback before first render: ask the axis directly
+            # Pre-render fallback: rough estimate, no tickSpacing call
             vr = lane.getPlotItem().viewRange()[1]
-            h = lane.height() or 80
-            ticks = ax.tickSpacing(vr[0], vr[1], h)
-            if ticks:
-                return float(ticks[-1][0] if subdiv_label else ticks[0][0])
+            span = abs(vr[1] - vr[0])
+            return span / 10.0 if span > 0 else 0.0
         except Exception:
             pass
         return 0.0

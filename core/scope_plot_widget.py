@@ -3,6 +3,7 @@ core/scope_plot_widget.py
 Main oscilloscope plot widget — split lanes and overlay modes.
 """
 
+import math
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph import InfiniteLine
@@ -146,13 +147,19 @@ def _upsample_for_display(
     return sinc_interpolate_to_n(t, y, viewport_min_pts)
 
 
-def _eng_format(value: float, unit: str) -> str:
+def _eng_format(value: float, unit: str, spacing: float = None) -> str:
     """
     Format a float with engineering-style SI prefix and unit.
+
+    When ``spacing`` is provided (tick interval in the same units as value),
+    the number of decimal places is computed so that adjacent ticks cannot
+    produce identical labels.  Without spacing a short-but-readable heuristic
+    is used (not safe for closely-spaced ticks).
+
     Examples:  0.001 V  ->  '1 mV'
                0.000099 V -> '99 µV'
                1500 Hz    -> '1.5 kHz'
-               0.1 V      -> '100 mV'   (100 mV shorter than 0.1 V)
+               0.1 V      -> '100 mV'
     """
     if value == 0:
         return f"0 {unit}"
@@ -164,13 +171,21 @@ def _eng_format(value: float, unit: str) -> str:
     for scale, prefix in prefixes:
         if abs_v >= scale * 0.9999:
             scaled = value / scale
-            # Choose decimal places to keep it short
-            if abs(scaled) >= 100:
-                s = f"{scaled:.0f}"
-            elif abs(scaled) >= 10:
-                s = f"{scaled:.1f}".rstrip('0').rstrip('.')
+            if spacing is not None and spacing > 0:
+                # Enough decimal places so that spacing/scale differences are
+                # never rounded away.  E.g. spacing=0.05, scale=1 → dp=2.
+                scaled_sp = abs(spacing / scale)
+                dp = max(0, -int(math.floor(math.log10(scaled_sp)))) if scaled_sp < 1 else 0
+                dp = min(dp, 9)   # guard against pathological inputs
+                s = f"{scaled:.{dp}f}"
             else:
-                s = f"{scaled:.2f}".rstrip('0').rstrip('.')
+                # Heuristic for status-bar / non-tick uses
+                if abs(scaled) >= 100:
+                    s = f"{scaled:.0f}"
+                elif abs(scaled) >= 10:
+                    s = f"{scaled:.1f}".rstrip('0').rstrip('.')
+                else:
+                    s = f"{scaled:.2f}".rstrip('0').rstrip('.')
             return f"{s} {prefix}{unit}"
     # Fallback for very small values
     return f"{value:.3e} {unit}"
@@ -345,7 +360,12 @@ class EngineeringAxisItem(pg.AxisItem):
         major = ticks[0][0]
         if major <= 0:
             return ticks
-        px_per_major = size * major / (maxVal - minVal)
+        # size is in logical pixels; user thresholds are in physical pixels.
+        # Multiply by DPR so the comparison is apples-to-apples.
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        dpr = screen.devicePixelRatio() if screen else 1.0
+        px_per_major = size * major / (maxVal - minVal) * dpr
         result = [(major, ticks[0][1])]
         if px_per_major >= self._div_cfg.get("div_tenths_px", 60):
             result.append((major / 10.0, 0))
@@ -363,6 +383,7 @@ class EngineeringAxisItem(pg.AxisItem):
 
     def generateDrawSpecs(self, p):
         axisSpec, tickSpecs, textSpecs = super().generateDrawSpecs(p)
+        textSpecs = _filter_dense_labels(textSpecs)
         self._fix_subdiv_alpha(tickSpecs)
         return axisSpec, tickSpecs, textSpecs
 
@@ -378,7 +399,9 @@ class EngineeringAxisItem(pg.AxisItem):
         n_major = counts[0]
         if len(tickSpecs) <= n_major:
             return
-        sub_alpha = max(20, int(self.grid * 0.55))
+        # Sub-divs should be just barely less prominent than major lines.
+        # Major lines end up at alpha≈self.grid; use 0.92 so they're distinguishable.
+        sub_alpha = max(40, int(self.grid * 0.92))
         for idx in range(n_major, len(tickSpecs)):
             pen, p1, p2 = tickSpecs[idx]
             pen = QPen(pen)
@@ -390,10 +413,31 @@ class EngineeringAxisItem(pg.AxisItem):
     def tickStrings(self, values, scale, spacing):
         if not self._unit or self._unit in ("raw", ""):
             return super().tickStrings(values, scale, spacing)
-        # pyqtgraph passes scale for its own unit conversion; we handle SI
-        # prefixes ourselves in _eng_format, so use values directly (scale=1.0)
-        return [_eng_format(float(v), self._unit) for v in values]
+        # Pass spacing so _eng_format uses enough decimal places that
+        # adjacent ticks never produce identical labels.
+        return [_eng_format(float(v), self._unit, spacing) for v in values]
 
+
+
+def _filter_dense_labels(textSpecs: list) -> list:
+    """Drop Y-axis tick labels whose bounding rects would overlap or touch.
+
+    pyqtgraph returns textSpecs as [(QRectF, flags, text), ...].
+    The rects are already computed from the real font metrics, so this filter
+    is automatically correct for any font size or label width.
+    Gridlines are in tickSpecs (separate list) and are never affected.
+    """
+    if len(textSpecs) <= 1:
+        return textSpecs
+    # Sort top-to-bottom by rect vertical centre
+    by_y = sorted(textSpecs, key=lambda s: s[0].center().y())
+    kept = [by_y[0]]
+    for spec in by_y[1:]:
+        # Allow a 2 px gap between the bottom of the last kept label
+        # and the top of the candidate; drop the candidate otherwise.
+        if spec[0].top() >= kept[-1][0].bottom() - 2:
+            kept.append(spec)
+    return kept
 
 
 def _theme_name(theme) -> str:

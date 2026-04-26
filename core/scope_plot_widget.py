@@ -201,8 +201,12 @@ class EngineeringTimeAxisItem(pg.AxisItem):
         self._smart_max_m = 120.0   # minutes above which → HH:MM:SS
         self._smart_max_h = 24.0    # hours   above which → DD:HH:MM:SS
         self._div_cfg: dict = {}
-        self._real_time       = False
+        self._real_time        = False
         self._t0_wall_clock_dt = None  # datetime | None
+        # Per-render-cycle anchor state (reset in generateDrawSpecs)
+        self._rt_anchor_label: str   = ""
+        self._rt_anchor_t:     float = 0.0
+        self._rt_max_spacing:  float = 0.0
 
     def set_div_settings(self, cfg: dict):
         self._div_cfg = cfg or {}
@@ -233,8 +237,16 @@ class EngineeringTimeAxisItem(pg.AxisItem):
         return levels
 
     def generateDrawSpecs(self, p):
-        axisSpec, tickSpecs, textSpecs = super().generateDrawSpecs(p)
+        # Reset per-render anchor so tickStrings picks up the major-level call
+        self._rt_anchor_label = ""
+        self._rt_max_spacing  = 0.0
+        result = super().generateDrawSpecs(p)
+        if result is None:
+            return result   # axis not yet sized
+        axisSpec, tickSpecs, textSpecs = result
         self._fix_subdiv_alpha(tickSpecs)
+        if self._real_time and self._t0_wall_clock_dt is not None and self._rt_anchor_label:
+            self._inject_rt_anchor(textSpecs, p)
         return axisSpec, tickSpecs, textSpecs
 
     def _fix_subdiv_alpha(self, tickSpecs):
@@ -356,20 +368,67 @@ class EngineeringTimeAxisItem(pg.AxisItem):
 
     def _fmt_real_time_strings(self, values, spacing) -> list:
         """Format tick labels in real-time mode.
-        First (leftmost) tick gets the full absolute datetime stamp;
-        subsequent ticks get a "+delta" relative to it.
+
+        The anchor timestamp is NOT emitted as a tick label; it is injected
+        later by generateDrawSpecs as a left-aligned label at the axis edge so
+        it can never be clipped.  All tick labels show "+delta" relative to the
+        anchor.
+
+        The anchor is the major-grid boundary at or just left of the visible
+        left edge, so it may be off-screen.  Only the call with the largest
+        spacing (= major level) sets the anchor; minor-level calls just compute
+        deltas from the already-established anchor.
         """
+        import math
         from datetime import timedelta
-        anchor_t = float(values[0])
-        anchor_dt = self._t0_wall_clock_dt + timedelta(seconds=anchor_t)
+
+        if spacing > self._rt_max_spacing:
+            # Major-level call — establish the anchor
+            self._rt_max_spacing = spacing
+            try:
+                lo = self.range[0]
+            except Exception:
+                lo = float(values[0])
+            t_anchor = math.floor(lo / spacing) * spacing if spacing > 0 else lo
+            anchor_dt = self._t0_wall_clock_dt + timedelta(seconds=t_anchor)
+            self._rt_anchor_label = self._fmt_rt_anchor(anchor_dt, spacing)
+            self._rt_anchor_t = t_anchor
+
+        t_anchor = self._rt_anchor_t
         result = []
-        for i, v in enumerate(values):
-            if i == 0:
-                result.append(self._fmt_rt_anchor(anchor_dt, spacing))
-            else:
-                delta = float(v) - anchor_t
-                result.append(self._fmt_rt_delta(delta, spacing))
+        for v in values:
+            delta = float(v) - t_anchor
+            # Suppress the tick label exactly at the anchor position (label shown
+            # separately at the axis edge) to avoid redundant/overlapping text.
+            result.append("" if delta == 0 else self._fmt_rt_delta(delta, spacing))
         return result
+
+    def _inject_rt_anchor(self, textSpecs, p):
+        """Append the anchor timestamp as a left-aligned label at the axis left edge.
+
+        Constructs a QRectF that fits entirely within self.boundingRect() so
+        pyqtgraph's bounds-check (br & rect != rect) never drops it.
+        The y-coordinate is borrowed from the first existing textSpec so the
+        anchor sits on the same text row as the regular tick labels.
+        """
+        from PyQt6.QtCore import QRectF, Qt
+        label = self._rt_anchor_label
+        if not label or textSpecs is None:
+            return
+        # Borrow the text-row y/height from an existing tick label if available
+        if textSpecs:
+            sample = textSpecs[0][0]
+            y, h = sample.y(), sample.height()
+        else:
+            # Fallback: estimate from the axis widget geometry
+            br = self.boundingRect()
+            h = 12.0
+            y = br.bottom() - h - 2
+        bounds = self.boundingRect()
+        rect = QRectF(bounds.left() + 1, y, bounds.width() - 2, h)
+        flags = (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter |
+                 Qt.TextFlag.TextDontClip)
+        textSpecs.append((rect, flags, label))
 
     @staticmethod
     def _fmt_rt_anchor(dt, spacing: float) -> str:

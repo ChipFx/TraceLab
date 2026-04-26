@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 
 
 def _fmt_time(t: float) -> str:
-    """Format a time value with appropriate units."""
+    """Format a time value with SI time prefixes (standard mode)."""
     if t is None:
         return "---"
     a = abs(t)
@@ -29,6 +29,69 @@ def _fmt_time(t: float) -> str:
     if a < 1:
         return f"{t*1e3:.4g} ms"
     return f"{t:.6g} s"
+
+
+def _fmt_smart_time(t: float, smart_settings: dict) -> str:
+    """Format a time value the same way the Smart Scale axis would label it.
+    Each value is evaluated independently so it never jumps based on zoom state.
+    """
+    if t is None:
+        return "---"
+    ss = smart_settings or {}
+    max_s = float(ss.get("max_seconds", 300))
+    max_m = float(ss.get("max_minutes", 120))
+    max_h = float(ss.get("max_hours", 24))
+    a = abs(t)
+    if a < max_s:
+        return _fmt_time(t)   # SI range
+    max_m_thr = max_m * 60.0
+    max_h_thr = max_h * 3600.0
+    sign = "\u2212" if t < 0 else ""
+    show_ms = (a % 1) != 0
+    ms_str = f".{int(round((a % 1.0) * 1000)):03d}" if show_ms else ".0"
+    secs  = int(a) % 60
+    mins  = int(a) // 60 % 60
+    hours = int(a) // 3600 % 24
+    days  = int(a) // 86400
+    if a < max_m_thr:
+        total_mins = int(a) // 60
+        return f"{sign}{total_mins}:{secs:02d}{ms_str}"
+    elif a < max_h_thr:
+        return f"{sign}{hours}:{mins:02d}:{secs:02d}{ms_str}"
+    else:
+        return f"{sign}{days}d {hours:02d}:{mins:02d}:{secs:02d}"
+
+
+def _fmt_real_time_cursor(t: float, t0_dt) -> str:
+    """Format a cursor time as an absolute wall-clock datetime (ms precision)."""
+    if t is None or t0_dt is None:
+        return "---"
+    from datetime import timedelta
+    dt = t0_dt + timedelta(seconds=float(t))
+    ms = dt.microsecond // 1000
+    return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{ms:03d}"
+
+
+def _fmt_freq_si(freq: float) -> str:
+    """Format a frequency with SI prefixes across the full range (nHz … GHz)."""
+    if freq <= 0:
+        return "---"
+    a = abs(freq)
+    if a >= 1e9:
+        return f"{freq/1e9:.4g} GHz"
+    if a >= 1e6:
+        return f"{freq/1e6:.4g} MHz"
+    if a >= 1e3:
+        return f"{freq/1e3:.4g} kHz"
+    if a >= 1.0:
+        return f"{freq:.4g} Hz"
+    if a >= 1e-3:
+        return f"{freq*1e3:.4g} mHz"
+    if a >= 1e-6:
+        return f"{freq*1e6:.4g} \u00b5Hz"
+    if a >= 1e-9:
+        return f"{freq*1e9:.4g} nHz"
+    return f"{freq:.4g} Hz"
 
 
 def _fmt_val(v: float, unit: str = "", spacing: float = None) -> str:
@@ -103,6 +166,10 @@ class CursorPanel(QWidget):
         self._trace_display_order: List[str] = []  # set by main window
         self._trace_units: Dict[str, str] = {}     # name -> unit string
         self._y_spacings: Dict[str, float] = {}    # name -> current Y tick spacing
+        # Time-scale mode: "standard" | "smart" | "real_time"
+        self._time_scale_mode: str = "standard"
+        self._smart_settings: dict = {}
+        self._t0_wall_clock_dt = None              # datetime | None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -208,22 +275,18 @@ class CursorPanel(QWidget):
         # Update time labels
         t_a = self._cursor_times.get(0)
         t_b = self._cursor_times.get(1)
-        self.lbl_a_time.setText(_fmt_time(t_a))
-        self.lbl_b_time.setText(_fmt_time(t_b))
+        self.lbl_a_time.setText(self._fmt_cursor_time(t_a))
+        self.lbl_b_time.setText(self._fmt_cursor_time(t_b))
 
         if t_a is not None and t_b is not None:
             dt = t_b - t_a
-            self.lbl_dt.setText(_fmt_time(dt))
+            # Δt: use smart/standard time format (always relative, even in real_time mode)
+            if self._time_scale_mode == "smart":
+                self.lbl_dt.setText(_fmt_smart_time(dt, self._smart_settings))
+            else:
+                self.lbl_dt.setText(_fmt_time(dt))
             if dt != 0:
-                freq = 1.0 / abs(dt)
-                if freq >= 1e9:
-                    self.lbl_freq.setText(f"{freq/1e9:.4g} GHz")
-                elif freq >= 1e6:
-                    self.lbl_freq.setText(f"{freq/1e6:.4g} MHz")
-                elif freq >= 1e3:
-                    self.lbl_freq.setText(f"{freq/1e3:.4g} kHz")
-                else:
-                    self.lbl_freq.setText(f"{freq:.4g} Hz")
+                self.lbl_freq.setText(_fmt_freq_si(1.0 / abs(dt)))
             else:
                 self.lbl_freq.setText("∞")
         else:
@@ -279,6 +342,41 @@ class CursorPanel(QWidget):
     def set_y_spacings(self, spacings: Dict[str, float]):
         """Update per-trace Y tick spacing so cursor values display at matching precision."""
         self._y_spacings = dict(spacings)
+
+    def set_time_scale_mode(self, mode: str, smart_settings: dict, t0_dt=None):
+        """Notify the cursor panel of the active time-scale mode.
+
+        mode: "standard" | "smart" | "real_time"
+        smart_settings: the smart_scale settings dict (thresholds)
+        t0_dt: datetime object for t=0 wall-clock anchor (real_time mode only)
+        """
+        self._time_scale_mode = mode
+        self._smart_settings = dict(smart_settings) if smart_settings else {}
+        self._t0_wall_clock_dt = t0_dt
+        # Refresh displayed values if cursors are placed
+        if any(t is not None for t in self._cursor_times.values()):
+            t_a = self._cursor_times.get(0)
+            t_b = self._cursor_times.get(1)
+            self.lbl_a_time.setText(self._fmt_cursor_time(t_a))
+            self.lbl_b_time.setText(self._fmt_cursor_time(t_b))
+            if t_a is not None and t_b is not None:
+                dt = t_b - t_a
+                if self._time_scale_mode == "smart":
+                    self.lbl_dt.setText(_fmt_smart_time(dt, self._smart_settings))
+                else:
+                    self.lbl_dt.setText(_fmt_time(dt))
+                if dt != 0:
+                    self.lbl_freq.setText(_fmt_freq_si(1.0 / abs(dt)))
+
+    def _fmt_cursor_time(self, t: Optional[float]) -> str:
+        """Format a cursor time position according to the active time-scale mode."""
+        if t is None:
+            return "---"
+        if self._time_scale_mode == "smart":
+            return _fmt_smart_time(t, self._smart_settings)
+        if self._time_scale_mode == "real_time":
+            return _fmt_real_time_cursor(t, self._t0_wall_clock_dt)
+        return _fmt_time(t)
 
     def _export_csv(self):
         path, _ = QFileDialog.getSaveFileName(

@@ -353,6 +353,7 @@ class MainWindow(QMainWindow):
         s["viewport_preset_max"]     = self._limits_config.get("preset_max", 50_000)
         s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
         s["advanced_ui"] = dict(self._adv_ui)
+        s["time_scale_mode"] = self._time_scale_mode
         s["smart_scale"] = dict(self._smart_scale)
         s["process_segments"] = self._process_segments
         s["scroll_primaries"] = self._scroll_primaries
@@ -458,6 +459,10 @@ class MainWindow(QMainWindow):
         self._adv_ui: dict = {**_adv_defaults,
                               **self._settings.get("advanced_ui", {})}
 
+        # ── Time-axis scale mode ──────────────────────────────────────────────
+        # "standard" | "smart" | "real_time"
+        self._time_scale_mode: str = self._settings.get("time_scale_mode", "standard")
+
         # ── Smart time-axis scale settings ────────────────────────────────────
         _smart_defaults = {
             "enabled":     False,
@@ -467,6 +472,8 @@ class MainWindow(QMainWindow):
         }
         self._smart_scale: dict = {**_smart_defaults,
                                    **self._settings.get("smart_scale", {})}
+        # Keep "enabled" consistent with the mode field
+        self._smart_scale["enabled"] = (self._time_scale_mode == "smart")
 
         # ── Segment view rendering ────────────────────────────────────────────
         self._process_segments: bool = bool(
@@ -586,6 +593,7 @@ class MainWindow(QMainWindow):
             self._adv_ui.get("statusbar_scroll", True))
         self._plot.set_div_settings(self._adv_ui)
         self._plot.set_smart_scale(self._smart_scale)
+        self._plot.set_real_time(self._build_real_time_settings())
         self._plot.set_process_segments(self._process_segments)
         self._plot.set_segment_dim_opacity(self._segments_dim_opacity)
         self._plot.set_segment_dash_pattern(
@@ -775,15 +783,29 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
         time_scale_menu = view_menu.addMenu("Time Scale")
-        self._act_smart_scale = time_scale_menu.addAction("Smart Scale  (MM:SS / HH:MM:SS…)")
-        self._act_smart_scale.setCheckable(True)
-        self._act_smart_scale.setChecked(self._smart_scale.get("enabled", False))
-        self._act_smart_scale.setToolTip(
-            "When enabled, long time axes display as MM:SS, HH:MM:SS, or DD:HH:MM:SS\n"
-            "instead of kilo-seconds.")
-        self._act_smart_scale.toggled.connect(self._toggle_smart_scale)
+        ts_group = QActionGroup(self)
+        ts_group.setExclusive(True)
+        self._act_ts_standard  = time_scale_menu.addAction("Standard")
+        self._act_ts_smart     = time_scale_menu.addAction("Smart Scale  (MM:SS / HH:MM:SS…)")
+        self._act_ts_realtime  = time_scale_menu.addAction("Real Time")
+        for act in (self._act_ts_standard, self._act_ts_smart, self._act_ts_realtime):
+            act.setCheckable(True)
+            ts_group.addAction(act)
+        self._act_ts_standard.setToolTip("Label the time axis with SI prefixes (ns/µs/ms/s/ks).")
+        self._act_ts_smart.setToolTip(
+            "Long time axes display as MM:SS, HH:MM:SS, or DD:HH:MM:SS instead of kilo-seconds.")
+        self._act_ts_realtime.setToolTip(
+            "Show absolute wall-clock time on the axis.\n"
+            "Requires at least one loaded trace with a t0 wall-clock timestamp.")
+        if self._time_scale_mode == "smart":
+            self._act_ts_smart.setChecked(True)
+        elif self._time_scale_mode == "real_time":
+            self._act_ts_realtime.setChecked(True)
+        else:
+            self._act_ts_standard.setChecked(True)
+        ts_group.triggered.connect(self._on_time_scale_changed)
         time_scale_menu.addSeparator()
-        time_scale_menu.addAction("Settings…").triggered.connect(
+        time_scale_menu.addAction("Smart Scale Settings…").triggered.connect(
             self._dlg_smart_scale_settings)
 
         # ── Analysis ──────────────────────────────────────────────────
@@ -1385,6 +1407,8 @@ class MainWindow(QMainWindow):
         self._refresh_trigger_channels()
         self._refresh_status_bar()
         self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
+        if self._time_scale_mode == "real_time":
+            self._apply_time_scale()
         # Start async period estimation for every trace (after UI is live)
         for trace in traces:
             self._estimate_period_async(trace)
@@ -1725,10 +1749,47 @@ class MainWindow(QMainWindow):
         self._channel_panel.set_scroll_primaries(enabled)
         self._save_settings()
 
-    def _toggle_smart_scale(self, enabled: bool):
-        self._smart_scale["enabled"] = enabled
-        self._plot.set_smart_scale(self._smart_scale)
+    def _on_time_scale_changed(self, action):
+        if action is self._act_ts_smart:
+            self._time_scale_mode = "smart"
+        elif action is self._act_ts_realtime:
+            self._time_scale_mode = "real_time"
+        else:
+            self._time_scale_mode = "standard"
+        self._apply_time_scale()
         self._save_settings()
+
+    def _apply_time_scale(self):
+        """Push the current time-scale mode to the plot axes and cursor panel."""
+        self._smart_scale["enabled"] = (self._time_scale_mode == "smart")
+        self._plot.set_smart_scale(self._smart_scale)
+        rt_settings = self._build_real_time_settings()
+        self._plot.set_real_time(rt_settings)
+        # Update cursor panel
+        t0_dt = None
+        if self._time_scale_mode == "real_time":
+            from datetime import datetime
+            t0_str = self._get_active_t0_wall_clock()
+            if t0_str:
+                try:
+                    t0_dt = datetime.fromisoformat(t0_str)
+                except ValueError:
+                    pass
+        self._cursor_panel.set_time_scale_mode(
+            self._time_scale_mode, self._smart_scale, t0_dt)
+
+    def _build_real_time_settings(self) -> dict:
+        """Build the real-time axis settings dict from current state."""
+        enabled = (self._time_scale_mode == "real_time")
+        t0_str = self._get_active_t0_wall_clock() if enabled else ""
+        return {"enabled": enabled, "t0_wall_clock": t0_str}
+
+    def _get_active_t0_wall_clock(self) -> str:
+        """Return t0_wall_clock ISO string from the first trace that has one."""
+        for trace in self._traces:
+            if getattr(trace, "t0_wall_clock", ""):
+                return trace.t0_wall_clock
+        return ""
 
     def _dlg_smart_scale_settings(self):
         from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox, QLineEdit

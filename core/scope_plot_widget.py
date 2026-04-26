@@ -201,6 +201,8 @@ class EngineeringTimeAxisItem(pg.AxisItem):
         self._smart_max_m = 120.0   # minutes above which → HH:MM:SS
         self._smart_max_h = 24.0    # hours   above which → DD:HH:MM:SS
         self._div_cfg: dict = {}
+        self._real_time       = False
+        self._t0_wall_clock_dt = None  # datetime | None
 
     def set_div_settings(self, cfg: dict):
         self._div_cfg = cfg or {}
@@ -265,9 +267,29 @@ class EngineeringTimeAxisItem(pg.AxisItem):
         self.picture = None   # invalidate cached axis rendering
         self.update()
 
+    def set_real_time(self, settings: dict):
+        """Enable/disable real-time mode.  settings keys:
+            enabled (bool), t0_wall_clock (ISO-8601 str or "")
+        """
+        from datetime import datetime
+        rt = settings or {}
+        self._real_time = bool(rt.get("enabled", False))
+        t0_str = rt.get("t0_wall_clock", "") or ""
+        if self._real_time and t0_str:
+            try:
+                self._t0_wall_clock_dt = datetime.fromisoformat(t0_str)
+            except ValueError:
+                self._t0_wall_clock_dt = None
+        else:
+            self._t0_wall_clock_dt = None
+        self.picture = None
+        self.update()
+
     def tickStrings(self, values, scale, spacing):
         if not values:
             return []
+        if self._real_time and self._t0_wall_clock_dt is not None:
+            return self._fmt_real_time_strings(values, spacing)
         if not self._smart:
             return self._eng_strings(values)
 
@@ -331,6 +353,63 @@ class EngineeringTimeAxisItem(pg.AxisItem):
             elif a < 1e3:  out.append(f"{t:.4g} s")
             else:           out.append(f"{t/1e3:.4g} ks")
         return out
+
+    def _fmt_real_time_strings(self, values, spacing) -> list:
+        """Format tick labels in real-time mode.
+        First (leftmost) tick gets the full absolute datetime stamp;
+        subsequent ticks get a "+delta" relative to it.
+        """
+        from datetime import timedelta
+        anchor_t = float(values[0])
+        anchor_dt = self._t0_wall_clock_dt + timedelta(seconds=anchor_t)
+        result = []
+        for i, v in enumerate(values):
+            if i == 0:
+                result.append(self._fmt_rt_anchor(anchor_dt, spacing))
+            else:
+                delta = float(v) - anchor_t
+                result.append(self._fmt_rt_delta(delta, spacing))
+        return result
+
+    @staticmethod
+    def _fmt_rt_anchor(dt, spacing: float) -> str:
+        """Absolute datetime label for the anchor (first visible major tick).
+        Precision tracks the tick spacing: ms when spacing < 1 s, else tenths.
+        """
+        if spacing < 1e-3:
+            # microsecond spacing or finer — ms precision is plenty (per spec)
+            ms = dt.microsecond // 1000
+            return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{ms:03d}"
+        else:
+            tenths = dt.microsecond // 100000
+            return dt.strftime("%Y-%m-%d %H:%M:%S.") + str(tenths)
+
+    @staticmethod
+    def _fmt_rt_delta(delta_s: float, spacing: float) -> str:
+        """Relative '+delta' label for every tick after the anchor."""
+        a = abs(delta_s)
+        sign = "+" if delta_s >= 0 else "\u2212"
+        if spacing >= 3600:
+            h  = int(a) // 3600
+            m  = int(a) // 60 % 60
+            s  = int(a) % 60
+            return f"{sign}{h}:{m:02d}:{s:02d}"
+        elif spacing >= 60:
+            total_m = int(a) // 60
+            s       = int(a) % 60
+            frac    = round((a % 1) * 10)
+            return f"{sign}{total_m}:{s:02d}.{frac}"
+        elif spacing >= 1:
+            frac = round((a % 1) * 10)
+            return f"{sign}{int(a)}.{frac}"
+        elif spacing >= 1e-3:
+            return f"{sign}{a * 1e3:.4g}ms"
+        elif spacing >= 1e-6:
+            return f"{sign}{a * 1e6:.4g}\u00b5s"
+        elif spacing >= 1e-9:
+            return f"{sign}{a * 1e9:.4g}ns"
+        else:
+            return f"{sign}{a:.4g}s"
 
 
 class EngineeringAxisItem(pg.AxisItem):
@@ -1534,6 +1613,8 @@ class ScopePlotWidget(QWidget):
         self._seg_dash_pattern: Optional[list] = None
         # Smart scale settings — applied to new lanes on rebuild
         self._smart_scale_settings: dict = {}
+        # Real-time axis settings — applied to new lanes on rebuild
+        self._real_time_settings: dict = {}
         # Div sub-division settings — applied to new lanes on rebuild
         self._div_settings: dict = {}
 
@@ -1815,6 +1896,13 @@ class ScopePlotWidget(QWidget):
             lane._x_axis.set_smart_scale(settings)
             lane.refresh_curve()
 
+    def set_real_time(self, settings: dict):
+        """Propagate real-time axis settings to overlay axis and all split-mode lanes."""
+        self._real_time_settings = dict(settings)
+        self._ov_x_axis.set_real_time(settings)
+        for lane in self._lanes.values():
+            lane._x_axis.set_real_time(settings)
+
     def set_div_settings(self, cfg: dict):
         """Propagate div sub-division settings to all axis items (X and Y, overlay and lanes)."""
         self._div_settings = dict(cfg)
@@ -1930,6 +2018,8 @@ class ScopePlotWidget(QWidget):
             lane._segment_dash_pattern = self._seg_dash_pattern
             if self._smart_scale_settings:
                 lane._x_axis.set_smart_scale(self._smart_scale_settings)
+            if self._real_time_settings:
+                lane._x_axis.set_real_time(self._real_time_settings)
             if self._div_settings:
                 lane._x_axis.set_div_settings(self._div_settings)
                 lane._y_axis.set_div_settings(self._div_settings)

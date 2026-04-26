@@ -457,79 +457,25 @@ class ImportDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         sw = QWidget()
-        sl = QVBoxLayout(sw)
-        sl.setSpacing(2)
+        self._col_scroll_layout = QVBoxLayout(sw)
+        self._col_scroll_layout.setSpacing(2)
 
-        # ── Build group map ────────────────────────────────────────────
-        # Source 1: per-column ColumnInfo.group string (set by parser plugin)
-        col_group_map: Dict[str, str] = {}
-        for cname, ci in self.load_result.column_infos.items():
-            if ci and getattr(ci, 'group', ''):
-                col_group_map[cname] = ci.group
-        # Source 2: ColumnGroup objects with index-based membership
-        _idx_to_name: Dict[int, str] = {}
-        for cname, ci in self.load_result.column_infos.items():
-            if ci and hasattr(ci, 'index'):
-                _idx_to_name[ci.index] = cname
-        for cg in self.load_result.column_groups:
-            for idx in cg.column_indices:
-                cname = _idx_to_name.get(idx)
-                if cname and cname not in col_group_map:
-                    col_group_map[cname] = cg.name
-
-        # Build ordered group→columns mapping (file column order preserved within group)
-        groups_order: List[str] = []        # group names in first-appearance order
-        groups_cols: Dict[str, List[str]] = {}
-        ungrouped: List[str] = []
+        # ── Create all ColumnConfigRow widgets (no layout placement yet) ──
+        # col_group is initialised from parser-supplied group info inside
+        # ColumnConfigRow.__init__ (via col_info.group).
         for col_name in self.load_result.columns:
-            grp = col_group_map.get(col_name, "")
-            if grp:
-                if grp not in groups_cols:
-                    groups_order.append(grp)
-                    groups_cols[grp] = []
-                groups_cols[grp].append(col_name)
-            else:
-                ungrouped.append(col_name)
-
-        has_groups = bool(groups_order)
-        self._group_rows: Dict[str, List] = {}  # group_name -> [ColumnConfigRow, …]
-
-        def _add_col_row(col_name: str, group_rows_list=None):
-            data = self.load_result.columns[col_name]
-            is_time = col_name == self.load_result.suggested_time_col
+            data     = self.load_result.columns[col_name]
+            is_time  = col_name == self.load_result.suggested_time_col
             col_info = self.load_result.column_infos.get(col_name)
             row = ColumnConfigRow(col_name, data,
                                   is_time_candidate=is_time, metadata=meta,
                                   col_info=col_info)
+            row.setParent(sw)
             self._col_rows[col_name] = row
-            if group_rows_list is not None:
-                group_rows_list.append(row)
-            sl.addWidget(row)
 
-        if has_groups:
-            # ── Grouped layout: one header per group, then its columns ──
-            for grp in groups_order:
-                self._group_rows[grp] = []
-                sl.addWidget(_make_group_header(grp, self._group_rows[grp]))
-                for col_name in groups_cols[grp]:
-                    _add_col_row(col_name, self._group_rows[grp])
-            if ungrouped:
-                self._group_rows["__ungrouped__"] = []
-                sl.addWidget(_make_group_header("Ungrouped",
-                                                self._group_rows["__ungrouped__"]))
-                for col_name in ungrouped:
-                    _add_col_row(col_name, self._group_rows["__ungrouped__"])
-        else:
-            # ── Flat layout: divider every 5 rows ─────────────────────
-            for i, col_name in enumerate(self.load_result.columns):
-                if i > 0 and i % 5 == 0:
-                    line = QFrame()
-                    line.setFrameShape(QFrame.Shape.HLine)
-                    line.setStyleSheet("color: #333;")
-                    sl.addWidget(line)
-                _add_col_row(col_name)
+        self._group_rows: Dict[str, List] = {}
+        self._rebuild_column_list()
 
-        sl.addStretch()
         scroll.setWidget(sw)
         cl.addWidget(scroll)
         tabs.addTab(col_tab, "Columns && Scaling")
@@ -827,6 +773,75 @@ class ImportDialog(QDialog):
             row.edit_offset.setText(offset)
             row.edit_unit.setText(unit)
 
+    # ── Column list rebuild ───────────────────────────────────────────────────
+
+    def _rebuild_column_list(self):
+        """Rebuild the scroll-area column list to reflect current row.col_group values.
+        Existing ColumnConfigRow widgets are reused in-place — all user edits survive.
+        Called once at construction and again after every grouping operation."""
+        sl = self._col_scroll_layout
+
+        # Remove everything currently in the layout (headers, dividers, rows).
+        # setParent(None) detaches each widget without deleting it.
+        while sl.count():
+            item = sl.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        # Re-group: follow load_result.columns order so the original file order
+        # is preserved within each group.
+        groups_order: List[str] = []
+        groups_cols: Dict[str, List[str]] = {}
+        ungrouped: List[str] = []
+        for col_name in self.load_result.columns:
+            row = self._col_rows.get(col_name)
+            if row is None:
+                continue
+            grp = row.col_group
+            if grp:
+                if grp not in groups_cols:
+                    groups_order.append(grp)
+                    groups_cols[grp] = []
+                groups_cols[grp].append(col_name)
+            else:
+                ungrouped.append(col_name)
+
+        self._group_rows = {}
+
+        if groups_order:
+            for grp in groups_order:
+                self._group_rows[grp] = []
+                sl.addWidget(_make_group_header(grp, self._group_rows[grp]))
+                for col_name in groups_cols[grp]:
+                    row = self._col_rows[col_name]
+                    self._group_rows[grp].append(row)
+                    sl.addWidget(row)
+                    row.show()
+            if ungrouped:
+                self._group_rows["__ungrouped__"] = []
+                sl.addWidget(_make_group_header("Ungrouped",
+                                                self._group_rows["__ungrouped__"]))
+                for col_name in ungrouped:
+                    row = self._col_rows[col_name]
+                    self._group_rows["__ungrouped__"].append(row)
+                    sl.addWidget(row)
+                    row.show()
+        else:
+            for i, col_name in enumerate(self.load_result.columns):
+                row = self._col_rows.get(col_name)
+                if row is None:
+                    continue
+                if i > 0 and i % 5 == 0:
+                    line = QFrame()
+                    line.setFrameShape(QFrame.Shape.HLine)
+                    line.setStyleSheet("color: #333;")
+                    sl.addWidget(line)
+                sl.addWidget(row)
+                row.show()
+
+        sl.addStretch()
+
     # ── Grouping ──────────────────────────────────────────────────────────────
 
     def _open_grouping_dialog(self):
@@ -894,6 +909,7 @@ class ImportDialog(QDialog):
                     unit_target[unit] = _alloc(base)
             for row in rows:
                 row.col_group = unit_target[row.edit_unit.text().strip() or "Other"]
+        self._rebuild_column_list()
 
     def _apply_import_group_by_pattern(self, pattern: str, create_inside: bool,
                                         custom_name: str = ""):
@@ -935,6 +951,7 @@ class ImportDialog(QDialog):
             for row in rows:
                 if _matches(row):
                     row.col_group = group_name
+        self._rebuild_column_list()
 
     def _apply_import_group_enabled(self, custom_name: str = ""):
         base = custom_name or "Enabled"
@@ -942,6 +959,7 @@ class ImportDialog(QDialog):
         for row in self._col_rows.values():
             if row.chk_enable.isChecked():
                 row.col_group = group_name
+        self._rebuild_column_list()
 
     def _do_import(self):
         use_time_col = self.radio_time_col.isChecked()

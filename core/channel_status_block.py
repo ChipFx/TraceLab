@@ -52,7 +52,8 @@ def _outlined_text(painter: QPainter, x: int, y: int, text: str,
 
 
 class ChannelStatusBlock(QWidget):
-    toggle_interp = pyqtSignal(str)
+    toggle_interp             = pyqtSignal(str)
+    context_menu_requested    = pyqtSignal(str, object)  # (trace_name, QPoint global)
 
     def __init__(self, trace: TraceModel,
                  y_major_div: float = 0.0,
@@ -91,7 +92,11 @@ class ChannelStatusBlock(QWidget):
         )
 
     def mousePressEvent(self, event):
-        self.toggle_interp.emit(self._trace.name)
+        if event.button() == Qt.MouseButton.RightButton:
+            self.context_menu_requested.emit(
+                self._trace.name, event.globalPosition().toPoint())
+        else:
+            self.toggle_interp.emit(self._trace.name)
 
     def paintEvent(self, event):
         painter = QPainter(self)

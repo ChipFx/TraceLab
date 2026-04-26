@@ -197,14 +197,15 @@ class _LabelClickFilter(QObject):
 
 class ChannelRow(QWidget):
     """One row: color swatch + checkbox + label."""
-    visibility_changed = pyqtSignal(str, bool)
-    color_changed      = pyqtSignal(str, str)
-    remove_requested   = pyqtSignal(str)
-    interp_changed     = pyqtSignal(str, str)
-    reset_color        = pyqtSignal(str)         # name
-    renamed            = pyqtSignal(str, str)    # (trace_name, new_label)
-    segment_changed    = pyqtSignal(str)         # trace_name — primary or viewmode changed
-    unit_changed       = pyqtSignal(str, str)    # (trace_name, new_unit)
+    visibility_changed        = pyqtSignal(str, bool)
+    color_changed             = pyqtSignal(str, str)
+    remove_requested          = pyqtSignal(str)
+    interp_changed            = pyqtSignal(str, str)
+    reset_color               = pyqtSignal(str)         # name
+    renamed                   = pyqtSignal(str, str)    # (trace_name, new_label)
+    segment_changed           = pyqtSignal(str)         # trace_name — primary or viewmode changed
+    unit_changed              = pyqtSignal(str, str)    # (trace_name, new_unit)
+    context_menu_requested    = pyqtSignal(str, object) # (trace_name, QPoint global)
 
     def __init__(self, trace: TraceModel, parent=None):
         super().__init__(parent)
@@ -283,68 +284,7 @@ class ChannelRow(QWidget):
         self._update_color_btn()
 
     def contextMenuEvent(self, event):
-        from PyQt6.QtGui import QActionGroup
-        menu = QMenu(self)
-        interp_menu = menu.addMenu("Interpolation")
-        mode = getattr(self.trace, '_interp_mode_override', 'linear')
-        ag = QActionGroup(interp_menu)
-        ag.setExclusive(True)
-        for m, lbl in [("linear", "Linear"),
-                        ("cubic",  "Cubic Spline"),
-                        ("sinc",   "Sinc (sin(x)/x)")]:
-            a = interp_menu.addAction(lbl)
-            a.setCheckable(True)
-            a.setChecked(mode == m)
-            ag.addAction(a)
-            a.triggered.connect(lambda _, _m=m: self._set_interp(_m))
-        menu.addSeparator()
-        menu.addAction("Rename…").triggered.connect(self._rename)
-        menu.addAction("Change Unit…").triggered.connect(self._change_unit)
-        # Segment submenu — only shown when the trace has 2+ segments
-        segs = getattr(self.trace, 'segments', None)
-        if segs and len(segs) >= 2:
-            menu.addSeparator()
-            seg_menu = menu.addMenu("Segments")
-            # Primary segment selector
-            pri_menu = seg_menu.addMenu("Primary Segment")
-            pri_ag = QActionGroup(pri_menu)
-            pri_ag.setExclusive(True)
-            cur_primary = getattr(self.trace, 'primary_segment', None)
-            none_act = pri_menu.addAction("None (show all)")
-            none_act.setCheckable(True)
-            none_act.setChecked(cur_primary is None)
-            pri_ag.addAction(none_act)
-            none_act.triggered.connect(lambda _: self._set_primary_segment(None))
-            for idx in range(len(segs)):
-                a = pri_menu.addAction(f"Segment {idx}")
-                a.setCheckable(True)
-                a.setChecked(cur_primary == idx)
-                pri_ag.addAction(a)
-                a.triggered.connect(lambda _, i=idx: self._set_primary_segment(i))
-            # Non-primary view mode
-            seg_menu.addSeparator()
-            mode_menu = seg_menu.addMenu("Non-primary View")
-            mode_ag = QActionGroup(mode_menu)
-            mode_ag.setExclusive(True)
-            cur_mode = (getattr(self.trace, 'non_primary_viewmode', '') or '').strip()
-            for mode_key, mode_lbl in [
-                    ("hide",   "Hide"),
-                    ("dimmed", "Dimmed"),
-                    ("dashed", "Dashed"),
-                    ("",       "Regular (full opacity)")]:
-                ma = mode_menu.addAction(mode_lbl)
-                ma.setCheckable(True)
-                ma.setChecked(cur_mode == mode_key)
-                mode_ag.addAction(ma)
-                ma.triggered.connect(
-                    lambda _, mk=mode_key: self._set_viewmode(mk))
-        menu.addSeparator()
-        menu.addAction("Reset Color to Default").triggered.connect(
-            lambda: self.reset_color.emit(self.trace.name))
-        menu.addSeparator()
-        menu.addAction("Remove Trace").triggered.connect(
-            lambda: self.remove_requested.emit(self.trace.name))
-        menu.exec(event.globalPos())
+        self.context_menu_requested.emit(self.trace.name, event.globalPos())
 
     def _rename(self):
         from PyQt6.QtWidgets import QInputDialog
@@ -527,16 +467,17 @@ class ChannelPanel(QWidget):
     and collapse/expand buttons.
     """
 
-    visibility_changed     = pyqtSignal(str, bool)
-    color_changed          = pyqtSignal(str, str)
-    trace_removed          = pyqtSignal(str)
-    order_changed          = pyqtSignal(list)
-    interp_changed         = pyqtSignal(str, str)
-    reset_color_requested  = pyqtSignal(str)     # trace name
-    trace_renamed          = pyqtSignal(str, str)  # (trace_name, new_label)
-    segment_changed        = pyqtSignal(str)       # trace_name
-    group_renamed          = pyqtSignal(str, str)  # (old_name, new_name)
-    unit_changed           = pyqtSignal(str, str)  # (trace_name, new_unit)
+    visibility_changed          = pyqtSignal(str, bool)
+    color_changed               = pyqtSignal(str, str)
+    trace_removed               = pyqtSignal(str)
+    order_changed               = pyqtSignal(list)
+    interp_changed              = pyqtSignal(str, str)
+    reset_color_requested       = pyqtSignal(str)     # trace name
+    trace_renamed               = pyqtSignal(str, str)  # (trace_name, new_label)
+    segment_changed             = pyqtSignal(str)       # trace_name
+    group_renamed               = pyqtSignal(str, str)  # (old_name, new_name)
+    unit_changed                = pyqtSignal(str, str)  # (trace_name, new_unit)
+    trace_context_menu_requested = pyqtSignal(str, object)  # (trace_name, QPoint global)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -662,6 +603,7 @@ class ChannelPanel(QWidget):
         row.renamed.connect(self.trace_renamed)
         row.segment_changed.connect(self.segment_changed)
         row.unit_changed.connect(self.unit_changed)
+        row.context_menu_requested.connect(self.trace_context_menu_requested)
 
         group = getattr(trace, "col_group", "") or ""
 

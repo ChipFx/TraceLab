@@ -139,7 +139,8 @@ class TimeTrigBlock(QWidget):
 
 # ── Main status bar ─────────────────────────────────────────────────────────────
 class ScopeStatusBar(QWidget):
-    toggle_trace_interp = pyqtSignal(str)
+    toggle_trace_interp          = pyqtSignal(str)
+    trace_context_menu_requested = pyqtSignal(str, object)  # (trace_name, QPoint global)
 
     def __init__(self, palette: dict, parent=None):
         super().__init__(parent)
@@ -293,6 +294,7 @@ class ScopeStatusBar(QWidget):
                 trace, y_div, mode, self._pal,
                 parent=self._ch_container)
             block.toggle_interp.connect(self.toggle_trace_interp)
+            block.context_menu_requested.connect(self.trace_context_menu_requested)
             self._ch_blocks.append(block)
             self._ch_layout.addWidget(block)
             block.show()

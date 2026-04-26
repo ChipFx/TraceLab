@@ -502,6 +502,8 @@ class MainWindow(QMainWindow):
         self._channel_panel.trace_renamed.connect(self._on_trace_renamed)
         self._channel_panel.segment_changed.connect(self._on_segment_changed)
         self._channel_panel.unit_changed.connect(self._on_unit_changed)
+        self._channel_panel.trace_context_menu_requested.connect(
+            self._show_channel_context_menu)
         self._channel_panel.set_scroll_primaries(self._scroll_primaries)
         self._splitter.addWidget(self._channel_panel)
 
@@ -541,6 +543,8 @@ class MainWindow(QMainWindow):
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
         self._plot.view_changed.connect(self._on_view_changed_retrigger)
+        self._plot.trace_context_menu_requested.connect(
+            self._show_channel_context_menu)
 
         # 0-ms single-shot timer coalesces rapid back-to-back _refresh_status_bar
         # calls (e.g. hiding all 32 channels) into one actual redraw.
@@ -564,6 +568,8 @@ class MainWindow(QMainWindow):
         self._scope_status = ScopeStatusBar(self.theme.statusbar_palette())
         self._scope_status.toggle_trace_interp.connect(
             self._on_status_bar_toggle_interp)
+        self._scope_status.trace_context_menu_requested.connect(
+            self._show_channel_context_menu)
         # Insert status bar BEFORE the range bar — achieved by the fact
         # that _plot already has its range_bar at its bottom. We just add
         # the status bar after _plot in the outer container so visually:
@@ -2669,6 +2675,159 @@ class MainWindow(QMainWindow):
             self._draw_mode_actions[mode].setChecked(True)
         self._plot.set_draw_mode(mode)
         self._settings["draw_mode"] = mode
+
+    # ── Unified channel context menu ──────────────────────────────────────
+
+    def _show_channel_context_menu(self, trace_name: str, global_pos):
+        """Single right-click menu for channel panel, split lane, overlay label and status bar."""
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QActionGroup
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        in_overlay = (self._display_mode == "overlay")
+        menu = QMenu(self)
+
+        # ── Interpolation ──────────────────────────────────────────────
+        interp_menu = menu.addMenu("Interpolation")
+        mode = getattr(trace, '_interp_mode_override', 'linear')
+        ag = QActionGroup(interp_menu)
+        ag.setExclusive(True)
+        for m, lbl in [("linear", "Linear"),
+                        ("cubic",  "Cubic Spline"),
+                        ("sinc",   "Sinc (sin(x)/x)")]:
+            a = interp_menu.addAction(lbl)
+            a.setCheckable(True)
+            a.setChecked(mode == m)
+            ag.addAction(a)
+            a.triggered.connect(
+                lambda _, _m=m: self._on_channel_interp_changed(trace_name, _m))
+
+        menu.addSeparator()
+
+        # ── Rename / Unit / Color ──────────────────────────────────────
+        menu.addAction("Rename…").triggered.connect(
+            lambda: self._do_rename_trace(trace_name))
+        menu.addAction("Change Unit…").triggered.connect(
+            lambda: self._do_change_unit(trace_name))
+        menu.addAction("Change Color…").triggered.connect(
+            lambda: self._do_change_color(trace_name))
+        menu.addAction("Reset Color to Default").triggered.connect(
+            lambda: self._on_reset_trace_color(trace_name))
+
+        # ── Segments (only when 2+ segments present) ──────────────────
+        segs = getattr(trace, 'segments', None)
+        if segs and len(segs) >= 2:
+            menu.addSeparator()
+            seg_menu = menu.addMenu("Segments")
+            pri_menu = seg_menu.addMenu("Primary Segment")
+            pri_ag = QActionGroup(pri_menu)
+            pri_ag.setExclusive(True)
+            cur_primary = getattr(trace, 'primary_segment', None)
+            none_act = pri_menu.addAction("None (show all)")
+            none_act.setCheckable(True)
+            none_act.setChecked(cur_primary is None)
+            pri_ag.addAction(none_act)
+            none_act.triggered.connect(
+                lambda _: self._do_set_primary_segment(trace_name, None))
+            for idx in range(len(segs)):
+                a = pri_menu.addAction(f"Segment {idx}")
+                a.setCheckable(True)
+                a.setChecked(cur_primary == idx)
+                pri_ag.addAction(a)
+                a.triggered.connect(
+                    lambda _, i=idx: self._do_set_primary_segment(trace_name, i))
+            seg_menu.addSeparator()
+            mode_menu = seg_menu.addMenu("Non-primary View")
+            mode_ag = QActionGroup(mode_menu)
+            mode_ag.setExclusive(True)
+            cur_mode = (getattr(trace, 'non_primary_viewmode', '') or '').strip()
+            for mk, ml in [("hide",   "Hide"),
+                            ("dimmed", "Dimmed"),
+                            ("dashed", "Dashed"),
+                            ("",       "Regular (full opacity)")]:
+                ma = mode_menu.addAction(ml)
+                ma.setCheckable(True)
+                ma.setChecked(cur_mode == mk)
+                mode_ag.addAction(ma)
+                ma.triggered.connect(
+                    lambda _, _mk=mk: self._do_set_viewmode(trace_name, _mk))
+
+        menu.addSeparator()
+
+        # ── View scaling ───────────────────────────────────────────────
+        menu.addAction("Auto Scale Y").triggered.connect(
+            lambda: self._plot.auto_scale_trace(trace_name, "y"))
+        menu.addAction("Auto Scale X+Y").triggered.connect(
+            lambda: self._plot.auto_scale_trace(trace_name, "both"))
+
+        # ── Bring to Front (overlay with 2+ visible traces only) ──────
+        visible_count = sum(1 for t in self._traces if t.visible)
+        if in_overlay and visible_count > 1:
+            menu.addSeparator()
+            menu.addAction("Bring to Front").triggered.connect(
+                lambda: self._plot.bring_trace_to_front(trace_name))
+
+        menu.addSeparator()
+
+        # ── Remove ────────────────────────────────────────────────────
+        menu.addAction("Remove Trace").triggered.connect(
+            lambda: self._remove_trace(trace_name))
+
+        menu.exec(global_pos)
+
+    def _do_rename_trace(self, trace_name: str):
+        from PyQt6.QtWidgets import QInputDialog
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        new_label, ok = QInputDialog.getText(
+            self, "Rename Trace", "New label:", text=trace.label)
+        if ok and new_label.strip():
+            trace.label = new_label.strip()
+            self._channel_panel.refresh_all()
+            self._on_trace_renamed(trace_name, trace.label)
+
+    def _do_change_unit(self, trace_name: str):
+        from PyQt6.QtWidgets import QInputDialog
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        new_unit, ok = QInputDialog.getText(
+            self, "Change Unit", "New unit:", text=trace.unit)
+        if ok:
+            new_unit = new_unit.strip()
+            trace.unit = new_unit
+            if trace.scaling:
+                trace.scaling.unit = new_unit
+            self._channel_panel.refresh_all()
+            self._on_unit_changed(trace_name, new_unit)
+
+    def _do_change_color(self, trace_name: str):
+        from PyQt6.QtWidgets import QColorDialog
+        from PyQt6.QtGui import QColor
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        c = QColorDialog.getColor(QColor(trace.color), self)
+        if c.isValid():
+            trace.set_user_color(c.name())
+            self._channel_panel.refresh_all()
+            self._on_trace_color(trace_name, trace.color)
+
+    def _do_set_primary_segment(self, trace_name: str, idx):
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        trace.primary_segment = idx
+        self._on_segment_changed(trace_name)
+
+    def _do_set_viewmode(self, trace_name: str, mode: str):
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        trace.non_primary_viewmode = mode
+        self._on_segment_changed(trace_name)
 
     def _on_reset_trace_color(self, trace_name: str):
         """Reset a single trace to its theme-default colour."""

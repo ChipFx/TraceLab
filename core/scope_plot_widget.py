@@ -603,8 +603,9 @@ class RangeBar(QWidget):
 
 
 class TraceLane(pg.PlotWidget):
-    cursor_moved = pyqtSignal(float, int)
-    view_range_changed = pyqtSignal(object)  # passes self
+    cursor_moved             = pyqtSignal(float, int)
+    view_range_changed       = pyqtSignal(object)   # passes self
+    context_menu_requested   = pyqtSignal(str, object)  # (trace_name, QPoint global)
 
     def __init__(self, trace: TraceModel, style_context: TraceStyleContext,
                  y_lock_auto: bool = True,
@@ -1146,23 +1147,7 @@ class TraceLane(pg.PlotWidget):
             self._apply_resolved_style()
 
     def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        act_color = QAction(f"Change Color: {self.trace.label}", self)
-        act_color.triggered.connect(self._change_color)
-        menu.addAction(act_color)
-        act_label = QAction("Rename Trace", self)
-        act_label.triggered.connect(self._rename)
-        menu.addAction(act_label)
-        menu.addSeparator()
-        act_y_auto = QAction("Auto Scale Y", self)
-        act_y_auto.triggered.connect(
-            lambda: self.getPlotItem().enableAutoRange(axis="y"))
-        menu.addAction(act_y_auto)
-        act_xy = QAction("Auto Scale X+Y", self)
-        act_xy.triggered.connect(
-            lambda: self.getPlotItem().enableAutoRange())
-        menu.addAction(act_xy)
-        menu.exec(event.globalPos())
+        self.context_menu_requested.emit(self.trace.name, event.globalPos())
 
     def _change_color(self):
         c = QColorDialog.getColor(QColor(self.trace.color), self)
@@ -1492,10 +1477,10 @@ class OverlayTraceVisual:
 
 
 class ScopePlotWidget(QWidget):
-    cursor_values_changed = pyqtSignal(dict)
-
-    sinc_active_changed = pyqtSignal(bool)  # emitted when sinc kicks in/out
-    view_changed        = pyqtSignal()       # emitted (throttled) on pan/zoom
+    cursor_values_changed        = pyqtSignal(dict)
+    sinc_active_changed          = pyqtSignal(bool)  # emitted when sinc kicks in/out
+    view_changed                 = pyqtSignal()       # emitted (throttled) on pan/zoom
+    trace_context_menu_requested = pyqtSignal(str, object)  # (trace_name, QPoint global)
 
     def __init__(self, theme_manager, y_lock_auto: bool = True,
                  interp_mode: str = "linear",
@@ -1955,6 +1940,7 @@ class ScopePlotWidget(QWidget):
             else:
                 lane.setXLink(first_lane)
             lane.cursor_moved.connect(self._on_cursor_moved)
+            lane.context_menu_requested.connect(self.trace_context_menu_requested)
             lane.view_range_changed.connect(
                 lambda _: self._range_timer.start())
             self._lanes[trace.name] = lane
@@ -2247,23 +2233,38 @@ class ScopePlotWidget(QWidget):
         """Move a trace curve to the top of the overlay z-order."""
         if self._mode != "overlay":
             return
-        if trace_name in self._overlay_visuals:
-            curve = self._overlay_visuals[trace_name].curve
-            pi = self._overlay_widget.getPlotItem()
-            pi.removeItem(curve)
-            pi.addItem(curve)
+        if trace_name not in self._overlay_z_order:
+            return
+        # Move to end of z-order list (highest z = drawn on top)
+        self._overlay_z_order.remove(trace_name)
+        self._overlay_z_order.append(trace_name)
+        # Re-assign z-values by position — avoids remove/re-add which crashes pyqtgraph
+        for i, name in enumerate(self._overlay_z_order):
+            visual = self._overlay_visuals.get(name)
+            if visual and visual.curve is not None:
+                visual.curve.setZValue(float(i))
+        # Rebuild legend so the front trace appears at the top of the label stack
+        self._rebuild_overlay_legend()
 
     def _overlay_context_menu(self, pos):
-        menu = QMenu(self._overlay_widget)
+        # Hit-test: if the click falls on a legend label, open the per-trace menu
+        scene_pos = self._overlay_widget.mapToScene(pos)
+        for i, item in enumerate(self._overlay_legend_items):
+            if item.sceneBoundingRect().contains(scene_pos):
+                if i < len(self._overlay_z_order):
+                    self.trace_context_menu_requested.emit(
+                        self._overlay_z_order[i],
+                        self._overlay_widget.mapToGlobal(pos))
+                return
 
-        # Bring-to-front submenu
+        # Background right-click: Bring-to-Front submenu + auto scale
+        menu = QMenu(self._overlay_widget)
         if self._overlay_z_order:
             front_menu = menu.addMenu("Bring to Front")
             for name in self._overlay_z_order:
                 trace = next((t for t in self.traces if t.name == name), None)
                 if trace:
-                    act = QAction(
-                        f"● {trace.label}", self._overlay_widget)
+                    act = QAction(f"● {trace.label}", self._overlay_widget)
                     act.setData(name)
                     act.triggered.connect(
                         lambda checked, n=name: self.bring_trace_to_front(n))
@@ -2279,6 +2280,22 @@ class ScopePlotWidget(QWidget):
             lambda: self._overlay_widget.getPlotItem().enableAutoRange())
         menu.addAction(act_xy)
         menu.exec(self._overlay_widget.mapToGlobal(pos))
+
+    def auto_scale_trace(self, trace_name: str, axis: str = "both"):
+        """Auto-scale the viewport for a trace; handles both split and overlay modes."""
+        if self._mode == "split":
+            lane = self._lanes.get(trace_name)
+            if lane:
+                if axis == "y":
+                    lane.getPlotItem().enableAutoRange(axis="y")
+                else:
+                    lane.getPlotItem().enableAutoRange()
+        else:
+            pi = self._overlay_widget.getPlotItem()
+            if axis == "y":
+                pi.enableAutoRange(axis="y")
+            else:
+                pi.enableAutoRange()
 
     # ── Cursors ───────────────────────────────────────────────────────
 

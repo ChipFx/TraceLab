@@ -10,7 +10,7 @@ from pyqtgraph import InfiniteLine
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QMenu, QColorDialog, QInputDialog,
                                QLineEdit, QPushButton, QFrame, QSizePolicy)
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent, QRectF
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QAction, QPen
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -343,6 +343,7 @@ class EngineeringAxisItem(pg.AxisItem):
         self._unit = ""
         self._div_cfg: dict = {}
         self._ch_name: str = ""
+        self._last_tick_values: list = []   # [(spacing, [val, ...]), ...] from last tickValues call
 
     def set_ch_name(self, name: str):
         self._ch_name = name or ""
@@ -383,19 +384,70 @@ class EngineeringAxisItem(pg.AxisItem):
     def tickValues(self, minVal, maxVal, size):
         levels = super().tickValues(minVal, maxVal, size)
         self._tick_level_counts = [len(lvl[1]) for lvl in levels]
+        self._last_tick_values = [(sp, list(vals)) for sp, vals in levels]
         return levels
 
     def generateDrawSpecs(self, p):
         axisSpec, tickSpecs, textSpecs = super().generateDrawSpecs(p)
-        n_before = len(textSpecs)
         textSpecs = _filter_dense_labels(textSpecs)
-        n_after = len(textSpecs)
-        if n_before == 0 and tickSpecs:
-            print(f"DBG_LABELS {self._ch_name}: pyqtgraph gave 0 labels, {len(tickSpecs)} ticks")
-        elif n_after == 0 and n_before > 0:
-            print(f"DBG_LABELS {self._ch_name}: filter dropped all {n_before} labels, {len(tickSpecs)} ticks")
+        if not textSpecs and tickSpecs:
+            try:
+                saved = self._salvage_one_label(tickSpecs)
+                if saved:
+                    textSpecs = [saved]
+            except Exception:
+                pass
         self._fix_subdiv_alpha(tickSpecs)
         return axisSpec, tickSpecs, textSpecs
+
+    def _salvage_one_label(self, tickSpecs):
+        """When pyqtgraph clips all tick labels off-screen (tight zoom, ticks near
+        lane edges), synthesise one label for the major-tick closest to the
+        view centre, clamped so its rect stays fully within the axis bounds.
+
+        Reads item-local y-coordinates directly from tickSpecs (which pyqtgraph
+        already computed correctly) to avoid any coordinate-mapping issues."""
+        if not self._last_tick_values:
+            return None
+        spacing, vals = self._last_tick_values[0]
+        if not vals:
+            return None
+        n_major = (getattr(self, '_tick_level_counts', None) or [0])[0]
+        n_major = min(n_major or len(vals), len(tickSpecs), len(vals))
+        if n_major == 0:
+            return None
+        # Pick the major tick value closest to the view centre
+        view = self.linkedView()
+        if view is None:
+            return None
+        vmin, vmax = view.viewRange()[1]
+        v_centre = (vmin + vmax) / 2.0
+        best_idx = min(range(len(vals)), key=lambda i: abs(vals[i] - v_centre))
+        best_val = vals[best_idx]
+        # Clamp index to available major tickSpecs
+        tick_idx = min(best_idx, n_major - 1)
+        _, pt1, pt2 = tickSpecs[tick_idx]
+        tick_y = (pt1.y() + pt2.y()) / 2.0   # item-local y from pyqtgraph
+        # Format the label
+        if self._unit and self._unit != "raw":
+            label = _eng_format(float(best_val), self._unit, spacing)
+        else:
+            strs = super().tickStrings([best_val], 1.0, spacing)
+            label = strs[0] if strs else str(best_val)
+        # Build rect within axis bounds.
+        # boundingRect() expands to include the plot view when grid is enabled,
+        # so we use geometry() for the x/width (just the axis strip itself).
+        geom = self.geometry()
+        axis_w = geom.width()
+        axis_h = geom.height()
+        tick_font = getattr(self, 'tickFont', None)
+        fm = QFontMetrics(tick_font if isinstance(tick_font, QFont) else QFont())
+        lh = fm.height()
+        top = tick_y - lh / 2.0
+        top = max(0.0, min(top, axis_h - lh))
+        rect = QRectF(0, top, axis_w, lh)
+        flags = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+        return (rect, int(flags), label)
 
     def _fix_subdiv_alpha(self, tickSpecs):
         """Re-apply a density-independent alpha to level-1 (sub-div) tick specs.
@@ -430,29 +482,22 @@ class EngineeringAxisItem(pg.AxisItem):
 
 
 def _filter_dense_labels(textSpecs: list) -> list:
-    """Drop Y-axis tick labels that genuinely overlap (with a small tolerance).
+    """Drop Y-axis tick labels that overlap.
 
     pyqtgraph returns textSpecs as [(QRectF, flags, text), ...].
     The rects are computed from actual font metrics, so this is font-size-
     independent.  Gridlines (in tickSpecs) are never affected.
 
-    Tolerance: a new label is accepted if its top edge is within one label-
-    height of the previous label's bottom, i.e. up to 100% overlap is allowed
-    before a label is dropped.  This preserves labels at tight zoom levels
-    while preventing genuinely identical-position collisions.
+    A new label is accepted only if its top edge is at or below the previous
+    label's bottom edge (strict no-overlap).
     """
     if len(textSpecs) <= 1:
         return textSpecs
     # Sort top-to-bottom by rect vertical centre
     by_y = sorted(textSpecs, key=lambda s: s[0].center().y())
-    # Compute typical label height from the first rect
-    label_h = by_y[0][0].height() if by_y[0][0].height() > 0 else 12.0
     kept = [by_y[0]]
     for spec in by_y[1:]:
-        # Accept if the candidate's top is at or below (prev_bottom - label_h).
-        # This means we only drop when two labels would be at essentially the
-        # same screen position (overlap > one full label height).
-        if spec[0].top() >= kept[-1][0].bottom() - label_h:
+        if spec[0].top() >= kept[-1][0].bottom():
             kept.append(spec)
     return kept
 

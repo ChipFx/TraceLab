@@ -6,11 +6,11 @@ Import dialog with locale-safe number inputs and working gain/offset scaling.
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QComboBox, QCheckBox, QPushButton, QScrollArea,
-    QWidget, QGroupBox, QTabWidget,
+    QWidget, QGroupBox, QTabWidget, QApplication,
     QMessageBox, QRadioButton, QButtonGroup, QFrame
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QMimeData, QPoint
+from PyQt6.QtGui import QFont, QDrag, QPixmap, QPainter, QColor
 from core.grouping_dialog import GroupingDialog
 import numpy as np
 from typing import Dict, List, Optional
@@ -149,6 +149,53 @@ def _normalise_decimal(s: str) -> str:
     return s
 
 
+_COL_DRAG_MIME = "application/x-tl-import-col"
+
+
+# ── Drag handle for ColumnConfigRow ──────────────────────────────────────────
+
+class _ColDragHandle(QLabel):
+    """Small grip icon that initiates a QDrag carrying the column name."""
+
+    def __init__(self, col_name: str, parent=None):
+        super().__init__("⠿", parent)
+        self._col_name = col_name
+        self._drag_start: QPoint | None = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setFixedWidth(14)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setToolTip("Drag onto a group banner to reassign")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.pos()
+            event.accept()          # must accept so Qt delivers subsequent move events here
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is None:
+            return
+        if ((event.pos() - self._drag_start).manhattanLength()
+                < QApplication.startDragDistance()):
+            return
+        # Build a small label pixmap for drag feedback
+        pm = QPixmap(160, 20)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        p.setPen(QColor("#c0c0e0"))
+        p.setFont(self.font())
+        p.drawText(pm.rect(), Qt.AlignmentFlag.AlignVCenter, f"  {self._col_name}")
+        p.end()
+
+        mime = QMimeData()
+        mime.setData(_COL_DRAG_MIME, self._col_name.encode())
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(8, 10))
+        drag.exec(Qt.DropAction.MoveAction)
+        self._drag_start = None
+
+
 # ── Column config row ─────────────────────────────────────────────────────────
 
 class ColumnConfigRow(QWidget):
@@ -166,10 +213,14 @@ class ColumnConfigRow(QWidget):
         self._col_info = col_info
         # Group assignment — updated by the import dialog's grouping dialog
         self.col_group: str = col_info.group if (col_info and getattr(col_info, "group", "")) else ""
+        # Drag state — row initiates drag from anywhere (no click action on the row)
+        self._drag_start: QPoint | None = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(8)
+
+        layout.addWidget(_ColDragHandle(col_name))
 
         # Default-skip: plugin may mark alarm/marker columns as skip=True
         _plugin_skip = col_info.skip if col_info is not None else False
@@ -263,6 +314,40 @@ class ColumnConfigRow(QWidget):
         if _offset != 0.0:
             self.chk_scale.setChecked(True)
             self.edit_offset.setText(str(_offset))
+
+    # ── Row-level drag (whole row is a drag source) ───────────────────────────
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Don't start a drag if the click landed on an interactive child
+            child = self.childAt(event.pos())
+            if not isinstance(child, (QCheckBox, QLineEdit)):
+                self._drag_start = event.pos()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is None:
+            return
+        if ((event.pos() - self._drag_start).manhattanLength()
+                < QApplication.startDragDistance()):
+            return
+        pm = QPixmap(200, 20)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        p.setPen(QColor("#c0c0e0"))
+        p.setFont(self.font())
+        p.drawText(pm.rect(), Qt.AlignmentFlag.AlignVCenter, f"  {self.col_name}")
+        p.end()
+        mime = QMimeData()
+        mime.setData(_COL_DRAG_MIME, self.col_name.encode())
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(8, 10))
+        drag.exec(Qt.DropAction.MoveAction)
+        self._drag_start = None
 
     def _toggle_scaling(self, enabled: bool):
         self.scale_widget.setEnabled(enabled)
@@ -775,6 +860,14 @@ class ImportDialog(QDialog):
 
     # ── Column list rebuild ───────────────────────────────────────────────────
 
+    def _on_col_dropped_on_group(self, col_name: str, group_name: str):
+        """Called when a ColumnConfigRow drag is dropped onto a group header."""
+        row = self._col_rows.get(col_name)
+        if row is None:
+            return
+        row.col_group = "" if group_name == "__ungrouped__" else group_name
+        self._rebuild_column_list()
+
     def _rebuild_column_list(self):
         """Rebuild the scroll-area column list to reflect current row.col_group values.
         Existing ColumnConfigRow widgets are reused in-place — all user edits survive.
@@ -812,7 +905,10 @@ class ImportDialog(QDialog):
         if groups_order:
             for grp in groups_order:
                 self._group_rows[grp] = []
-                sl.addWidget(_make_group_header(grp, self._group_rows[grp]))
+                sl.addWidget(_ImportGroupHeader(
+                    grp, self._group_rows[grp],
+                    on_drop=self._on_col_dropped_on_group,
+                    theme=self._theme))
                 for col_name in groups_cols[grp]:
                     row = self._col_rows[col_name]
                     self._group_rows[grp].append(row)
@@ -820,8 +916,9 @@ class ImportDialog(QDialog):
                     row.show()
             if ungrouped:
                 self._group_rows["__ungrouped__"] = []
-                sl.addWidget(_make_group_header("Ungrouped",
-                                                self._group_rows["__ungrouped__"]))
+                sl.addWidget(_ImportGroupHeader(
+                    "Ungrouped", self._group_rows["__ungrouped__"],
+                    on_drop=self._on_col_dropped_on_group))
                 for col_name in ungrouped:
                     row = self._col_rows[col_name]
                     self._group_rows["__ungrouped__"].append(row)
@@ -1116,58 +1213,101 @@ class ImportDialog(QDialog):
         self.accept()
 
 
-def _make_group_header(group_name: str, rows_list: list) -> QWidget:
-    """Styled group header bar with fold toggle and ✓ All / ✗ None buttons.
-    rows_list is populated with ColumnConfigRow refs after this returns;
-    the button/click lambdas close over the list object by reference."""
-    from PyQt6.QtCore import Qt as _Qt
-    hdr = QWidget()
-    hdr.setFixedHeight(28)
-    hdr.setStyleSheet(
-        "background: #1a1a30; border-top: 1px solid #3a3a6a; "
-        "border-bottom: 1px solid #3a3a6a;")
-    hdr.setCursor(_Qt.CursorShape.PointingHandCursor)
-    hl = QHBoxLayout(hdr)
-    hl.setContentsMargins(8, 3, 4, 3)
-    lbl = QLabel(f"▼  {group_name}")
-    lbl.setStyleSheet(
-        "color: #8080c0; font-weight: bold; font-size: 10px; "
-        "background: transparent; border: none;")
-    hl.addWidget(lbl)
-    hl.addStretch()
-    btn_all = QPushButton("✓ All")
-    btn_all.setFixedSize(52, 18)
-    btn_all.setStyleSheet(
-        "QPushButton { font-size: 9px; color: #60a060; background: #1a2a1a; "
-        "border: 1px solid #3a5a3a; border-radius: 2px; } "
-        "QPushButton:hover { background: #2a3a2a; }")
-    btn_none = QPushButton("✗ None")
-    btn_none.setFixedSize(52, 18)
-    btn_none.setStyleSheet(
-        "QPushButton { font-size: 9px; color: #a06060; background: #2a1a1a; "
-        "border: 1px solid #5a3a3a; border-radius: 2px; } "
-        "QPushButton:hover { background: #3a2a2a; }")
-    btn_all.clicked.connect(
-        lambda: [r.chk_enable.setChecked(True)
-                 for r in rows_list if r.chk_enable.isEnabled()])
-    btn_none.clicked.connect(
-        lambda: [r.chk_enable.setChecked(False)
-                 for r in rows_list if r.chk_enable.isEnabled()])
-    hl.addWidget(btn_all)
-    hl.addWidget(btn_none)
+class _ImportGroupHeader(QWidget):
+    """Styled group header bar: fold toggle, ✓ All / ✗ None, and drop target.
 
-    # Fold/unfold on click anywhere on the header (buttons handle their own clicks)
-    _collapsed = [False]
+    Accepts drops of _COL_DRAG_MIME (column name bytes).  When a column is
+    dropped, on_drop(col_name, group_name) is called so the ImportDialog can
+    update row.col_group and rebuild the list.
 
-    def _toggle_fold(_event):
-        # Only fold on left-click; let buttons handle their own events normally
-        _collapsed[0] = not _collapsed[0]
-        lbl.setText(f"{'▶' if _collapsed[0] else '▼'}  {group_name}")
-        for r in rows_list:
-            r.setVisible(not _collapsed[0])
+    Colours are derived from the active theme so the header looks correct in
+    every theme.  Falls back to neutral values when theme=None.
+    """
 
-    hdr.mousePressEvent = _toggle_fold
-    return hdr
+    def __init__(self, group_name: str, rows_list: list,
+                 on_drop=None, theme=None, parent=None):
+        super().__init__(parent)
+        self._group_name = group_name
+        self._rows_list  = rows_list
+        self._on_drop    = on_drop
+        self._collapsed  = False
+
+        # Derive colours from theme; fall back to mid-neutral values that work
+        # reasonably on any background rather than hardcoded dark-only colours.
+        _pv = (lambda k, d: theme.pv(k, d)) if theme else (lambda _, d: d)
+        bg      = _pv("bg_panel",  "#1e1e2e")
+        border  = _pv("border",    "#3a3a5a")
+        accent  = _pv("accent",    "#6060c0")
+        text_hd = _pv("text_dim",  "#8888bb")
+
+        self._base_style = (
+            f"background: {bg}; "
+            f"border-top: 1px solid {border}; border-bottom: 1px solid {border};")
+        self._drop_style = (
+            f"background: {bg}; "
+            f"border-top: 2px solid {accent}; border-bottom: 2px solid {accent};")
+
+        self.setFixedHeight(28)
+        self.setStyleSheet(self._base_style)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptDrops(True)
+
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(8, 3, 4, 3)
+
+        self._lbl = QLabel(f"▼  {group_name}")
+        self._lbl.setStyleSheet(
+            f"color: {accent}; font-weight: bold; font-size: 10px; "
+            f"background: transparent; border: none;")
+        hl.addWidget(self._lbl)
+        hl.addStretch()
+
+        btn_all  = QPushButton("✓ All")
+        btn_none = QPushButton("✗ None")
+        btn_all.setFixedSize(52, 18)
+        btn_none.setFixedSize(52, 18)
+        # Keep the All/None buttons subtly coloured but theme-neutral
+        btn_all.setStyleSheet(
+            f"QPushButton {{ font-size: 9px; color: {text_hd}; background: transparent; "
+            f"border: 1px solid {border}; border-radius: 2px; }} "
+            f"QPushButton:hover {{ color: #80e080; border-color: #408040; }}")
+        btn_none.setStyleSheet(
+            f"QPushButton {{ font-size: 9px; color: {text_hd}; background: transparent; "
+            f"border: 1px solid {border}; border-radius: 2px; }} "
+            f"QPushButton:hover {{ color: #e08080; border-color: #804040; }}")
+        btn_all.clicked.connect(
+            lambda: [r.chk_enable.setChecked(True)
+                     for r in self._rows_list if r.chk_enable.isEnabled()])
+        btn_none.clicked.connect(
+            lambda: [r.chk_enable.setChecked(False)
+                     for r in self._rows_list if r.chk_enable.isEnabled()])
+        hl.addWidget(btn_all)
+        hl.addWidget(btn_none)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self._collapsed = not self._collapsed
+        self._lbl.setText(f"{'▶' if self._collapsed else '▼'}  {self._group_name}")
+        for r in self._rows_list:
+            r.setVisible(not self._collapsed)
+
+    # ── Drag-drop target ──────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(_COL_DRAG_MIME):
+            event.acceptProposedAction()
+            self.setStyleSheet(self._drop_style)
+
+    def dragLeaveEvent(self, event):
+        super().dragLeaveEvent(event)
+        self.setStyleSheet(self._base_style)
+
+    def dropEvent(self, event):
+        self.setStyleSheet(self._base_style)
+        col_name = event.mimeData().data(_COL_DRAG_MIME).data().decode()
+        if self._on_drop:
+            self._on_drop(col_name, self._group_name)
+        event.acceptProposedAction()
 
 
 def _fmt_duration(dur: float) -> str:

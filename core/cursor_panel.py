@@ -71,7 +71,9 @@ def _fmt_val(v: float, unit: str = "", spacing: float = None) -> str:
         if abs_v >= scale * 0.9999:
             s = v / scale
             if spacing is not None and spacing > 0:
-                scaled_sp = abs(spacing / scale)
+                # Display at 1/10th of a tick division so the readout toggles
+                # with fine cursor movement, not only at full-div steps.
+                scaled_sp = abs(spacing / scale) / 10.0
                 dp = max(0, -int(_math.floor(_math.log10(scaled_sp)))) if scaled_sp < 1 else 0
                 dp = min(dp, 9)
                 txt = f"{s:.{dp}f}"

@@ -36,6 +36,7 @@ class TriggerPanel(QWidget):
 
     trigger_found              = pyqtSignal(float)   # time of trigger crossing
     set_time_zero              = pyqtSignal(float)   # request t=0 shift to this time
+    restore_original_t0        = pyqtSignal()        # restore all traces to import-time t=0
     place_cursor               = pyqtSignal(int, float)  # cursor_id, time
     retrigger_update_requested = pyqtSignal()        # manual "Update Retrigger" press
 
@@ -200,46 +201,57 @@ class TriggerPanel(QWidget):
         self.lbl_status.setWordWrap(True)
         layout.addWidget(self.lbl_status)
 
-        # ── Quick set-t=0 buttons ─────────────────────────────────────────
-        t0_hdr = QLabel("SET  t=0")
-        t0_hdr.setStyleSheet(
-            "color: #888; font-size: 10px; font-weight: bold; "
-            "letter-spacing: 1px; margin-top: 4px;")
-        layout.addWidget(t0_hdr)
-
+        # ── Quick set-t=0 row (label + 4 buttons on one line) ────────────
         _btn_style = (
-            "QPushButton { padding: 3px 6px; border: 1px solid #555; "
+            "QPushButton { padding: 2px 5px; border: 1px solid #555; "
             "border-radius: 3px; font-size: 11px; } "
             "QPushButton:hover { border-color: #888; } "
             "QPushButton:disabled { color: #444; border-color: #333; }")
+        _btn_restore_style = (
+            "QPushButton { padding: 2px 5px; border: 1px solid #446; "
+            "border-radius: 3px; font-size: 11px; color: #aac; } "
+            "QPushButton:hover { border-color: #88c; color: #ccf; } "
+            "QPushButton:disabled { color: #333; border-color: #333; }")
 
         t0_row = QHBoxLayout()
         t0_row.setSpacing(3)
 
-        self.btn_t0_first = QPushButton("⊣")
+        t0_lbl = QLabel("Set t|0:")
+        t0_lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold;")
+        t0_row.addWidget(t0_lbl)
+
+        self.btn_t0_first = QPushButton("→")
         self.btn_t0_first.setToolTip(
             "Set first dataset sample to t=0\n"
             "(full dataset, current zoom unchanged)")
         self.btn_t0_first.setStyleSheet(_btn_style)
         self.btn_t0_first.clicked.connect(self._set_t0_first)
 
-        self.btn_t0_mid = QPushButton("⊙")
+        self.btn_t0_mid = QPushButton("|")
         self.btn_t0_mid.setToolTip(
             "Set dataset midpoint to t=0\n"
             "(full dataset, current zoom unchanged)")
         self.btn_t0_mid.setStyleSheet(_btn_style)
         self.btn_t0_mid.clicked.connect(self._set_t0_middle)
 
-        self.btn_t0_last = QPushButton("⊢")
+        self.btn_t0_last = QPushButton("←")
         self.btn_t0_last.setToolTip(
             "Set last dataset sample to t=0\n"
             "(full dataset, current zoom unchanged)")
         self.btn_t0_last.setStyleSheet(_btn_style)
         self.btn_t0_last.clicked.connect(self._set_t0_last)
 
+        self.btn_t0_restore = QPushButton("=")
+        self.btn_t0_restore.setToolTip(
+            "Restore original t=0 from import\n"
+            "(undoes all Set t=0 actions)")
+        self.btn_t0_restore.setStyleSheet(_btn_restore_style)
+        self.btn_t0_restore.clicked.connect(self._set_t0_original)
+
         t0_row.addWidget(self.btn_t0_first)
         t0_row.addWidget(self.btn_t0_mid)
         t0_row.addWidget(self.btn_t0_last)
+        t0_row.addWidget(self.btn_t0_restore)
         layout.addLayout(t0_row)
 
         layout.addStretch()
@@ -447,6 +459,9 @@ class TriggerPanel(QWidget):
         bounds = self._dataset_bounds()
         if bounds is not None:
             self.set_time_zero.emit((bounds[0] + bounds[1]) / 2.0)
+
+    def _set_t0_original(self):
+        self.restore_original_t0.emit()
 
 
 def _fmt_time(t: float) -> str:

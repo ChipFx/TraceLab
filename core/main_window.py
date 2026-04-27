@@ -616,6 +616,7 @@ class MainWindow(QMainWindow):
         self._trigger_panel = TriggerPanel()
         self._trigger_panel.trigger_found.connect(self._on_trigger_found)
         self._trigger_panel.set_time_zero.connect(self._on_trigger_set_t0)
+        self._trigger_panel.restore_original_t0.connect(self._on_restore_original_t0)
         self._trigger_panel.place_cursor.connect(self._plot.set_cursor)
         self._trigger_panel.retrigger_update_requested.connect(self._reapply_retrigger)
         self._trigger_panel.chk_auto_retrigger.setChecked(
@@ -1400,6 +1401,8 @@ class MainWindow(QMainWindow):
                 n = len(self._traces)
                 trace.reset_color_to_theme(n)
                 trace.sync_theme_color(self.theme.active_theme)
+                if trace.original_time_zero is None and trace.time_axis is not None and len(trace.time_axis):
+                    trace.original_time_zero = float(trace.time_axis[0])
                 self._traces.append(trace)
                 self._channel_panel.add_trace(trace)
         # Single plot rebuild for the whole batch
@@ -1433,6 +1436,8 @@ class MainWindow(QMainWindow):
         n = len(self._traces)
         trace.reset_color_to_theme(n)
         trace.sync_theme_color(self.theme.active_theme)
+        if trace.original_time_zero is None and trace.time_axis is not None and len(trace.time_axis):
+            trace.original_time_zero = float(trace.time_axis[0])
 
         self._traces.append(trace)
         self._channel_panel.add_trace(trace)
@@ -2298,6 +2303,42 @@ class MainWindow(QMainWindow):
         self._plot._update_range_bar()
         self._refresh_status_bar()
         self._status_lbl.setText(f"t=0 set to trigger at {t_pos:.6g} s")
+
+    def _on_restore_original_t0(self):
+        """Shift all traces back to their original time positions at import."""
+        ref = next(
+            (t for t in self._traces
+             if t.original_time_zero is not None
+             and t.time_axis is not None and len(t.time_axis)),
+            None)
+        if ref is None:
+            return
+        # All traces shift together so compute the accumulated global shift
+        # from any one reference trace.
+        total_shift = float(ref.time_axis[0]) - ref.original_time_zero
+        if total_shift == 0.0:
+            return
+
+        x0, x1 = self._plot.get_current_view_range()
+        cursor_positions = dict(self._plot._cursors)
+
+        for trace in self._traces:
+            if trace.time_data is not None:
+                trace.time_data = trace.time_data - total_shift
+            else:
+                trace.time_data = trace.time_axis - total_shift
+            trace._computed_time = None
+
+        self._plot.refresh_all()
+
+        for cid, pos in cursor_positions.items():
+            if pos is not None:
+                self._plot.set_cursor(cid, pos - total_shift)
+
+        self._plot.zoom_x_range(x0 - total_shift, x1 - total_shift)
+        self._plot._update_range_bar()
+        self._refresh_status_bar()
+        self._status_lbl.setText("t=0 restored to original import position")
 
     def _refresh_trigger_channels(self):
         self._trigger_panel.update_traces(self._traces)

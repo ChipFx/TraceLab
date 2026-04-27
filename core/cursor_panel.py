@@ -375,6 +375,8 @@ class CursorPanel(QWidget):
         if self._time_scale_mode == "smart":
             return _fmt_smart_time(t, self._smart_settings)
         if self._time_scale_mode == "real_time":
+            if self._t0_wall_clock_dt is None:
+                return _fmt_time(t)   # no date anchor — fall back to standard
             return _fmt_real_time_cursor(t, self._t0_wall_clock_dt)
         return _fmt_time(t)
 

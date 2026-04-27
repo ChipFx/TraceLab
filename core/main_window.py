@@ -24,6 +24,9 @@ from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
 from core.plugin_manager import PluginManager
 from core.scope_status_bar import ScopeStatusBar
+from core.language_manager import get_language_manager
+from core.notice_manager import get_notice_manager
+from core.notice_bar_widget import NoticeBarWidget
 from core.draw_mode import (
     DEFAULT_DENSITY_PEN_MAPPING,
     DEFAULT_DRAW_MODE,
@@ -480,6 +483,14 @@ class MainWindow(QMainWindow):
             self._settings.get("process_segments", True))
         self._scroll_primaries: bool = bool(
             self._settings.get("scroll_primaries", True))
+
+        # ── Language + notice infrastructure ─────────────────────────────────
+        _lang = self._settings.get("language", "en")
+        self._language_manager = get_language_manager(_lang)
+        self._notice_manager   = get_notice_manager()
+        # Cycle interval: float seconds, settings.json only (not in UI)
+        self._notice_cycle_interval_s: float = float(
+            self._settings.get("notice_cycle_interval_s", 3.0))
 
         # ── Periodicity estimation ────────────────────────────────────────────
         # Migrate any old method names that may live in settings.json
@@ -1270,6 +1281,14 @@ class MainWindow(QMainWindow):
         self._status_lbl = QLabel("Ready  |  No data loaded")
         self._status_lbl.setStyleSheet("padding: 2px 8px;")
         self.statusBar().addWidget(self._status_lbl)
+
+        self._notice_bar = NoticeBarWidget(
+            self._notice_manager,
+            self._language_manager,
+            cycle_interval_s=self._notice_cycle_interval_s,
+        )
+        self.statusBar().addPermanentWidget(self._notice_bar)
+
         self._cursor_status = QLabel("")
         self._cursor_status.setStyleSheet("padding: 2px 8px; color: #aaa;")
         self.statusBar().addPermanentWidget(self._cursor_status)
@@ -1415,6 +1434,7 @@ class MainWindow(QMainWindow):
         # Start async period estimation for every trace (after UI is live)
         for trace in traces:
             self._estimate_period_async(trace)
+        self._update_realtime_notice()
 
     def _add_trace(self, trace: TraceModel):
         """Add or replace a single trace (used by plugins/retrigger; not import)."""
@@ -1446,6 +1466,7 @@ class MainWindow(QMainWindow):
         self._refresh_trigger_channels()
         self._refresh_status_bar()
         self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
+        self._update_realtime_notice()
 
     def _remove_trace(self, trace_name: str):
         self._traces = [t for t in self._traces if t.name != trace_name]
@@ -1454,6 +1475,7 @@ class MainWindow(QMainWindow):
         self._refresh_trigger_channels()
         self._update_status()
         self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
+        self._update_realtime_notice()
 
     def _clear_all(self, confirm: bool = True):
         if confirm and self._traces:
@@ -1473,6 +1495,7 @@ class MainWindow(QMainWindow):
         self._last_retrigger_span = 0.0
         self._refresh_trigger_channels()
         self._update_status()
+        self._update_realtime_notice()
 
     def _export_csv(self):
         if not self._traces:
@@ -1764,6 +1787,15 @@ class MainWindow(QMainWindow):
         self._apply_time_scale()
         self._save_settings()
 
+    def _update_realtime_notice(self):
+        """Attach or detach the 'real_time without date' notice as appropriate."""
+        active = (
+            self._time_scale_mode == "real_time"
+            and bool(self._traces)
+            and not self._get_active_t0_wall_clock()
+        )
+        self._notice_manager.set("realtime_no_date", active)
+
     def _apply_time_scale(self):
         """Push the current time-scale mode to the plot axes and cursor panel."""
         self._smart_scale["enabled"] = (self._time_scale_mode == "smart")
@@ -1782,6 +1814,7 @@ class MainWindow(QMainWindow):
                     pass
         self._cursor_panel.set_time_scale_mode(
             self._time_scale_mode, self._smart_scale, t0_dt)
+        self._update_realtime_notice()
 
     def _build_real_time_settings(self) -> dict:
         """Build the real-time axis settings dict from current state."""

@@ -622,8 +622,8 @@ class MainWindow(QMainWindow):
             self._settings.get("auto_retrigger", False))
         right_splitter.addWidget(self._trigger_panel)
 
-        right_splitter.setStretchFactor(0, 2)
-        right_splitter.setStretchFactor(1, 1)
+        right_splitter.setStretchFactor(0, 1)
+        right_splitter.setStretchFactor(1, 0)
         right_splitter.setSizes([420, 280])
         self._splitter.addWidget(right_splitter)
 
@@ -2775,7 +2775,7 @@ class MainWindow(QMainWindow):
             lambda: self._do_change_unit(trace_name))
         menu.addAction("Change Color…").triggered.connect(
             lambda: self._do_change_color(trace_name))
-        menu.addAction("Reset Color to Default").triggered.connect(
+        menu.addAction("Restore Default Colours").triggered.connect(
             lambda: self._on_reset_trace_color(trace_name))
 
         # ── Segments (only when 2+ segments present) ──────────────────
@@ -2892,15 +2892,14 @@ class MainWindow(QMainWindow):
         trace.non_primary_viewmode = mode
         self._on_segment_changed(trace_name)
 
-    def _on_reset_trace_color(self, trace_name: str):
-        """Reset a single trace to its theme-default colour."""
-        idx = next((i for i, t in enumerate(self._traces)
-                    if t.name == trace_name), 0)
-        for trace in self._traces:
-            if trace.name == trace_name:
-                trace.reset_color_to_theme(idx)
+    def _on_reset_trace_color(self, _trace_name: str = None):
+        """Reset ALL traces to theme-default colours based on their current display order."""
+        ordered = self._channel_panel.get_ordered_names()
+        for i, name in enumerate(ordered):
+            trace = next((t for t in self._traces if t.name == name), None)
+            if trace is not None:
+                trace.reset_color_to_theme(i)
                 trace.sync_theme_color(self.theme.active_theme)
-                break
         self._channel_panel.refresh_all()
         self._plot.refresh_all()
         self._refresh_status_bar()

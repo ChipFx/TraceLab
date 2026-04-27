@@ -200,6 +200,48 @@ class TriggerPanel(QWidget):
         self.lbl_status.setWordWrap(True)
         layout.addWidget(self.lbl_status)
 
+        # ── Quick set-t=0 buttons ─────────────────────────────────────────
+        t0_hdr = QLabel("SET  t=0")
+        t0_hdr.setStyleSheet(
+            "color: #888; font-size: 10px; font-weight: bold; "
+            "letter-spacing: 1px; margin-top: 4px;")
+        layout.addWidget(t0_hdr)
+
+        _btn_style = (
+            "QPushButton { padding: 3px 6px; border: 1px solid #555; "
+            "border-radius: 3px; font-size: 11px; } "
+            "QPushButton:hover { border-color: #888; } "
+            "QPushButton:disabled { color: #444; border-color: #333; }")
+
+        t0_row = QHBoxLayout()
+        t0_row.setSpacing(3)
+
+        self.btn_t0_first = QPushButton("⊣")
+        self.btn_t0_first.setToolTip(
+            "Set first dataset sample to t=0\n"
+            "(full dataset, current zoom unchanged)")
+        self.btn_t0_first.setStyleSheet(_btn_style)
+        self.btn_t0_first.clicked.connect(self._set_t0_first)
+
+        self.btn_t0_mid = QPushButton("⊙")
+        self.btn_t0_mid.setToolTip(
+            "Set dataset midpoint to t=0\n"
+            "(full dataset, current zoom unchanged)")
+        self.btn_t0_mid.setStyleSheet(_btn_style)
+        self.btn_t0_mid.clicked.connect(self._set_t0_middle)
+
+        self.btn_t0_last = QPushButton("⊢")
+        self.btn_t0_last.setToolTip(
+            "Set last dataset sample to t=0\n"
+            "(full dataset, current zoom unchanged)")
+        self.btn_t0_last.setStyleSheet(_btn_style)
+        self.btn_t0_last.clicked.connect(self._set_t0_last)
+
+        t0_row.addWidget(self.btn_t0_first)
+        t0_row.addWidget(self.btn_t0_mid)
+        t0_row.addWidget(self.btn_t0_last)
+        layout.addLayout(t0_row)
+
         layout.addStretch()
 
     def _on_search_direction_changed(self, is_forward: bool):
@@ -371,6 +413,40 @@ class TriggerPanel(QWidget):
             return t0 + frac * (t1 - t0)
 
         return None
+
+
+    # ── Quick set-t=0 helpers ─────────────────────────────────────────────
+
+    def _dataset_bounds(self) -> Optional[tuple]:
+        """Return (t_min, t_max) across all loaded traces, or None if no data."""
+        t_min: Optional[float] = None
+        t_max: Optional[float] = None
+        for trace in self._traces:
+            ta = trace.time_axis
+            if ta is not None and len(ta) > 0:
+                lo, hi = float(ta[0]), float(ta[-1])
+                if t_min is None or lo < t_min:
+                    t_min = lo
+                if t_max is None or hi > t_max:
+                    t_max = hi
+        if t_min is None:
+            return None
+        return t_min, t_max
+
+    def _set_t0_first(self):
+        bounds = self._dataset_bounds()
+        if bounds is not None:
+            self.set_time_zero.emit(bounds[0])
+
+    def _set_t0_last(self):
+        bounds = self._dataset_bounds()
+        if bounds is not None:
+            self.set_time_zero.emit(bounds[1])
+
+    def _set_t0_middle(self):
+        bounds = self._dataset_bounds()
+        if bounds is not None:
+            self.set_time_zero.emit((bounds[0] + bounds[1]) / 2.0)
 
 
 def _fmt_time(t: float) -> str:

@@ -594,6 +594,7 @@ class MainWindow(QMainWindow):
         # [plot+range_bar] [status_bar] -- but range_bar is inside _plot.
         # Better: hide range_bar from _plot and add it here after status bar.
         self._plot._range_bar.setParent(None)  # detach from plot's layout
+        self._plot._range_bar.t0_date_requested.connect(self._show_t0_date_dialog)
         pcl.addWidget(self._scope_status)
         pcl.addWidget(self._plot._range_bar)
 
@@ -1435,6 +1436,7 @@ class MainWindow(QMainWindow):
         for trace in traces:
             self._estimate_period_async(trace)
         self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _add_trace(self, trace: TraceModel):
         """Add or replace a single trace (used by plugins/retrigger; not import)."""
@@ -1467,6 +1469,7 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
         self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
         self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _remove_trace(self, trace_name: str):
         self._traces = [t for t in self._traces if t.name != trace_name]
@@ -1476,6 +1479,7 @@ class MainWindow(QMainWindow):
         self._update_status()
         self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
         self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _clear_all(self, confirm: bool = True):
         if confirm and self._traces:
@@ -1496,6 +1500,7 @@ class MainWindow(QMainWindow):
         self._refresh_trigger_channels()
         self._update_status()
         self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _export_csv(self):
         if not self._traces:
@@ -1692,6 +1697,7 @@ class MainWindow(QMainWindow):
                 self._show_lane_labels,
                 self._allow_theme_force_labels,
                 self._lane_label_spacing)
+            self._refresh_t0_date_indicator()
         if save:
             self._settings["theme"] = file_id
 
@@ -1815,6 +1821,7 @@ class MainWindow(QMainWindow):
         self._cursor_panel.set_time_scale_mode(
             self._time_scale_mode, self._smart_scale, t0_dt)
         self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _build_real_time_settings(self) -> dict:
         """Build the real-time axis settings dict from current state."""
@@ -1830,6 +1837,100 @@ class MainWindow(QMainWindow):
             if getattr(trace, "t0_wall_clock", ""):
                 return trace.t0_wall_clock
         return ""
+
+    def _refresh_t0_date_indicator(self):
+        """Update the RangeBar button checked state to reflect whether a date is set."""
+        has_date = bool(self._get_active_t0_wall_clock())
+        self._plot._range_bar.set_date_indicator(has_date)
+
+    def _show_t0_date_dialog(self):
+        """Open the themed t=0 wall-clock date editor popup."""
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                      QLabel, QLineEdit, QDialogButtonBox,
+                                      QRadioButton, QButtonGroup)
+        from core.import_dialog import _parse_wallclock_input
+
+        current = self._get_active_t0_wall_clock()
+
+        # ── Build dialog — inherits app-global stylesheet automatically ────
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Set t=0 date")
+        dlg.setMinimumWidth(400)
+
+        vlay = QVBoxLayout(dlg)
+        vlay.setSpacing(8)
+
+        hint = QLabel(
+            "Enter wall-clock date/time for t=0:\n"
+            "ISO:   2024-03-15T14:23:00\n"
+            "Epoch: 1713450000  or  1713450000.123"
+        )
+        hint.setWordWrap(True)
+        vlay.addWidget(hint)
+
+        edit = QLineEdit(current)
+        edit.setPlaceholderText("e.g. 2024-03-15T14:23:00  or  1713450000")
+        vlay.addWidget(edit)
+
+        # ── Epoch timezone row (mirrors Import Dialog) ─────────────────────
+        tz_row = QHBoxLayout()
+        tz_row.addWidget(QLabel("If Epoch:"))
+        rb_utc   = QRadioButton("GMT / UTC")
+        rb_local = QRadioButton("Local time")
+        tz_grp   = QButtonGroup(dlg)
+        tz_grp.addButton(rb_utc,   0)
+        tz_grp.addButton(rb_local, 1)
+        epoch_local_default = self._settings.get("import_epoch_local", False)
+        rb_local.setChecked(epoch_local_default)
+        rb_utc.setChecked(not epoch_local_default)
+        tz_row.addWidget(rb_utc)
+        tz_row.addWidget(rb_local)
+        tz_row.addStretch()
+        vlay.addLayout(tz_row)
+
+        err_lbl = QLabel("")
+        err_lbl.setStyleSheet("color: #e55;")
+        err_lbl.setWordWrap(True)
+        vlay.addWidget(err_lbl)
+
+        btns = QDialogButtonBox()
+        ok_btn     = btns.addButton("OK",    QDialogButtonBox.ButtonRole.AcceptRole)
+        clear_btn  = btns.addButton("Clear", QDialogButtonBox.ButtonRole.ResetRole)
+        btns.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        vlay.addWidget(btns)
+
+        def _on_accept():
+            text = edit.text().strip()
+            epoch_local = rb_local.isChecked()
+            try:
+                iso = _parse_wallclock_input(text, epoch_local=epoch_local)
+            except ValueError as exc:
+                err_lbl.setText(str(exc))
+                return
+            self._settings["import_epoch_local"] = epoch_local
+            for trace in self._traces:
+                trace.t0_wall_clock = iso
+            dlg.accept()
+            self._on_t0_date_applied()
+
+        def _on_clear():
+            for trace in self._traces:
+                trace.t0_wall_clock = ""
+            dlg.accept()
+            self._on_t0_date_applied()
+
+        ok_btn.clicked.connect(_on_accept)
+        clear_btn.clicked.connect(_on_clear)
+        btns.rejected.connect(dlg.reject)
+
+        dlg.exec()
+
+    def _on_t0_date_applied(self):
+        """Refresh real-time axis and notice state after a t0_wall_clock change."""
+        self._plot.set_real_time(self._build_real_time_settings())
+        self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
+        self._refresh_status_bar()
 
     def _dlg_smart_scale_settings(self):
         from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox, QLineEdit
@@ -2309,6 +2410,19 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
         self._apply_retrigger(t_pos)
 
+    @staticmethod
+    def _shift_trace_wall_clock(trace, delta_s: float):
+        """Shift trace.t0_wall_clock by *delta_s* seconds (in-place)."""
+        if not getattr(trace, "t0_wall_clock", ""):
+            return
+        from datetime import datetime, timedelta
+        try:
+            dt = datetime.fromisoformat(trace.t0_wall_clock)
+            dt = dt + timedelta(seconds=delta_s)
+            trace.t0_wall_clock = dt.isoformat()
+        except Exception:
+            pass
+
     def _on_trigger_set_t0(self, t_pos: float):
         """Shift all trace time axes so t_pos becomes 0."""
         x0, x1 = self._plot.get_current_view_range()
@@ -2325,6 +2439,8 @@ class MainWindow(QMainWindow):
                 import numpy as np
                 trace.time_data = trace.time_axis - t_pos
             trace._computed_time = None  # invalidate cache
+            # Keep wall-clock anchor in sync: new t=0 is the old t_pos instant
+            self._shift_trace_wall_clock(trace, t_pos)
 
         self._plot.refresh_all()
 
@@ -2361,6 +2477,8 @@ class MainWindow(QMainWindow):
             else:
                 trace.time_data = trace.time_axis - total_shift
             trace._computed_time = None
+            # Keep wall-clock anchor in sync with the restored time position
+            self._shift_trace_wall_clock(trace, -total_shift)
 
         self._plot.refresh_all()
 

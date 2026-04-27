@@ -721,7 +721,8 @@ def _effective_color(color: str, theme_name: str) -> str:
 
 class RangeBar(QWidget):
     """Compact X/Y range input bar shown below the plot area."""
-    range_changed = pyqtSignal(float, float, float, float)  # x0,x1,y0,y1
+    range_changed      = pyqtSignal(float, float, float, float)  # x0,x1,y0,y1
+    t0_date_requested  = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -749,7 +750,21 @@ class RangeBar(QWidget):
         layout.addWidget(btn)
         layout.addStretch()
 
+        self._t0_date_btn = QPushButton("Set t=0 date")
+        self._t0_date_btn.setFixedWidth(90)
+        self._t0_date_btn.setCheckable(True)
+        self._t0_date_btn.clicked.connect(self.t0_date_requested)
+        layout.addWidget(self._t0_date_btn)
+
         self.setMaximumHeight(30)
+
+    def set_date_indicator(self, has_date: bool, _accent_colour: str = ""):
+        """Toggle the button's checked state to reflect whether a date is set.
+
+        Uses QPushButton:checked from the app stylesheet so the accent colour
+        is always up-to-date after theme changes — no manual colour needed.
+        """
+        self._t0_date_btn.setChecked(has_date)
 
     def update_display(self, x0, x1, y0, y1):
         def fmt(v):

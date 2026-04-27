@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QSizePolicy
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QCoreApplication
 
 from core.notice_manager import NoticeManager
 from core.language_manager import LanguageManager
@@ -141,9 +141,10 @@ class NoticeBarWidget(QWidget):
         key   = active[self._cycle_idx % len(active)]
         count = len(active)
 
-        notice = self._notices.get(key, {})
-        text   = notice.get("string", key)
-        ntype  = notice.get("type", "user_notice")
+        notice  = self._notices.get(key, {})
+        source  = notice.get("source", key)   # English source string (or key as fallback)
+        text    = QCoreApplication.translate("notices", source)
+        ntype   = notice.get("type", "user_notice")
 
         # Resolve colours: per-notice override > type set > fallback
         cset  = self._colours.get(ntype, {})

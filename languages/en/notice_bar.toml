@@ -5,7 +5,11 @@
 # internal identifier used in code (e.g. "realtime_no_date").
 #
 # Required fields:
-#   string  - The text displayed in the notice bar.
+#   source  - The Qt source string passed to QCoreApplication.translate("notices", ...).
+#             This MUST be the English text exactly as it appears in
+#             translations/strings_notices.py, so pylupdate6 can match them.
+#             At runtime, if no QTranslator is installed (English app),
+#             Qt returns this string verbatim — no .qm file needed for English.
 #   type    - Colour-set name from _colour.toml.
 #             One of: user_notice, user_warning, user_error,
 #                     program_info, program_warning, program_error
@@ -18,7 +22,7 @@
 [notice_realtime_no_date]
 # Indicates on the notice bar that the application fell back to standard
 # time indication, because the source data did not have a date set.
-string      = "Real Time mode enabled without known date"
+source      = "Real Time mode enabled without known date"
 type        = "user_warning"
 fg_override  = ""
 bg_override  = ""

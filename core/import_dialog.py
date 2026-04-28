@@ -1280,6 +1280,18 @@ class ImportDialog(QDialog):
             _ts_seg = (self.load_result.trace_segment_settings.get(col_name)
                        or self.load_result.trace_segment_settings.get(_trace_name)
                        or {})
+            # Resolve segment list once so we can derive defaults from it.
+            _trace_segs = (self.load_result.trace_segments.get(col_name)
+                           or self.load_result.trace_segments.get(_trace_name)
+                           or self.load_result.segments)
+            _has_multi_segs = bool(_trace_segs and len(_trace_segs) >= 2)
+            # For fresh multi-segment imports (no #trace_settings= header):
+            # default primary to segment 0 and viewmode to "dimmed" so the
+            # segment rendering kicks in immediately without a manual first step.
+            _default_primary = (self.load_result.primary_segment
+                                if self.load_result.primary_segment is not None
+                                else (0 if _has_multi_segs else None))
+            _default_viewmode = "dimmed" if _has_multi_segs else ""
             trace = TraceModel(
                 name=_trace_name,
                 raw_data=raw,
@@ -1301,12 +1313,9 @@ class ImportDialog(QDialog):
                 t0_wall_clock=(_wc_override if _wc_override else _trace_t0wc),
                 source_time_format=self.load_result.source_time_format,
                 # Segment metadata — per-trace if available, file-level fallback
-                segments=(self.load_result.trace_segments.get(col_name)
-                          or self.load_result.trace_segments.get(_trace_name)
-                          or self.load_result.segments),
-                primary_segment=(_ts_seg.get("primary_segment",
-                                             self.load_result.primary_segment)),
-                non_primary_viewmode=_ts_seg.get("non_primary_viewmode", ""),
+                segments=_trace_segs,
+                primary_segment=_ts_seg.get("primary_segment", _default_primary),
+                non_primary_viewmode=_ts_seg.get("non_primary_viewmode", _default_viewmode),
             )
 
             # For sample-based time, apply t0 offset via dt-based shift

@@ -2181,10 +2181,15 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()    # status bar block uses trace.label
 
     def _on_segment_changed(self, trace_name: str):
-        """Refresh the lane for a trace whose primary_segment or viewmode changed."""
-        lane = self._plot._lanes.get(trace_name)
-        if lane:
-            lane.refresh_curve()
+        """Refresh the lane/visual for a trace whose primary_segment or viewmode changed."""
+        if self._plot._mode == "split":
+            lane = self._plot._lanes.get(trace_name)
+            if lane:
+                lane.refresh_curve()
+        else:
+            visual = self._plot._overlay_visuals.get(trace_name)
+            if visual:
+                visual.refresh_curve(self._plot.get_current_view_range())
 
     def _on_unit_changed(self, trace_name: str, *_):
         """Refresh the y-axis label when a channel's unit is changed by the user."""
@@ -3245,6 +3250,24 @@ class MainWindow(QMainWindow):
         if checked:
             self._reapply_retrigger()
 
+    def _get_trace_segment_data(self, trace):
+        """Return (time_array, data_array) appropriate for retrigger/persistence/averaging.
+
+        When Process Segments is on and the trace has multiple segments, returns
+        only the primary segment's slice.  When primary_segment is None, segment 0
+        is used so the tools operate on a single coherent window.  Falls back to
+        the full arrays when segment processing is off or the trace is not segmented.
+        """
+        segs = getattr(trace, 'segments', None)
+        if not self._process_segments or not segs or len(segs) < 2:
+            return trace.time_axis, trace.processed_data
+        primary = trace.primary_segment
+        if primary is None:
+            primary = 0
+        primary = max(0, min(primary, len(segs) - 1))
+        s, e = segs[primary][0], segs[primary][1]
+        return trace.time_axis[s:e], trace.processed_data[s:e]
+
     def _apply_retrigger(self, t_pos: float):
         """
         Full retrigger pipeline.
@@ -3279,9 +3302,10 @@ class MainWindow(QMainWindow):
         if trig_trace is None or len(trig_trace.time_axis) < 2:
             return
 
-        trig_t = trig_trace.time_axis
-        trig_y = trig_trace.processed_data
-        dt_est = float(trig_t[1] - trig_t[0])
+        trig_t, trig_y = self._get_trace_segment_data(trig_trace)
+        dt_est = float(trig_t[1] - trig_t[0]) if len(trig_t) >= 2 else 0.0
+        if len(trig_t) < 2:
+            return
 
         # ── Epoch selection ───────────────────────────────────────────────────
         #
@@ -3517,8 +3541,7 @@ class MainWindow(QMainWindow):
         for trace in self._traces:
             if not trace.visible:
                 continue
-            t = trace.time_axis
-            y = trace.processed_data
+            t, y = self._get_trace_segment_data(trace)
             if len(t) < 2:
                 continue
 

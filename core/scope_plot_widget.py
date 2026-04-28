@@ -1421,6 +1421,10 @@ class OverlayTraceVisual:
         self._original_display_mode: Optional[str] = None
         self._original_dimmed_opacity: float = 0.5
         self._original_dash_pattern: Optional[list] = None
+        self._segment_curves: list = []
+        self._process_segments: bool = True
+        self._segment_dim_opacity: float = 0.30
+        self._segment_dash_pattern: Optional[list] = None
         self.curve = self.plot_item.plot([], [], pen=pg.mkPen(width=1.5),
                                          name=trace.label, antialias=False)
         self.curve.setDownsampling(auto=True, method="peak")
@@ -1527,9 +1531,30 @@ class OverlayTraceVisual:
         self._reapply_original_style()
 
     def refresh_curve(self, view_range: Tuple[float, float]):
+        # Clean up non-primary segment curves from previous render
+        for sc in self._segment_curves:
+            try:
+                self.plot_item.removeItem(sc)
+            except Exception:
+                pass
+        self._segment_curves = []
+
         t_full = self.trace.time_axis
         y_full = self.trace.processed_data
         x0, x1 = view_range
+
+        # Segment slicing — mirrors TraceLane._add_trace_curve logic
+        segs = getattr(self.trace, 'segments', None)
+        primary = getattr(self.trace, 'primary_segment', None)
+        viewmode = (getattr(self.trace, 'non_primary_viewmode', '') or '').strip()
+        process_segs = (self._process_segments
+                        and segs is not None and len(segs) > 1
+                        and primary is not None and 0 <= primary < len(segs))
+        if process_segs:
+            p_start, p_end = segs[primary][0], segs[primary][1]
+            t_full = t_full[p_start:p_end]
+            y_full = y_full[p_start:p_end]
+
         self._interpolated_view = False
         self._update_visible_samples(RenderViewport(
             width_px=max(1.0, float(self.plot_item.vb.width())),
@@ -1570,6 +1595,43 @@ class OverlayTraceVisual:
         self._reapply_original_style()
         if self._persist_curves:
             self.curve.setZValue(len(self._persist_curves) + 1)
+
+        # Non-primary segment overlays
+        if process_segs and viewmode != "hide":
+            t_all = self.trace.time_axis
+            y_all = self.trace.processed_data
+            color = self._display_color()
+            seg_max_pts = _resolve_display_limit(self._limits_config, width_px)
+            for i, seg in enumerate(segs):
+                if i == primary:
+                    continue
+                s_s, s_e = seg[0], seg[1]
+                t_seg = t_all[s_s:s_e]
+                y_seg = y_all[s_s:s_e]
+                seg_mask = (t_seg >= x0) & (t_seg <= x1)
+                if int(seg_mask.sum()) >= 2:
+                    t_seg = t_seg[seg_mask]
+                    y_seg = y_seg[seg_mask]
+                if len(t_seg) < 2:
+                    continue
+                t_ds, y_ds = downsample_for_display(t_seg, y_seg, seg_max_pts)
+                if viewmode == "dimmed":
+                    c = QColor(color)
+                    c.setAlphaF(self._segment_dim_opacity)
+                    seg_pen = pg.mkPen(color=c, width=1)
+                elif viewmode == "dashed":
+                    seg_pen = pg.mkPen(color=color, width=1)
+                    if self._segment_dash_pattern:
+                        seg_pen.setStyle(Qt.PenStyle.CustomDashLine)
+                        seg_pen.setDashPattern(self._segment_dash_pattern)
+                    else:
+                        seg_pen.setStyle(Qt.PenStyle.DashLine)
+                else:
+                    seg_pen = pg.mkPen(color=color, width=1)
+                sc = self.plot_item.plot(t_ds, y_ds, pen=seg_pen, antialias=False)
+                sc.setDownsampling(auto=True, method="peak")
+                sc.setClipToView(True)
+                self._segment_curves.append(sc)
 
     # ── Persistence / retrigger overlay ───────────────────────────────────────
 
@@ -1660,6 +1722,12 @@ class OverlayTraceVisual:
     def remove(self):
         self.clear_persistence_layers()
         self.clear_retrigger_curve()
+        for sc in self._segment_curves:
+            try:
+                self.plot_item.removeItem(sc)
+            except Exception:
+                pass
+        self._segment_curves = []
         self.plot_item.removeItem(self.curve)
 
 
@@ -2027,11 +2095,15 @@ class ScopePlotWidget(QWidget):
             lane._y_axis.set_div_settings(cfg)
 
     def set_process_segments(self, enabled: bool):
-        """Enable/disable segment-aware rendering on all lanes."""
+        """Enable/disable segment-aware rendering on all lanes and overlay visuals."""
         self._seg_process = enabled
         for lane in self._lanes.values():
             lane._process_segments = enabled
             lane.refresh_curve()
+        vr = self.get_current_view_range()
+        for visual in self._overlay_visuals.values():
+            visual._process_segments = enabled
+            visual.refresh_curve(vr)
 
     def set_segment_dim_opacity(self, opacity_pct: int):
         """Set dim opacity (10–90%) for non-primary segments and refresh."""
@@ -2040,6 +2112,10 @@ class ScopePlotWidget(QWidget):
         for lane in self._lanes.values():
             lane._segment_dim_opacity = opacity
             lane.refresh_curve()
+        vr = self.get_current_view_range()
+        for visual in self._overlay_visuals.values():
+            visual._segment_dim_opacity = opacity
+            visual.refresh_curve(vr)
 
     def set_segment_dash_pattern(self, dash_size: int, gap_size: int):
         """Set custom dash pattern for dashed non-primary segments and refresh."""
@@ -2048,6 +2124,10 @@ class ScopePlotWidget(QWidget):
         for lane in self._lanes.values():
             lane._segment_dash_pattern = pattern
             lane.refresh_curve()
+        vr = self.get_current_view_range()
+        for visual in self._overlay_visuals.values():
+            visual._segment_dash_pattern = pattern
+            visual.refresh_curve(vr)
 
     def eventFilter(self, obj, event):
         """Intercept wheel events on TraceLane / overlay viewports.
@@ -2347,6 +2427,9 @@ class ScopePlotWidget(QWidget):
             visual = OverlayTraceVisual(
                 pi, trace, self._style_context, mode, self.viewport_min_pts,
                 limits_config=self._limits_config)
+            visual._process_segments    = self._seg_process
+            visual._segment_dim_opacity = self._seg_dim_opacity
+            visual._segment_dash_pattern = self._seg_dash_pattern
             visual.refresh_curve((x0, x1))
             self._overlay_visuals[trace.name] = visual
 

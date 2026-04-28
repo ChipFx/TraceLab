@@ -298,6 +298,8 @@ def _build_segmented_csv(traces):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._shutting_down = False
+        self._deferred_ui_timers = []
         self.setWindowTitle("ChipFX TraceLab")
         self.resize(1100, 680)
 
@@ -568,7 +570,7 @@ class MainWindow(QMainWindow):
 
         # 0-ms single-shot timer coalesces rapid back-to-back _refresh_status_bar
         # calls (e.g. hiding all 32 channels) into one actual redraw.
-        self._status_bar_refresh_timer = QTimer()
+        self._status_bar_refresh_timer = QTimer(self)
         self._status_bar_refresh_timer.setSingleShot(True)
         self._status_bar_refresh_timer.setInterval(0)
         self._status_bar_refresh_timer.timeout.connect(self._do_refresh_status_bar)
@@ -1384,9 +1386,10 @@ class MainWindow(QMainWindow):
             meta = result.metadata
             if (meta.view_time_start is not None or
                     meta.view_sample_start is not None):
-                QTimer.singleShot(80, lambda: self._apply_viewport_from_metadata(meta))
+                self._schedule_ui_call(
+                    80, lambda meta=meta: self._apply_viewport_from_metadata(meta))
             else:
-                QTimer.singleShot(50, self._zoom_full_safe)
+                self._schedule_ui_call(50, self._zoom_full_safe)
 
         self._update_status()
 
@@ -2033,10 +2036,38 @@ class MainWindow(QMainWindow):
     def _refresh_status_bar(self):
         """Schedule a status-bar refresh on the next event loop tick.
         Multiple calls within the same synchronous call stack coalesce into one."""
+        if self._shutting_down:
+            return
         if hasattr(self, '_status_bar_refresh_timer'):
             self._status_bar_refresh_timer.start()
 
+    def _schedule_ui_call(self, delay_ms: int, callback) -> None:
+        """Run a UI callback later, tied to this window's lifetime."""
+        if self._shutting_down:
+            return
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(int(delay_ms))
+
+        def _fire():
+            try:
+                self._deferred_ui_timers.remove(timer)
+            except ValueError:
+                pass
+            if self._shutting_down:
+                return
+            try:
+                callback()
+            except RuntimeError:
+                pass
+
+        timer.timeout.connect(_fire)
+        self._deferred_ui_timers.append(timer)
+        timer.start()
+
     def _do_refresh_status_bar(self):
+        if self._shutting_down:
+            return
         if not hasattr(self, '_scope_status'):
             return
         x0, x1 = self._plot.get_current_view_range()
@@ -2124,6 +2155,8 @@ class MainWindow(QMainWindow):
         """Zoom to fit all data — forces a range reset even after manual zoom.
         Suppresses intermediate per-lane redraws and issues one clean refresh
         after all ranges are applied, avoiding N × M redundant draw calls."""
+        if self._shutting_down:
+            return
         if not self._traces:
             return
         # Find global data extents
@@ -2762,10 +2795,12 @@ class MainWindow(QMainWindow):
 
     def _apply_viewport_from_metadata(self, meta):
         """After import, zoom to viewport hints if present in CSV headers."""
-        from PyQt6.QtCore import QTimer as _QTimer
+        if self._shutting_down:
+            return
         if meta.view_time_start is not None and meta.view_time_stop is not None:
             t0, t1 = meta.view_time_start, meta.view_time_stop
-            _QTimer.singleShot(80, lambda: self._plot.zoom_x_range(t0, t1))
+            self._schedule_ui_call(
+                80, lambda t0=t0, t1=t1: self._plot.zoom_x_range(t0, t1))
         elif (meta.view_sample_start is not None
               and meta.view_sample_stop is not None
               and self._traces):
@@ -2775,7 +2810,8 @@ class MainWindow(QMainWindow):
             i0 = max(0, min(meta.view_sample_start, n-1))
             i1 = max(0, min(meta.view_sample_stop, n-1))
             t0, t1 = float(ta[i0]), float(ta[i1])
-            _QTimer.singleShot(80, lambda: self._plot.zoom_x_range(t0, t1))
+            self._schedule_ui_call(
+                80, lambda t0=t0, t1=t1: self._plot.zoom_x_range(t0, t1))
 
     def _toggle_remember_folder(self, checked: bool):
         self._settings["remember_folder"] = checked
@@ -4049,14 +4085,20 @@ class MainWindow(QMainWindow):
         return False
 
     def closeEvent(self, event):
+        self._shutting_down = True
         # ── Stop all pending/repeating timers ─────────────────────────────────
         # Parentless timers (_status_bar_refresh_timer, plot's _rebuild_timer
         # and _range_timer) are not stopped by Qt's parent-child teardown.
         # If they fire during window destruction they callback into half-dead
         # C++ objects → segfault.
         self._status_bar_refresh_timer.stop()
-        self._plot._rebuild_timer.stop()
-        self._plot._range_timer.stop()
+        for timer in list(self._deferred_ui_timers):
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        self._deferred_ui_timers.clear()
+        self._plot.begin_shutdown()
 
         # ── Wait for background period-estimation threads ──────────────────────
         # Workers are QThread children of this window (parent=self).  Qt's

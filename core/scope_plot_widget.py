@@ -1790,6 +1790,7 @@ class ScopePlotWidget(QWidget):
                  limits_config: Optional[dict] = None,
                  parent=None):
         super().__init__(parent)
+        self._shutting_down = False
         self._theme_manager = theme_manager
         self._active_theme = theme_manager.active_theme
         self._draw_mode = draw_mode or DEFAULT_DRAW_MODE
@@ -1867,7 +1868,7 @@ class ScopePlotWidget(QWidget):
         layout.addWidget(self._range_bar)
 
         # Timer to update range bar AND status bar (throttled to 100ms)
-        self._range_timer = QTimer()
+        self._range_timer = QTimer(self)
         self._range_timer.setSingleShot(True)
         self._range_timer.setInterval(100)
         self._range_timer.timeout.connect(self._update_range_bar)
@@ -1876,12 +1877,36 @@ class ScopePlotWidget(QWidget):
         # Debounce timer for visibility-driven rebuilds (0 ms = next event tick).
         # Coalesces rapid back-to-back set_trace_visible calls (e.g. "None" with
         # 32 channels) into a single _rebuild, preventing O(n²) widget churn.
-        self._rebuild_timer = QTimer()
+        self._rebuild_timer = QTimer(self)
         self._rebuild_timer.setSingleShot(True)
         self._rebuild_timer.setInterval(0)
         self._rebuild_timer.timeout.connect(self._rebuild)
 
         self._theme_manager.themeChanged.connect(self._on_theme_changed)
+
+    def begin_shutdown(self) -> None:
+        """Stop timers/signals so late callbacks cannot hit torn-down widgets."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        try:
+            self._range_timer.stop()
+            self._rebuild_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._theme_manager.themeChanged.disconnect(self._on_theme_changed)
+        except Exception:
+            pass
+        try:
+            self._overlay_widget.viewport().removeEventFilter(self)
+        except Exception:
+            pass
+        for lane in list(self._lanes.values()):
+            try:
+                lane.viewport().removeEventFilter(self)
+            except Exception:
+                pass
 
     def _setup_overlay(self):
         # Replace default axes with engineering-unit axes
@@ -1930,6 +1955,8 @@ class ScopePlotWidget(QWidget):
                 self._place_cursors(cid, x_pos)
 
     def _on_theme_changed(self, theme):
+        if self._shutting_down:
+            return
         self._apply_plot_theme(theme)
         rt_enabled = bool(self._real_time_settings.get("enabled"))
         for lane in self._lanes.values():
@@ -1969,6 +1996,8 @@ class ScopePlotWidget(QWidget):
 
     def _on_overlay_range_changed(self):
         """Re-render overlay curves on every pan/zoom so viewport windowing stays correct."""
+        if self._shutting_down:
+            return
         self._refresh_overlay_visuals()
 
     def set_mode(self, mode: str):
@@ -2101,6 +2130,8 @@ class ScopePlotWidget(QWidget):
             self.sinc_active_changed.emit(sinc_now)
 
     def refresh_all(self):
+        if self._shutting_down:
+            return
         if self._mode == "split":
             for lane in self._lanes.values():
                 lane.refresh_curve()
@@ -2230,10 +2261,40 @@ class ScopePlotWidget(QWidget):
             lane._suppress_view_redraws = suppress
 
     def _rebuild(self):
+        if self._shutting_down:
+            return
         if self._mode == "split":
             self._rebuild_split()
         else:
             self._rebuild_overlay()
+
+    def _defer_lane_refresh(self, lane: TraceLane) -> None:
+        """Queue a lane refresh on the next tick, owned by the lane itself."""
+        if self._shutting_down:
+            return
+        timers = getattr(lane, "_deferred_refresh_timers", None)
+        if timers is None:
+            timers = []
+            lane._deferred_refresh_timers = timers
+        timer = QTimer(lane)
+        timer.setSingleShot(True)
+        timer.setInterval(0)
+
+        def _fire():
+            try:
+                timers.remove(timer)
+            except ValueError:
+                pass
+            if self._shutting_down:
+                return
+            try:
+                lane.refresh_curve()
+            except RuntimeError:
+                pass
+
+        timer.timeout.connect(_fire)
+        timers.append(timer)
+        timer.start()
 
     def _rebuild_split(self, inherit_x=None):
         for lane in self._lanes.values():
@@ -2284,7 +2345,7 @@ class ScopePlotWidget(QWidget):
             # Defer refresh to next event loop tick — widget now has proper
             # geometry and view range set via layout, avoiding zombie curves
             # that would result from calling refresh_curve() before addWidget.
-            QTimer.singleShot(0, lane.refresh_curve)
+            self._defer_lane_refresh(lane)
 
         # Apply inherited x range to the x-link master; all linked lanes follow.
         # setXRange is synchronous so it takes effect before the deferred
@@ -2791,6 +2852,8 @@ class ScopePlotWidget(QWidget):
         return -1.0, 1.0
 
     def _update_range_bar(self):
+        if self._shutting_down:
+            return
         x0, x1 = self.get_current_view_range()
         y0, y1 = self.get_current_y_range()
         self._range_bar.update_display(x0, x1, y0, y1)

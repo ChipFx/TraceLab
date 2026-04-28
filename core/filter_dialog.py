@@ -86,7 +86,10 @@ def _format_duration(seconds: float) -> str:
 # ── Dialog ────────────────────────────────────────────────────────────────────
 
 # Internal filter type keys (index matches combo box order)
-_FTYPE = ["lowpass", "highpass", "bandpass", "bandstop"]
+_FTYPE = ["lowpass", "highpass", "bandpass", "bandstop", "notch", "peak", "comb"]
+
+# Filter family keys (index matches combo_family order)
+_FAMILY = ["butterworth", "bessel"]
 
 
 class FilterDialog(QDialog):
@@ -166,16 +169,35 @@ class FilterDialog(QDialog):
         self.combo_type = QComboBox()
         self.combo_type.addItems([
             self.tr("Lowpass"), self.tr("Highpass"),
-            self.tr("Bandpass"), self.tr("Bandstop")])
+            self.tr("Bandpass"), self.tr("Bandstop"),
+            self.tr("Notch"), self.tr("Peak"), self.tr("Comb")])
         self.combo_type.currentIndexChanged.connect(self._update_ui)
         fl.addWidget(self.combo_type, 0, 1, 1, 2)
 
-        fl.addWidget(QLabel(self.tr("Order:")), 1, 0)
+        self.lbl_family = QLabel(self.tr("Family:"))
+        self.combo_family = QComboBox()
+        self.combo_family.addItems([self.tr("Butterworth"), self.tr("Bessel")])
+        fl.addWidget(self.lbl_family, 1, 0)
+        fl.addWidget(self.combo_family, 1, 1, 1, 2)
+
+        self.lbl_order = QLabel(self.tr("Order:"))
         self.spin_order = QDoubleSpinBox()
         self.spin_order.setRange(1, 10)
         self.spin_order.setDecimals(0)
         self.spin_order.setValue(4)
-        fl.addWidget(self.spin_order, 1, 1, 1, 2)
+        fl.addWidget(self.lbl_order, 2, 0)
+        fl.addWidget(self.spin_order, 2, 1, 1, 2)
+
+        self.lbl_q = QLabel(self.tr("Q factor:"))
+        self.spin_q = QDoubleSpinBox()
+        self.spin_q.setRange(0.1, 1000.0)
+        self.spin_q.setDecimals(2)
+        self.spin_q.setValue(30.0)
+        self.spin_q.setToolTip(self.tr(
+            "Quality factor — higher Q = narrower bandwidth.\n"
+            "Typical: Notch/Peak 10–100, Comb 30–300."))
+        fl.addWidget(self.lbl_q, 3, 0)
+        fl.addWidget(self.spin_q, 3, 1, 1, 2)
 
         self.lbl_fc1 = QLabel(self.tr("Cutoff freq:"))
         self.edit_fc1 = QLineEdit("1 kHz")
@@ -183,18 +205,18 @@ class FilterDialog(QDialog):
             self.tr("e.g. 1kHz  200uHz  1.5MHz  0.0002"))
         self.lbl_fc1_fb = QLabel()
         self.lbl_fc1_fb.setMinimumWidth(110)
-        fl.addWidget(self.lbl_fc1, 2, 0)
-        fl.addWidget(self.edit_fc1, 2, 1)
-        fl.addWidget(self.lbl_fc1_fb, 2, 2)
+        fl.addWidget(self.lbl_fc1, 4, 0)
+        fl.addWidget(self.edit_fc1, 4, 1)
+        fl.addWidget(self.lbl_fc1_fb, 4, 2)
 
         self.lbl_fc2 = QLabel(self.tr("High cutoff:"))
         self.edit_fc2 = QLineEdit("5 kHz")
         self.edit_fc2.setPlaceholderText(self.tr("e.g. 5kHz  10MHz"))
         self.lbl_fc2_fb = QLabel()
         self.lbl_fc2_fb.setMinimumWidth(110)
-        fl.addWidget(self.lbl_fc2, 3, 0)
-        fl.addWidget(self.edit_fc2, 3, 1)
-        fl.addWidget(self.lbl_fc2_fb, 3, 2)
+        fl.addWidget(self.lbl_fc2, 5, 0)
+        fl.addWidget(self.edit_fc2, 5, 1)
+        fl.addWidget(self.lbl_fc2_fb, 5, 2)
 
         layout.addWidget(grp_filt)
 
@@ -241,10 +263,32 @@ class FilterDialog(QDialog):
             edit.setStyleSheet("")
 
     def _update_ui(self):
-        two_freqs = self.combo_type.currentIndex() in (2, 3)  # bandpass or bandstop
+        idx = self.combo_type.currentIndex()
+        is_iir_simple = idx in (4, 5, 6)   # notch / peak / comb
+        two_freqs = idx in (2, 3)           # bandpass / bandstop
+
+        # Family and Order only for polynomial filter types (0-3)
+        self.lbl_family.setVisible(not is_iir_simple)
+        self.combo_family.setVisible(not is_iir_simple)
+        self.lbl_order.setVisible(not is_iir_simple)
+        self.spin_order.setVisible(not is_iir_simple)
+
+        # Q only for notch / peak / comb
+        self.lbl_q.setVisible(is_iir_simple)
+        self.spin_q.setVisible(is_iir_simple)
+
+        # Second frequency only for band-type filters
         self.lbl_fc2.setVisible(two_freqs)
         self.edit_fc2.setVisible(two_freqs)
         self.lbl_fc2_fb.setVisible(two_freqs)
+
+        # Relabel fc1 for single-frequency IIR types
+        if is_iir_simple:
+            self.lbl_fc1.setText(self.tr("Center freq:"))
+        elif two_freqs:
+            self.lbl_fc1.setText(self.tr("Low cutoff:"))
+        else:
+            self.lbl_fc1.setText(self.tr("Cutoff freq:"))
 
     # ── Data helpers ──────────────────────────────────────────────────────────
 
@@ -273,7 +317,10 @@ class FilterDialog(QDialog):
     def _apply(self):
         names = self._selected_names()
         ftype = _FTYPE[self.combo_type.currentIndex()]
+        is_iir_simple = ftype in ("notch", "peak", "comb")
         order = int(self.spin_order.value())
+        family = _FAMILY[self.combo_family.currentIndex()]
+        Q = self.spin_q.value()
 
         fc1 = _parse_si_freq(self.edit_fc1.text())
         fc2 = _parse_si_freq(self.edit_fc2.text())
@@ -294,22 +341,67 @@ class FilterDialog(QDialog):
             sps = trace.sample_rate
             nyq = sps / 2.0
             try:
-                if ftype == "lowpass":
-                    wn = min(fc1 / nyq, 0.9999)
-                    sos = sp_signal.butter(order, wn, btype="low", output='sos')
-                    desc = f"LP {_format_si_freq(fc1)}"
-                elif ftype == "highpass":
-                    wn = min(fc1 / nyq, 0.9999)
-                    sos = sp_signal.butter(order, wn, btype="high", output='sos')
-                    desc = f"HP {_format_si_freq(fc1)}"
-                elif ftype == "bandpass":
-                    wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
-                    sos = sp_signal.butter(order, wn, btype="band", output='sos')
-                    desc = f"BP {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
-                else:  # bandstop
-                    wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
-                    sos = sp_signal.butter(order, wn, btype="bandstop", output='sos')
-                    desc = f"BS {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
+                sos = None
+
+                if is_iir_simple:
+                    # iirnotch / iirpeak / iircomb return b, a directly.
+                    # tf2sos / zpk2sos give the numerically stable SOS form.
+                    if ftype == "notch":
+                        b, a = sp_signal.iirnotch(fc1, Q, fs=sps)
+                        sos = sp_signal.tf2sos(b, a)
+                        desc = f"Notch {_format_si_freq(fc1)} Q{Q:.3g}"
+                    elif ftype == "peak":
+                        b, a = sp_signal.iirpeak(fc1, Q, fs=sps)
+                        sos = sp_signal.tf2sos(b, a)
+                        desc = f"Peak {_format_si_freq(fc1)} Q{Q:.3g}"
+                    else:  # comb
+                        # iircomb is higher-order; zpk route avoids tf2sos precision loss.
+                        b, a = sp_signal.iircomb(fc1, Q, ftype='notch', fs=sps)
+                        z, p, k = sp_signal.tf2zpk(b, a)
+                        sos = sp_signal.zpk2sos(z, p, k)
+                        desc = f"Comb {_format_si_freq(fc1)} Q{Q:.3g}"
+
+                elif family == "bessel":
+                    # Bessel with norm='mag' gives a consistent −3 dB cutoff
+                    # at the specified frequency, matching Butterworth convention.
+                    if ftype == "lowpass":
+                        wn = min(fc1 / nyq, 0.9999)
+                        sos = sp_signal.bessel(order, wn, btype="low",
+                                               output='sos', norm='mag')
+                        desc = f"BsLP {_format_si_freq(fc1)}"
+                    elif ftype == "highpass":
+                        wn = min(fc1 / nyq, 0.9999)
+                        sos = sp_signal.bessel(order, wn, btype="high",
+                                               output='sos', norm='mag')
+                        desc = f"BsHP {_format_si_freq(fc1)}"
+                    elif ftype == "bandpass":
+                        wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
+                        sos = sp_signal.bessel(order, wn, btype="band",
+                                               output='sos', norm='mag')
+                        desc = f"BsBP {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
+                    else:  # bandstop
+                        wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
+                        sos = sp_signal.bessel(order, wn, btype="bandstop",
+                                               output='sos', norm='mag')
+                        desc = f"BsBS {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
+
+                else:  # butterworth
+                    if ftype == "lowpass":
+                        wn = min(fc1 / nyq, 0.9999)
+                        sos = sp_signal.butter(order, wn, btype="low", output='sos')
+                        desc = f"LP {_format_si_freq(fc1)}"
+                    elif ftype == "highpass":
+                        wn = min(fc1 / nyq, 0.9999)
+                        sos = sp_signal.butter(order, wn, btype="high", output='sos')
+                        desc = f"HP {_format_si_freq(fc1)}"
+                    elif ftype == "bandpass":
+                        wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
+                        sos = sp_signal.butter(order, wn, btype="band", output='sos')
+                        desc = f"BP {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
+                    else:  # bandstop
+                        wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
+                        sos = sp_signal.butter(order, wn, btype="bandstop", output='sos')
+                        desc = f"BS {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
 
                 # sosfiltfilt is numerically stable at extreme frequency ratios.
                 # The old b,a form loses precision when wn << 1 (e.g. µHz-range

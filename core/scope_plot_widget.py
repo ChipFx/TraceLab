@@ -1931,15 +1931,18 @@ class ScopePlotWidget(QWidget):
         self._refresh_overlay_visuals()
 
     def set_mode(self, mode: str):
+        # Snapshot the current x window before switching so the new mode
+        # inherits it — split and overlay use independent PlotItems.
+        _x0, _x1 = self.get_current_view_range()
         self._mode = mode
         if mode == "overlay":
             self._scroll.hide()
             self._overlay_widget.show()
-            self._rebuild_overlay()
+            self._rebuild_overlay(inherit_x=(_x0, _x1))
         else:
             self._overlay_widget.hide()
             self._scroll.show()
-            self._rebuild_split()
+            self._rebuild_split(inherit_x=(_x0, _x1))
 
     def get_cursor_placement_x(self, cursor_id: int) -> float:
         x0, x1 = self.get_current_view_range()
@@ -2185,7 +2188,7 @@ class ScopePlotWidget(QWidget):
         else:
             self._rebuild_overlay()
 
-    def _rebuild_split(self):
+    def _rebuild_split(self, inherit_x=None):
         for lane in self._lanes.values():
             lane.hide()          # must hide BEFORE setParent(None) or it flashes as a top-level window
             lane.setParent(None)
@@ -2235,6 +2238,14 @@ class ScopePlotWidget(QWidget):
             # geometry and view range set via layout, avoiding zombie curves
             # that would result from calling refresh_curve() before addWidget.
             QTimer.singleShot(0, lane.refresh_curve)
+
+        # Apply inherited x range to the x-link master; all linked lanes follow.
+        # setXRange is synchronous so it takes effect before the deferred
+        # refresh_curve() calls run on the next event loop iteration.
+        if inherit_x is not None and first_lane is not None:
+            x0, x1 = inherit_x
+            if x1 > x0:
+                first_lane.getPlotItem().setXRange(x0, x1, padding=0)
 
         for cid, t_pos in self._cursors.items():
             if t_pos is not None:
@@ -2402,7 +2413,7 @@ class ScopePlotWidget(QWidget):
         self._update_overlay_legend_items()
         self._range_timer.start()
 
-    def _rebuild_overlay(self):
+    def _rebuild_overlay(self, inherit_x=None):
         pi = self._overlay_widget.getPlotItem()
         saved_view = pi.viewRange()
         had_items = bool(self._overlay_visuals)
@@ -2413,8 +2424,16 @@ class ScopePlotWidget(QWidget):
         visible = [t for t in self.traces if t.visible]
         self._overlay_z_order = [t.name for t in visible]
 
-        vr = pi.viewRange()
-        x0, x1 = vr[0]
+        # Decide the x range to use for initial curve renders.
+        # inherit_x (from a mode switch) takes priority; fall back to the
+        # overlay's own saved range when just rebuilding within overlay mode.
+        if inherit_x is not None and inherit_x[1] > inherit_x[0]:
+            x0, x1 = inherit_x
+        elif had_items:
+            x0, x1 = saved_view[0][0], saved_view[0][1]
+        else:
+            vr = pi.viewRange()
+            x0, x1 = vr[0]
 
         # Update Y-axis unit from first visible trace with a real unit
         unit = next((t.unit for t in visible
@@ -2433,7 +2452,11 @@ class ScopePlotWidget(QWidget):
             visual.refresh_curve((x0, x1))
             self._overlay_visuals[trace.name] = visual
 
-        if had_items:
+        if inherit_x is not None and inherit_x[1] > inherit_x[0]:
+            pi.setXRange(inherit_x[0], inherit_x[1], padding=0)
+            if self.y_lock_auto:
+                pi.enableAutoRange(axis="y")
+        elif had_items:
             pi.setXRange(saved_view[0][0], saved_view[0][1], padding=0)
             if self.y_lock_auto:
                 pi.enableAutoRange(axis="y")

@@ -220,14 +220,27 @@ class FilterDialog(QDialog):
 
         layout.addWidget(grp_filt)
 
+        # Comb filter cost warning — shown when filter order × data length is large
+        self._lbl_comb_warn = QLabel()
+        self._lbl_comb_warn.setStyleSheet(
+            "color: #ffcc44; background: #2a1e00; font-size: 9pt; "
+            "padding: 5px 8px; border: 1px solid #665500; border-radius: 3px;")
+        self._lbl_comb_warn.setWordWrap(True)
+        self._lbl_comb_warn.setVisible(False)
+        layout.addWidget(self._lbl_comb_warn)
+
         self.edit_fc1.textChanged.connect(
             lambda: self._update_fb(self.edit_fc1, self.lbl_fc1_fb))
         self.edit_fc2.textChanged.connect(
             lambda: self._update_fb(self.edit_fc2, self.lbl_fc2_fb))
+        self.combo_type.currentIndexChanged.connect(self._update_comb_warn)
+        self.edit_fc1.textChanged.connect(lambda: self._update_comb_warn())
+        self.trace_list.itemSelectionChanged.connect(self._update_comb_warn)
 
         self._update_ui()
         self._update_fb(self.edit_fc1, self.lbl_fc1_fb)
         self._update_fb(self.edit_fc2, self.lbl_fc2_fb)
+        self._update_comb_warn()
 
         btn_layout = QHBoxLayout()
         btn_clear = QPushButton(self.tr("Clear Filters on Selected"))
@@ -289,6 +302,55 @@ class FilterDialog(QDialog):
             self.lbl_fc1.setText(self.tr("Low cutoff:"))
         else:
             self.lbl_fc1.setText(self.tr("Cutoff freq:"))
+
+    def _update_comb_warn(self):
+        """Show a warning when the comb filter order × data length will be expensive."""
+        if _FTYPE[self.combo_type.currentIndex()] != "comb":
+            self._lbl_comb_warn.setVisible(False)
+            return
+        fc1 = _parse_si_freq(self.edit_fc1.text())
+        if fc1 is None or fc1 <= 0:
+            self._lbl_comb_warn.setVisible(False)
+            return
+
+        names = self._selected_names()
+        worst_cost = 0
+        worst_order = 0
+        worst_n = 0
+        for t in self.traces:
+            if names and t.name not in names:
+                continue
+            sps = getattr(t, 'sample_rate', None)
+            if not sps or sps <= 0:
+                continue
+            data = getattr(t, 'processed_data', None)
+            n = len(data) if data is not None else 0
+            order = round(sps / fc1)
+            cost = n * order
+            if cost > worst_cost:
+                worst_cost = cost
+                worst_order = order
+                worst_n = n
+
+        # Warn when convolution work is large enough to feel slow (empirically ~1 s+)
+        if worst_order > 100 and worst_cost > 10_000_000:
+            if worst_cost > 200_000_000:
+                severity = self.tr("may take 10+ seconds")
+            else:
+                severity = self.tr("may take a few seconds")
+            self._lbl_comb_warn.setText(
+                self.tr(
+                    "\u26a0\u2002 Comb at {fc}: filter order \u223c{order:,}"
+                    " \u00d7 {n:,} samples \u2014 {sev}."
+                ).format(
+                    fc=_format_si_freq(fc1),
+                    order=worst_order,
+                    n=worst_n,
+                    sev=severity,
+                ))
+            self._lbl_comb_warn.setVisible(True)
+        else:
+            self._lbl_comb_warn.setVisible(False)
 
     # ── Data helpers ──────────────────────────────────────────────────────────
 

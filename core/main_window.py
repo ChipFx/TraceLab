@@ -2266,8 +2266,9 @@ class MainWindow(QMainWindow):
                          fft_min_freq=self._fft_min_freq,
                          settings=self._settings, parent=self)
         dlg.exec()
-        self._fft_min_freq = dlg.spin_min_freq.value()
+        self._fft_min_freq = dlg.min_freq_hz
         self._settings["fft_min_freq"] = self._fft_min_freq
+        self._settings["fft_max_freq"] = dlg.max_freq_hz
 
     def _show_filter(self):
         if not self._traces:

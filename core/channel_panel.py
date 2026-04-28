@@ -332,7 +332,7 @@ class ChannelPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(170)
-        self.setMaximumWidth(270)
+        self.setMaximumWidth(405)
         self._rows: Dict[str, ChannelRow] = {}   # name -> ChannelRow
         self._trace_order: List[str] = []        # names in display order
         self._group_rows: Dict[str, List[str]] = {}     # group -> [trace names]
@@ -403,6 +403,9 @@ class ChannelPanel(QWidget):
         layout.addLayout(ctrl3)
 
         self.set_font_scale(1.0)  # apply default inline styles
+        # Defer initial minimum-width check until the widget has been laid out
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self._update_minimum_width)
 
     def _insert_group_header(self, group: str, at_row: int):
         """Insert a non-draggable group header item at the given list row."""
@@ -438,6 +441,18 @@ class ChannelPanel(QWidget):
         self._btn_cub.setStyleSheet(f"font-size: {fs}px; color: #cc88ff;")
         self._btn_sinc.setStyleSheet(f"font-size: {fs}px; color: #ff8888;")
         self._btn_group.setStyleSheet(f"font-size: {fs}px;")
+        self._update_minimum_width()
+
+    def _update_minimum_width(self):
+        """Expand the panel if the interp buttons don't fit. Nothing else."""
+        for btn in (self._btn_lin, self._btn_cub, self._btn_sinc):
+            btn.ensurePolished()
+        # ctrl2 layout: 4px left margin + 3px spacing × 2 + 4px right margin = 14
+        needed = (self._btn_lin.sizeHint().width()
+                  + self._btn_cub.sizeHint().width()
+                  + self._btn_sinc.sizeHint().width()
+                  + 14)
+        self.setMinimumWidth(needed)
 
     def add_trace(self, trace: TraceModel):
         if trace.name in self._rows:

@@ -2637,23 +2637,26 @@ class MainWindow(QMainWindow):
         from PyQt6.QtGui import QFont
         app = QApplication.instance()
         base_size = 10  # pt
+        pt = max(7, int(base_size * scale))
         f = QFont()
-        f.setPointSize(max(7, int(base_size * scale)))
+        f.setPointSize(pt)
         app.setFont(f)
+        # Class-specific override — takes priority over the app-wide font for
+        # QMenuBar instances even when the native style ignores app.setFont().
+        app.setFont(f, "QMenuBar")
         # Re-apply stylesheet with scaled font-size
         app.setStyleSheet(self.theme.get_stylesheet(font_scale=scale))
         # On Windows, QWindowsVistaStyle draws QMenuBar resting-state items via
-        # GDI/uxtheme which completely ignores Qt font settings and stylesheets
-        # (hover states happen to be Qt-drawn, so those scale — that's the
-        # asymmetry the user sees). The only reliable fix is to make the menu bar
-        # use the Fusion style, which is fully Qt-drawn and respects all Qt fonts.
-        # We do this once; subsequent scale changes are handled by setFont alone.
+        # GDI/uxtheme which ignores Qt font settings. Force Fusion style (fully
+        # Qt-drawn) every scale change, then set both font and inline stylesheet
+        # so the layout recalculates the item height.
         mb = self.menuBar()
-        if mb.style().objectName().lower() != "fusion":
-            fusion = QStyleFactory.create("Fusion")
-            if fusion:
-                mb.setStyle(fusion)
+        fusion = QStyleFactory.create("Fusion")
+        if fusion:
+            mb.setStyle(fusion)
         mb.setFont(f)
+        mb.setStyleSheet(f"font-size: {pt}pt;")
+        mb.update()
         # Propagate to panels that use inline stylesheets
         if hasattr(self, '_channel_panel'):
             self._channel_panel.set_font_scale(scale)

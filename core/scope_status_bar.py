@@ -39,51 +39,79 @@ def _sep_widget(color: str = "#1e1e38") -> QFrame:
 class LogoBlock(QWidget):
     def __init__(self, palette: dict, parent=None):
         super().__init__(parent)
-        self._pal     = palette
-        self._pixmap  = None
-        self._logo_w  = 200
-        self.setFixedSize(self._logo_w, BAR_H)
+        self._pal        = palette
+        self._pixmap     = None
+        self._base_logo_w = 200   # unscaled width; set from SVG aspect ratio
+        self._svg_path   = ""
+        self._scale      = 1.0
+        self.setFixedSize(self._base_logo_w, BAR_H)
 
-    def set_svg(self, svg_path: str):
+    def _render_svg(self):
+        """(Re)render the stored SVG pixmap at the current scale."""
+        if not self._svg_path:
+            self._pixmap = None
+            return
         try:
             from PyQt6.QtSvg import QSvgRenderer
-            renderer = QSvgRenderer(svg_path)
+            renderer = QSvgRenderer(self._svg_path)
             if not renderer.isValid():
-                self._pixmap = None; self.update(); return
+                self._pixmap = None
+                return
             vb = renderer.viewBox()
             if vb.width() > 0 and vb.height() > 0:
-                self._logo_w = max(80, min(400, int(BAR_H * vb.width() / vb.height())))
-            self.setFixedWidth(self._logo_w)
-            px = QPixmap(self._logo_w, BAR_H)
+                self._base_logo_w = max(80, min(400,
+                    int(BAR_H * vb.width() / vb.height())))
+            scaled_h = max(55, int(BAR_H * self._scale))
+            scaled_w = max(60, int(self._base_logo_w * self._scale))
+            self.setFixedSize(scaled_w, scaled_h)
+            px = QPixmap(scaled_w, scaled_h)
             px.fill(QColor(self._pal.get("logo_bg", "#060610")))
             p = QPainter(px)
-            renderer.render(p, QRectF(0, 0, self._logo_w, BAR_H))
+            renderer.render(p, QRectF(0, 0, scaled_w, scaled_h))
             p.end()
             self._pixmap = px
         except Exception:
             self._pixmap = None
+
+    def set_svg(self, svg_path: str):
+        self._svg_path = svg_path
+        self._render_svg()
+        self.update()
+
+    def set_scale(self, scale: float):
+        self._scale = max(0.5, float(scale))
+        if self._svg_path:
+            self._render_svg()   # re-render SVG at new dimensions
+        else:
+            new_h = max(55, int(BAR_H * self._scale))
+            new_w = max(60, int(self._base_logo_w * self._scale))
+            self.setFixedSize(new_w, new_h)
         self.update()
 
     def set_palette(self, palette: dict):
         self._pal = palette
-        self._pixmap = None   # will redraw as text
+        if self._svg_path:
+            self._render_svg()   # re-render with new bg colour
+        else:
+            self._pixmap = None
         self.update()
 
     def paintEvent(self, event):
+        s = self._scale
         p = QPainter(self)
         w, h = self.width(), self.height()
         p.fillRect(0, 0, w, h, QColor(self._pal.get("logo_bg", "#060610")))
         if self._pixmap:
             p.drawPixmap(0, 0, self._pixmap)
         else:
-            f1 = QFont("Courier New", 14); f1.setBold(True)
+            f1 = QFont("Courier New", max(7, int(14 * s))); f1.setBold(True)
             p.setFont(f1)
             p.setPen(QPen(QColor(self._pal.get("logo_text", "#F0C040"))))
-            p.drawText(8, 38, "TraceLab")
-            f2 = QFont("Courier New", 9)
+            p.drawText(int(8*s), int(38*s), "TraceLab")
+            f2 = QFont("Courier New", max(6, int(9 * s)))
             p.setFont(f2)
             p.setPen(QPen(QColor(self._pal.get("logo_sub", "#555577"))))
-            p.drawText(10, 58, "by ChipFX")
+            p.drawText(int(10*s), int(58*s), "by ChipFX")
         p.end()
 
 
@@ -94,46 +122,55 @@ class TimeTrigBlock(QWidget):
         self._pal      = palette
         self._tdiv_txt = "---"
         self._trig_txt = "---"
+        self._scale    = 1.0
         self.setFixedSize(INFO_W, BAR_H)
 
     def set_tdiv(self, t: str):  self._tdiv_txt = t; self.update()
     def set_trig(self, t: str):  self._trig_txt = t or "---"; self.update()
     def set_palette(self, p: dict): self._pal = p; self.update()
 
+    def set_scale(self, scale: float):
+        self._scale = max(0.5, float(scale))
+        new_h = max(55, int(BAR_H * self._scale))
+        new_w = max(60, int(INFO_W * self._scale))
+        self.setFixedSize(new_w, new_h)
+        self.update()
+
     def paintEvent(self, event):
+        s = self._scale
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         w, h = self.width(), self.height()
         p.fillRect(0, 0, w, h, QColor(self._pal.get("info_bg", "#141428")))
 
-        f_dim  = QFont("Courier New", 7)
-        f_val  = QFont("Courier New", 11); f_val.setBold(True)
-        f_trig = QFont("Courier New", 9);  f_trig.setBold(True)
+        f_dim  = QFont("Courier New", max(5, int(7 * s)))
+        f_val  = QFont("Courier New", max(6, int(11 * s))); f_val.setBold(True)
+        f_trig = QFont("Courier New", max(6, int(9 * s)));  f_trig.setBold(True)
 
         p.setFont(f_dim)
         p.setPen(QPen(QColor(self._pal.get("info_dim", "#555577"))))
-        p.drawText(6, 16, "TIME BASE")
+        p.drawText(int(6*s), int(16*s), "TIME BASE")
 
         p.setFont(f_val)
         p.setPen(QPen(QColor(self._pal.get("info_text", "#d0d0e8"))))
-        p.drawText(6, 38, self._tdiv_txt)
+        p.drawText(int(6*s), int(38*s), self._tdiv_txt)
 
         p.setPen(QPen(QColor(self._pal.get("sep", "#1e1e38")), 1))
-        p.drawLine(6, 50, w - 6, 50)
+        p.drawLine(int(6*s), int(50*s), w - int(6*s), int(50*s))
 
         p.setFont(f_dim)
         p.setPen(QPen(QColor(self._pal.get("info_dim", "#555577"))))
-        p.drawText(6, 64, "TRIGGER")
+        p.drawText(int(6*s), int(64*s), "TRIGGER")
 
         p.setFont(f_trig)
         p.setPen(QPen(QColor(self._pal.get("trig_text", "#44ee66"))))
         txt = self._trig_txt
         if len(txt) > 15:
             mid = txt.rfind(' ', 0, 15) or 15
-            p.drawText(6, 82, txt[:mid])
-            p.drawText(6, 98, txt[mid:].strip())
+            p.drawText(int(6*s), int(82*s), txt[:mid])
+            p.drawText(int(6*s), int(98*s), txt[mid:].strip())
         else:
-            p.drawText(6, 82, txt)
+            p.drawText(int(6*s), int(82*s), txt)
         p.end()
 
 
@@ -148,6 +185,7 @@ class ScopeStatusBar(QWidget):
         self._trace_interp_modes: dict = {}
         self._svg_path: str = ""
         self._ch_blocks: list = []
+        self._current_scale: float = 1.0
 
         self.setFixedHeight(BAR_H)
         self._apply_style()
@@ -196,6 +234,17 @@ class ScopeStatusBar(QWidget):
             f"QScrollBar:horizontal{{height:5px;background:{bg};}}"
             f"QScrollBar::handle:horizontal{{background:{sep};border-radius:2px;}}")
         self._ch_container.setStyleSheet(f"background:{bg};")
+
+    def set_scale(self, scale: float):
+        """Resize the entire status bar and all sub-blocks to *scale*."""
+        self._current_scale = max(0.5, float(scale))
+        new_h = max(55, int(BAR_H * self._current_scale))
+        self.setFixedHeight(new_h)
+        self._ch_scroll.setFixedHeight(new_h)
+        self._logo.set_scale(self._current_scale)
+        self._timetrig.set_scale(self._current_scale)
+        for block in self._ch_blocks:
+            block.set_scale(self._current_scale)
 
     def set_palette(self, palette: dict):
         """Called by main_window when theme changes."""
@@ -287,12 +336,17 @@ class ScopeStatusBar(QWidget):
         y_major_divs = y_major_divs or {}
         visible = [t for t in traces if t.visible]
 
+        s = self._current_scale
+        scaled_bw = max(60, int(BLOCK_W * s))
+        scaled_bh = max(55, int(BLOCK_H * s))
+
         for trace in visible:
             y_div = y_major_divs.get(trace.name, 0.0)
             mode  = self._trace_interp_modes.get(trace.name, "linear")
             block = ChannelStatusBlock(
                 trace, y_div, mode, self._pal,
                 parent=self._ch_container)
+            block.set_scale(s)
             block.toggle_interp.connect(self.toggle_trace_interp)
             block.context_menu_requested.connect(self.trace_context_menu_requested)
             self._ch_blocks.append(block)
@@ -300,9 +354,9 @@ class ScopeStatusBar(QWidget):
             block.show()
 
         n = len(visible)
-        w = n * (BLOCK_W + SEP_W) + 4 if n > 0 else 0
+        w = n * (scaled_bw + SEP_W) + 4 if n > 0 else 0
         self._ch_container.setFixedWidth(w)
-        self._ch_container.setFixedHeight(BAR_H)
+        self._ch_container.setFixedHeight(scaled_bh)
 
     def repaint_channel_blocks(self):
         """Repaint all channel status blocks without rebuilding them.

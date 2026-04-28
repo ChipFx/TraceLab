@@ -371,8 +371,6 @@ class ChannelPanel(QWidget):
         ctrl.setSpacing(3)
         btn_all  = QPushButton("All")
         btn_none = QPushButton("None")
-        btn_all.setFixedHeight(22)
-        btn_none.setFixedHeight(22)
         btn_all.clicked.connect(lambda: self._set_all_visible(True))
         btn_none.clicked.connect(lambda: self._set_all_visible(False))
         ctrl.addWidget(btn_all)
@@ -382,35 +380,29 @@ class ChannelPanel(QWidget):
         ctrl2 = QHBoxLayout()
         ctrl2.setContentsMargins(4, 0, 4, 4)
         ctrl2.setSpacing(3)
-        btn_lin  = QPushButton("All Lin")
-        btn_cub  = QPushButton("All Cub")
-        btn_sinc = QPushButton("All Sinc")
-        btn_lin.setFixedHeight(20)
-        btn_cub.setFixedHeight(20)
-        btn_sinc.setFixedHeight(20)
-        btn_lin.setToolTip("Set all channels to Linear interpolation")
-        btn_cub.setToolTip("Set all channels to Cubic Spline interpolation")
-        btn_sinc.setToolTip("Set all channels to Sinc (sin(x)/x) interpolation")
-        btn_lin.setStyleSheet("font-size: 9px;")
-        btn_cub.setStyleSheet("font-size: 9px; color: #cc88ff;")
-        btn_sinc.setStyleSheet("font-size: 9px; color: #ff8888;")
-        btn_lin.clicked.connect(lambda: self._set_all_interp("linear"))
-        btn_cub.clicked.connect(lambda: self._set_all_interp("cubic"))
-        btn_sinc.clicked.connect(lambda: self._set_all_interp("sinc"))
-        ctrl2.addWidget(btn_lin)
-        ctrl2.addWidget(btn_cub)
-        ctrl2.addWidget(btn_sinc)
+        self._btn_lin  = QPushButton("All Lin")
+        self._btn_cub  = QPushButton("All Cub")
+        self._btn_sinc = QPushButton("All Sinc")
+        self._btn_lin.setToolTip("Set all channels to Linear interpolation")
+        self._btn_cub.setToolTip("Set all channels to Cubic Spline interpolation")
+        self._btn_sinc.setToolTip("Set all channels to Sinc (sin(x)/x) interpolation")
+        self._btn_lin.clicked.connect(lambda: self._set_all_interp("linear"))
+        self._btn_cub.clicked.connect(lambda: self._set_all_interp("cubic"))
+        self._btn_sinc.clicked.connect(lambda: self._set_all_interp("sinc"))
+        ctrl2.addWidget(self._btn_lin)
+        ctrl2.addWidget(self._btn_cub)
+        ctrl2.addWidget(self._btn_sinc)
         layout.addLayout(ctrl2)
 
         ctrl3 = QHBoxLayout()
         ctrl3.setContentsMargins(4, 0, 4, 4)
-        btn_group = QPushButton("Group…")
-        btn_group.setFixedHeight(20)
-        btn_group.setToolTip("Group channels by unit or name pattern")
-        btn_group.setStyleSheet("font-size: 9px;")
-        btn_group.clicked.connect(self._open_grouping_dialog)
-        ctrl3.addWidget(btn_group)
+        self._btn_group = QPushButton("Group…")
+        self._btn_group.setToolTip("Group channels by unit or name pattern")
+        self._btn_group.clicked.connect(self._open_grouping_dialog)
+        ctrl3.addWidget(self._btn_group)
         layout.addLayout(ctrl3)
+
+        self.set_font_scale(1.0)  # apply default inline styles
 
     def _insert_group_header(self, group: str, at_row: int):
         """Insert a non-draggable group header item at the given list row."""
@@ -438,6 +430,14 @@ class ChannelPanel(QWidget):
             if it and it.data(Qt.ItemDataRole.UserRole) in members:
                 last = i
         return last + 1 if last >= 0 else self._list.count()
+
+    def set_font_scale(self, scale: float):
+        """Apply 90%-of-global font size to the secondary/small buttons."""
+        fs = max(8, int(round(11 * scale * 0.9)))
+        self._btn_lin.setStyleSheet(f"font-size: {fs}px;")
+        self._btn_cub.setStyleSheet(f"font-size: {fs}px; color: #cc88ff;")
+        self._btn_sinc.setStyleSheet(f"font-size: {fs}px; color: #ff8888;")
+        self._btn_group.setStyleSheet(f"font-size: {fs}px;")
 
     def add_trace(self, trace: TraceModel):
         if trace.name in self._rows:

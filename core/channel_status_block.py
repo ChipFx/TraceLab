@@ -65,6 +65,7 @@ class ChannelStatusBlock(QWidget):
         self._y_major_div = y_major_div
         self._interp_mode = interp_mode
         self._pal         = palette or {}
+        self._scale       = 1.0
         self.setFixedSize(BLOCK_W, BLOCK_H)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         mode_lbl = {"linear": "Linear", "sinc": "Sinc (sin(x)/x)",
@@ -90,6 +91,14 @@ class ChannelStatusBlock(QWidget):
             "QToolTip { color: #f0f0f0; background-color: #1e1e1e; "
             "border: 1px solid #555555; padding: 3px 6px; }"
         )
+
+    def set_scale(self, scale: float):
+        """Resize this block and trigger a repaint for the new scale."""
+        self._scale = max(0.5, float(scale))
+        w = max(60, int(BLOCK_W * self._scale))
+        h = max(55, int(BLOCK_H * self._scale))
+        self.setFixedSize(w, h)
+        self.update()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
@@ -127,11 +136,13 @@ class ChannelStatusBlock(QWidget):
                 fill_c    = QColor("#ffffff")
                 outline_c = QColor("#000000")
 
+        s = self._scale
+
         # ── Row 1: channel name (larger, bolder) ──────────────────────────
-        f_name = QFont("Courier New", 13)   # was 11
+        f_name = QFont("Courier New", max(6, int(13 * s)))
         f_name.setBold(True)
-        _outlined_text(painter, 5, 28, self._trace.label,
-                        f_name, fill_c, outline_c, 1.2)  # outline was 1.5
+        _outlined_text(painter, int(5*s), int(28*s), self._trace.label,
+                        f_name, fill_c, outline_c, 1.2)
 
         # ── SINC/LIN/CUB badge (top-right corner) ────────────────────────
         badge_map = {"sinc": ("SINC", "#cc2222"), "cubic": ("CUB", "#8822cc")}
@@ -139,54 +150,54 @@ class ChannelStatusBlock(QWidget):
             self._interp_mode, ("LIN", None))
         badge_bg = QColor(badge_col) if badge_col else QColor(0, 0, 0, 70)
         badge_fg = QColor("#ffffff")
-        f_badge  = QFont("Courier New", 7)
+        f_badge  = QFont("Courier New", max(5, int(7 * s)))
         f_badge.setBold(True)
         fm = QFontMetrics(f_badge)
-        bw = fm.horizontalAdvance(badge_txt) + 8
-        bh = 14
-        bx = w - bw - 4
-        by = 4
+        bw = fm.horizontalAdvance(badge_txt) + int(8 * s)
+        bh = int(14 * s)
+        bx = w - bw - int(4 * s)
+        by = int(4 * s)
         painter.setBrush(QBrush(badge_bg))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(bx, by, bw, bh, 2, 2)
         painter.setFont(f_badge)
         painter.setPen(QPen(badge_fg))
-        painter.drawText(bx + 4, by + bh - 2, badge_txt)
+        painter.drawText(bx + int(4*s), by + bh - 2, badge_txt)
 
         # ── APERIODIC warning badge (bottom-right) ───────────────────────
         if (getattr(self._trace, 'period_estimation_attempted', False)
                 and getattr(self._trace, 'period_estimate', 0.0) == 0.0):
             ap_txt = "APERIODIC"
-            f_ap   = QFont("Courier New", 7)
+            f_ap   = QFont("Courier New", max(5, int(7 * s)))
             f_ap.setBold(True)
             fm_ap  = QFontMetrics(f_ap)
-            aw = fm_ap.horizontalAdvance(ap_txt) + 8
-            ah = 14
-            ax = w - aw - 4
-            ay = h - ah - 4
+            aw = fm_ap.horizontalAdvance(ap_txt) + int(8 * s)
+            ah = int(14 * s)
+            ax = w - aw - int(4 * s)
+            ay = h - ah - int(4 * s)
             painter.setBrush(QBrush(QColor("#cc7700")))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(ax, ay, aw, ah, 2, 2)
             painter.setFont(f_ap)
             painter.setPen(QPen(QColor("#ffffff")))
-            painter.drawText(ax + 4, ay + ah - 2, ap_txt)
+            painter.drawText(ax + int(4*s), ay + ah - 2, ap_txt)
 
         # ── EXTRAP badge (bottom-left) ────────────────────────────────────
         if getattr(self._trace, 'retrigger_extrapolating', False):
             ex_txt = "EXTRAP"
-            f_ex   = QFont("Courier New", 7)
+            f_ex   = QFont("Courier New", max(5, int(7 * s)))
             f_ex.setBold(True)
             fm_ex  = QFontMetrics(f_ex)
-            ew = fm_ex.horizontalAdvance(ex_txt) + 8
-            eh = 14
-            ex = 4
-            ey = h - eh - 4
+            ew = fm_ex.horizontalAdvance(ex_txt) + int(8 * s)
+            eh = int(14 * s)
+            ex = int(4 * s)
+            ey = h - eh - int(4 * s)
             painter.setBrush(QBrush(QColor("#006699")))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(ex, ey, ew, eh, 2, 2)
             painter.setFont(f_ex)
             painter.setPen(QPen(QColor("#ffffff")))
-            painter.drawText(ex + 4, ey + eh - 2, ex_txt)
+            painter.drawText(ex + int(4*s), ey + eh - 2, ex_txt)
 
         # ── Row 2: V/div (actual major tick spacing) ─────────────────────
         unit = getattr(self._trace, 'unit', '') or ''
@@ -194,10 +205,10 @@ class ChannelStatusBlock(QWidget):
             vdiv_txt = _eng(self._y_major_div, unit) + "/div"
         else:
             vdiv_txt = "---/div"
-        f_vdiv = QFont("Courier New", 11)   # was 9
+        f_vdiv = QFont("Courier New", max(6, int(11 * s)))
         f_vdiv.setBold(True)
-        _outlined_text(painter, 5, 58, vdiv_txt,
-                        f_vdiv, fill_c, outline_c, 1.0)  # outline was 1.0
+        _outlined_text(painter, int(5*s), int(58*s), vdiv_txt,
+                        f_vdiv, fill_c, outline_c, 1.0)
 
         # ── Row 3: filter / coupling info (larger, outlined) ─────────────
         filt     = getattr(self._trace, '_filter_desc', '') or ''
@@ -206,19 +217,19 @@ class ChannelStatusBlock(QWidget):
         extra    = "  ".join(p for p in [coupling, imp, filt] if p)
         if extra:
             filt_c = QColor(self._pal.get("filt_text", "#ffcc66"))
-            f_extra = QFont("Courier New", 10)   # was 8, plain
+            f_extra = QFont("Courier New", max(6, int(10 * s)))
             f_extra.setBold(True)
-            _outlined_text(painter, 5, 84, extra,
+            _outlined_text(painter, int(5*s), int(84*s), extra,
                             f_extra, filt_c, outline_c, 0.8)
 
         # ── Left colour bar ───────────────────────────────────────────────
         bar_c = QColor(self._pal.get("ch_bar", self._trace.color))
         painter.setBrush(QBrush(bar_c))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRect(0, 0, 5, h)
+        painter.drawRect(0, 0, int(5*s), h)
 
         # ── Bottom border ─────────────────────────────────────────────────
-        painter.setPen(QPen(bar_c, 3))
+        painter.setPen(QPen(bar_c, max(1, int(3*s))))
         painter.drawLine(0, h - 2, w, h - 2)
 
         painter.end()

@@ -196,56 +196,39 @@ class TriggerPanel(QWidget):
         layout.addWidget(self.btn_retrigger_update)
 
         self.lbl_status = QLabel("No trigger set")
-        self.lbl_status.setStyleSheet(
-            "color: #888; font-size: 9px; padding: 2px;")
         self.lbl_status.setWordWrap(True)
         layout.addWidget(self.lbl_status)
 
         # ── Quick set-t=0 row (label + 4 buttons on one line) ────────────
-        _btn_style = (
-            "QPushButton { padding: 2px 5px; border: 1px solid #555; "
-            "border-radius: 3px; font-size: 11px; } "
-            "QPushButton:hover { border-color: #888; } "
-            "QPushButton:disabled { color: #444; border-color: #333; }")
-        _btn_restore_style = (
-            "QPushButton { padding: 2px 5px; border: 1px solid #446; "
-            "border-radius: 3px; font-size: 11px; color: #aac; } "
-            "QPushButton:hover { border-color: #88c; color: #ccf; } "
-            "QPushButton:disabled { color: #333; border-color: #333; }")
-
         t0_row = QHBoxLayout()
         t0_row.setSpacing(3)
 
-        t0_lbl = QLabel("Set t|0:")
-        t0_lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold;")
-        t0_row.addWidget(t0_lbl)
+        self._t0_lbl = QLabel("Set t|0:")
+        self._t0_lbl.setStyleSheet("font-weight: bold;")
+        t0_row.addWidget(self._t0_lbl)
 
         self.btn_t0_first = QPushButton("→")
         self.btn_t0_first.setToolTip(
             "Set first dataset sample to t=0\n"
             "(full dataset, current zoom unchanged)")
-        self.btn_t0_first.setStyleSheet(_btn_style)
         self.btn_t0_first.clicked.connect(self._set_t0_first)
 
         self.btn_t0_mid = QPushButton("|")
         self.btn_t0_mid.setToolTip(
             "Set dataset midpoint to t=0\n"
             "(full dataset, current zoom unchanged)")
-        self.btn_t0_mid.setStyleSheet(_btn_style)
         self.btn_t0_mid.clicked.connect(self._set_t0_middle)
 
         self.btn_t0_last = QPushButton("←")
         self.btn_t0_last.setToolTip(
             "Set last dataset sample to t=0\n"
             "(full dataset, current zoom unchanged)")
-        self.btn_t0_last.setStyleSheet(_btn_style)
         self.btn_t0_last.clicked.connect(self._set_t0_last)
 
         self.btn_t0_restore = QPushButton("=")
         self.btn_t0_restore.setToolTip(
             "Restore original t=0 from import\n"
             "(undoes all Set t=0 actions)")
-        self.btn_t0_restore.setStyleSheet(_btn_restore_style)
         self.btn_t0_restore.clicked.connect(self._set_t0_original)
 
         t0_row.addWidget(self.btn_t0_first)
@@ -255,6 +238,33 @@ class TriggerPanel(QWidget):
         layout.addLayout(t0_row)
 
         layout.addStretch()
+
+        self.set_font_scale(1.0)  # apply default inline styles
+
+    def set_font_scale(self, scale: float):
+        """Apply 90%-of-global font size to secondary labels and t=0 buttons."""
+        fs     = max(8, int(round(11 * scale * 0.9)))   # 90% rule
+        fs_btn = max(8, int(round(11 * scale)))          # same as global for t=0 buttons
+
+        self.lbl_status.setStyleSheet(
+            f"color: #888; font-size: {fs}px; padding: 2px;")
+        self._t0_lbl.setStyleSheet(
+            f"color: #888; font-size: {fs}px; font-weight: bold;")
+
+        _btn = (
+            f"QPushButton {{ padding: 2px 5px; border: 1px solid #555; "
+            f"border-radius: 3px; font-size: {fs_btn}px; }} "
+            f"QPushButton:hover {{ border-color: #888; }} "
+            f"QPushButton:disabled {{ color: #444; border-color: #333; }}")
+        _btn_restore = (
+            f"QPushButton {{ padding: 2px 5px; border: 1px solid #446; "
+            f"border-radius: 3px; font-size: {fs_btn}px; color: #aac; }} "
+            f"QPushButton:hover {{ border-color: #88c; color: #ccf; }} "
+            f"QPushButton:disabled {{ color: #333; border-color: #333; }}")
+
+        for b in (self.btn_t0_first, self.btn_t0_mid, self.btn_t0_last):
+            b.setStyleSheet(_btn)
+        self.btn_t0_restore.setStyleSheet(_btn_restore)
 
     def _on_search_direction_changed(self, is_forward: bool):
         if is_forward:

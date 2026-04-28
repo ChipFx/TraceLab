@@ -383,6 +383,8 @@ class MainWindow(QMainWindow):
         # Apply saved font scale
         if "font_scale" in self._settings:
             self._apply_font_scale(self._settings["font_scale"])
+        # Apply saved status bar scale
+        self._scope_status.set_scale(self._settings.get("status_bar_scale", 1.0))
         # Restore last view mode
         self._set_display_mode(self._display_mode, save=False)
         # Set branding on status bar
@@ -963,8 +965,11 @@ class MainWindow(QMainWindow):
 
         # ── Settings ──────────────────────────────────────────────────
         settings_menu = mb.addMenu("Settings")
-        settings_menu.addAction("Font Scale...").triggered.connect(
+        scale_menu = settings_menu.addMenu("Scale")
+        scale_menu.addAction("Font Scale...").triggered.connect(
             self._show_font_scale_dialog)
+        scale_menu.addAction("Status Bar Scale...").triggered.connect(
+            self._show_status_bar_scale_dialog)
         settings_menu.addAction("Decimal Separator...").triggered.connect(
             self._show_decimal_sep_dialog)
         settings_menu.addSeparator()
@@ -2577,6 +2582,49 @@ class MainWindow(QMainWindow):
         layout.addLayout(bh)
         dlg.exec()
 
+    def _show_status_bar_scale_dialog(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Status Bar Scale")
+        dlg.setFixedWidth(340)
+        layout = QVBoxLayout(dlg)
+
+        current = self._settings.get("status_bar_scale", 1.0)
+        layout.addWidget(QLabel(
+            "Scale the channel status bar height and its content.\n"
+            "Independent of the global font scale.\n"
+            "Applied immediately — no restart required."))
+
+        hl = QHBoxLayout()
+        hl.addWidget(QLabel("Scale:"))
+        spin = QDoubleSpinBox()
+        spin.setRange(0.5, 2.0)
+        spin.setSingleStep(0.05)
+        spin.setDecimals(2)
+        spin.setValue(current)
+        hl.addWidget(spin)
+        hl.addWidget(QLabel("  (1.0 = 110 px, 2.0 = 220 px)"))
+        layout.addLayout(hl)
+
+        def apply():
+            scale = spin.value()
+            self._settings["status_bar_scale"] = scale
+            self._scope_status.set_scale(scale)
+            # Force a full status bar rebuild at the new scale
+            self._refresh_status_bar()
+
+        bh = QHBoxLayout()
+        btn_apply = QPushButton("Apply")
+        btn_apply.clicked.connect(apply)
+        btn_ok = QPushButton("OK")
+        btn_ok.clicked.connect(lambda: (apply(), dlg.accept()))
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(dlg.reject)
+        bh.addWidget(btn_apply); bh.addStretch()
+        bh.addWidget(btn_cancel); bh.addWidget(btn_ok)
+        layout.addLayout(bh)
+        dlg.exec()
+
     def _apply_font_scale(self, scale: float):
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtGui import QFont
@@ -2587,6 +2635,18 @@ class MainWindow(QMainWindow):
         app.setFont(f)
         # Re-apply stylesheet with scaled font-size
         app.setStyleSheet(self.theme.get_stylesheet(font_scale=scale))
+        # Force the native menu bar to use the scaled font — on Windows the
+        # native renderer ignores the app font and needs an explicit setFont.
+        self.menuBar().setFont(f)
+        # Propagate to panels that use inline stylesheets
+        if hasattr(self, '_channel_panel'):
+            self._channel_panel.set_font_scale(scale)
+        if hasattr(self, '_trigger_panel'):
+            self._trigger_panel.set_font_scale(scale)
+        # Y-axis label area width
+        if hasattr(self, '_plot'):
+            y_axis_w = max(40, int(60 * scale))
+            self._plot.set_y_axis_label_width(y_axis_w)
 
     def _show_decimal_sep_dialog(self):
         from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,

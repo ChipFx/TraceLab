@@ -745,18 +745,18 @@ class RangeBar(QWidget):
         layout.addWidget(self.y1)
 
         btn = QPushButton("Apply")
-        btn.setFixedWidth(55)
+        btn.setMinimumWidth(44)
+        btn.setMaximumWidth(88)
         btn.clicked.connect(self._apply)
         layout.addWidget(btn)
         layout.addStretch()
 
         self._t0_date_btn = QPushButton("Set t=0 date")
-        self._t0_date_btn.setFixedWidth(90)
+        self._t0_date_btn.setMinimumWidth(72)
+        self._t0_date_btn.setMaximumWidth(144)
         self._t0_date_btn.setCheckable(True)
         self._t0_date_btn.clicked.connect(self.t0_date_requested)
         layout.addWidget(self._t0_date_btn)
-
-        self.setMaximumHeight(30)
 
     def set_date_indicator(self, has_date: bool, _accent_colour: str = ""):
         """Toggle the button's checked state to reflect whether a date is set.
@@ -2167,6 +2167,13 @@ class ScopePlotWidget(QWidget):
                 lane.set_retrigger_curve(t_abs, data)
 
         self._range_timer.start()
+
+    def set_y_axis_label_width(self, width: int):
+        """Set the Y-axis label area width for all lanes and the overlay."""
+        for lane in self._lanes.values():
+            lane.getPlotItem().getAxis("left").setWidth(width)
+        if self._overlay_widget is not None:
+            self._overlay_widget.getPlotItem().getAxis("left").setWidth(width)
 
     def apply_lane_label_settings(self, size: int, show: bool, allow_force: bool,
                                    spacing: float = None):

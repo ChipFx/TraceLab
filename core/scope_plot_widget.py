@@ -719,6 +719,40 @@ def _effective_color(color: str, theme_name: str) -> str:
     return color
 
 
+def _trace_primary_segment_points(
+        trace: TraceModel,
+        process_segments: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return the base source arrays for the trace's active render segment."""
+    t_points = trace.time_axis
+    y_points = trace.processed_data
+    segs = getattr(trace, "segments", None)
+    primary = getattr(trace, "primary_segment", None)
+    process_segs = (
+        process_segments
+        and segs is not None and len(segs) > 1
+        and primary is not None and 0 <= primary < len(segs)
+    )
+    if process_segs:
+        start, end = segs[primary][0], segs[primary][1]
+        t_points = t_points[start:end]
+        y_points = y_points[start:end]
+    return t_points, y_points
+
+
+def _windowed_render_points(
+        t_points: np.ndarray,
+        y_points: np.ndarray,
+        x0: float,
+        x1: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Clip to the current X window when enough samples are visible."""
+    mask = (t_points >= x0) & (t_points <= x1)
+    if int(mask.sum()) >= 2:
+        return t_points[mask], y_points[mask]
+    return t_points, y_points
+
+
 class RangeBar(QWidget):
     """Compact X/Y range input bar shown below the plot area."""
     range_changed      = pyqtSignal(float, float, float, float)  # x0,x1,y0,y1
@@ -988,8 +1022,9 @@ class TraceLane(pg.PlotWidget):
     def _update_visible_samples(self, viewport: Optional[RenderViewport] = None):
         viewport = viewport or self._current_viewport()
         x0, x1 = viewport.x_range
-        visible_mask = (self.trace.time_axis >= x0) & (self.trace.time_axis <= x1)
-        self._visible_samples = int(visible_mask.sum()) or len(self.trace.time_axis)
+        t_points, _ = _trace_primary_segment_points(self.trace, self._process_segments)
+        visible_mask = (t_points >= x0) & (t_points <= x1)
+        self._visible_samples = int(visible_mask.sum()) or len(t_points)
 
     def _density_source_points(self, viewport: RenderViewport) -> Tuple[np.ndarray, np.ndarray]:
         x0, x1 = viewport.x_range
@@ -997,10 +1032,9 @@ class TraceLane(pg.PlotWidget):
             t_points = self._render_t
             y_points = self._render_y
         else:
-            t_points, y_points = self.trace.windowed_data(x0, x1)
-            if len(t_points) < 2:
-                t_points = self.trace.time_axis
-                y_points = self.trace.processed_data
+            t_points, y_points = _trace_primary_segment_points(
+                self.trace, self._process_segments)
+            t_points, y_points = _windowed_render_points(t_points, y_points, x0, x1)
 
         max_points = self._density_estimator.max_segments + 1
         if len(t_points) > max_points:
@@ -1024,6 +1058,13 @@ class TraceLane(pg.PlotWidget):
     def _resolved_pen_width(self) -> float:
         viewport = self._current_viewport()
         self._update_visible_samples(viewport)
+        viewport = RenderViewport(
+            width_px=viewport.width_px,
+            height_px=viewport.height_px,
+            x_range=viewport.x_range,
+            y_range=viewport.y_range,
+            visible_samples=int(self._visible_samples),
+        )
         style_key = (
             round(viewport.width_px, 2),
             round(viewport.height_px, 2),
@@ -1068,8 +1109,8 @@ class TraceLane(pg.PlotWidget):
                 pass
         self._segment_curves = []
 
-        t_full = self.trace.time_axis
-        y_full = self.trace.processed_data
+        t_full, y_full = _trace_primary_segment_points(
+            self.trace, self._process_segments)
         self._sinc_active = False
 
         # Determine segment processing state.
@@ -1081,21 +1122,13 @@ class TraceLane(pg.PlotWidget):
         process_segs = (self._process_segments
                         and segs is not None and len(segs) > 1
                         and primary is not None and 0 <= primary < len(segs))
-        if process_segs:
-            p_start, p_end = segs[primary][0], segs[primary][1]
-            t_full = t_full[p_start:p_end]
-            y_full = y_full[p_start:p_end]
-
         # Window to the currently visible x-range FIRST — for all interp modes.
         # Downsampling must operate on visible samples only; applying it to the
         # full dataset then clipping wastes resolution when zoomed in.
         vr = self.getPlotItem().viewRange()
         x0, x1 = vr[0]
-        mask = (t_full >= x0) & (t_full <= x1)
-        n_vis = int(mask.sum())
-        if n_vis >= 2:
-            t_full = t_full[mask]
-            y_full = y_full[mask]
+        t_full, y_full = _windowed_render_points(t_full, y_full, x0, x1)
+        n_vis = len(t_full)
         # n_vis < 2: widget created before the view range is set — keep full
         # data as fallback; the first real sigRangeChanged redraws correctly.
 
@@ -1463,8 +1496,9 @@ class OverlayTraceVisual:
     def _update_visible_samples(self, viewport: Optional[RenderViewport] = None):
         viewport = viewport or self._current_viewport()
         x0, x1 = viewport.x_range
-        visible_mask = (self.trace.time_axis >= x0) & (self.trace.time_axis <= x1)
-        self._visible_samples = int(visible_mask.sum()) or len(self.trace.time_axis)
+        t_points, _ = _trace_primary_segment_points(self.trace, self._process_segments)
+        visible_mask = (t_points >= x0) & (t_points <= x1)
+        self._visible_samples = int(visible_mask.sum()) or len(t_points)
 
     def _density_source_points(self, viewport: RenderViewport) -> Tuple[np.ndarray, np.ndarray]:
         x0, x1 = viewport.x_range
@@ -1472,10 +1506,9 @@ class OverlayTraceVisual:
             t_points = self._render_t
             y_points = self._render_y
         else:
-            t_points, y_points = self.trace.windowed_data(x0, x1)
-            if len(t_points) < 2:
-                t_points = self.trace.time_axis
-                y_points = self.trace.processed_data
+            t_points, y_points = _trace_primary_segment_points(
+                self.trace, self._process_segments)
+            t_points, y_points = _windowed_render_points(t_points, y_points, x0, x1)
 
         max_points = self._density_estimator.max_segments + 1
         if len(t_points) > max_points:
@@ -1499,6 +1532,13 @@ class OverlayTraceVisual:
     def _resolved_pen_width(self) -> float:
         viewport = self._current_viewport()
         self._update_visible_samples(viewport)
+        viewport = RenderViewport(
+            width_px=viewport.width_px,
+            height_px=viewport.height_px,
+            x_range=viewport.x_range,
+            y_range=viewport.y_range,
+            visible_samples=int(self._visible_samples),
+        )
         style_key = (
             round(viewport.width_px, 2),
             round(viewport.height_px, 2),
@@ -1539,8 +1579,8 @@ class OverlayTraceVisual:
                 pass
         self._segment_curves = []
 
-        t_full = self.trace.time_axis
-        y_full = self.trace.processed_data
+        t_full, y_full = _trace_primary_segment_points(
+            self.trace, self._process_segments)
         x0, x1 = view_range
 
         # Segment slicing — mirrors TraceLane._add_trace_curve logic
@@ -1550,11 +1590,6 @@ class OverlayTraceVisual:
         process_segs = (self._process_segments
                         and segs is not None and len(segs) > 1
                         and primary is not None and 0 <= primary < len(segs))
-        if process_segs:
-            p_start, p_end = segs[primary][0], segs[primary][1]
-            t_full = t_full[p_start:p_end]
-            y_full = y_full[p_start:p_end]
-
         self._interpolated_view = False
         self._update_visible_samples(RenderViewport(
             width_px=max(1.0, float(self.plot_item.vb.width())),
@@ -1565,11 +1600,8 @@ class OverlayTraceVisual:
         ))
 
         # Window to visible range first — for all modes.
-        mask = (t_full >= x0) & (t_full <= x1)
-        n_vis = int(mask.sum())
-        if n_vis >= 2:
-            t_full = t_full[mask]
-            y_full = y_full[mask]
+        t_full, y_full = _windowed_render_points(t_full, y_full, x0, x1)
+        n_vis = len(t_full)
         # n_vis < 2: widget not yet laid out — keep full data as fallback
 
         if self.interp_mode in ("sinc", "cubic"):

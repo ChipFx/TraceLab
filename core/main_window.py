@@ -2459,6 +2459,9 @@ class MainWindow(QMainWindow):
             # Keep wall-clock anchor in sync: new t=0 is the old t_pos instant
             self._shift_trace_wall_clock(trace, t_pos)
 
+        if self._last_trigger_t_pos is not None:
+            self._last_trigger_t_pos -= t_pos
+
         self._plot.refresh_all()
 
         for cid, pos in cursor_positions.items():
@@ -2472,6 +2475,8 @@ class MainWindow(QMainWindow):
         # and won't pick up the new value from _refresh_status_bar alone).
         self._apply_time_scale()
         self._refresh_status_bar()
+        if self._retrigger_mode != MODE_OFF and self._last_trigger_t_pos is not None:
+            self._reapply_retrigger()
         self._status_lbl.setText(f"t=0 set to trigger at {t_pos:.6g} s")
 
     def _on_restore_original_t0(self):
@@ -2505,6 +2510,9 @@ class MainWindow(QMainWindow):
             # moves backward by total_shift (i.e. += total_shift, which is negative).
             self._shift_trace_wall_clock(trace, total_shift)
 
+        if self._last_trigger_t_pos is not None:
+            self._last_trigger_t_pos -= total_shift
+
         self._plot.refresh_all()
 
         for cid, pos in cursor_positions.items():
@@ -2515,6 +2523,8 @@ class MainWindow(QMainWindow):
         self._plot._update_range_bar()
         self._apply_time_scale()
         self._refresh_status_bar()
+        if self._retrigger_mode != MODE_OFF and self._last_trigger_t_pos is not None:
+            self._reapply_retrigger()
         self._status_lbl.setText("t=0 restored to original import position")
 
     def _refresh_trigger_channels(self):

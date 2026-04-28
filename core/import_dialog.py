@@ -6,11 +6,12 @@ Import dialog with locale-safe number inputs and working gain/offset scaling.
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QComboBox, QCheckBox, QPushButton, QScrollArea,
-    QWidget, QGroupBox, QTabWidget,
-    QMessageBox, QRadioButton, QButtonGroup, QFrame
+    QWidget, QGroupBox, QTabWidget, QApplication,
+    QMessageBox, QRadioButton, QButtonGroup, QFrame, QInputDialog
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtCore import Qt, QMimeData, QPoint, QTimer, QObject
+from PyQt6.QtGui import QFont, QDrag, QPixmap, QPainter, QColor, QCursor
+from core.grouping_dialog import GroupingDialog
 import numpy as np
 from typing import Dict, List, Optional
 from core.data_loader import LoadResult, is_numeric_column, CsvMetadata, parse_value
@@ -72,6 +73,67 @@ class SciLineEdit(QLineEdit):
             return default
 
 
+def _is_plain_epoch(text: str) -> bool:
+    """Return True if text looks like a bare Unix epoch number (no date separators)."""
+    t = text.strip()
+    if not t:
+        return False
+    try:
+        float(t)
+        # If fromisoformat also accepts it, it's not a plain number
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(t)
+            return False   # it parsed as ISO → not a bare epoch
+        except ValueError:
+            return True    # float but not ISO → bare epoch
+    except ValueError:
+        return False
+
+
+def _parse_wallclock_input(text: str, epoch_local: bool = False) -> str:
+    """Parse a wall-clock string and return a normalised ISO 8601 string.
+
+    Accepts:
+      ISO 8601   — "2024-03-15T14:23:00", "2024-03-15 14:23:00.000"
+      Unix epoch — a plain integer or float
+                   e.g. 1713450000  or  1713450000.123
+                   epoch_local=False (default) → treat as UTC
+                   epoch_local=True            → treat as local wall-clock time,
+                                                 convert to UTC for storage
+
+    Raises ValueError if neither format succeeds.
+    """
+    from datetime import datetime, timezone
+    text = text.strip()
+    if not text:
+        raise ValueError("empty input")
+    # Try ISO 8601 first (handles most datetime strings including with T separator)
+    try:
+        return datetime.fromisoformat(text).isoformat()
+    except ValueError:
+        pass
+    # Try as a plain Unix epoch number
+    try:
+        epoch = float(text)
+        if epoch_local:
+            # Interpret as a standard UTC epoch, then express in local timezone.
+            # The stored ISO string will carry the local tz offset (e.g. +02:00),
+            # so the real-time axis displays the local wall-clock time correctly.
+            local_tz = datetime.now().astimezone().tzinfo
+            dt = datetime.fromtimestamp(epoch, tz=local_tz)
+        else:
+            dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        return dt.isoformat()
+    except (ValueError, OSError, OverflowError, TypeError):
+        pass
+    raise ValueError(
+        f"Cannot parse '{text}' as ISO 8601 or Unix epoch.\n"
+        "ISO examples: 2024-03-15T14:23:00  or  2024-03-15 14:23:00.000\n"
+        "Epoch example: 1713450000  or  1713450000.123"
+    )
+
+
 def _normalise_decimal(s: str) -> str:
     """Convert locale decimal comma to dot for parse_value."""
     import re
@@ -87,24 +149,139 @@ def _normalise_decimal(s: str) -> str:
     return s
 
 
+_COL_DRAG_MIME = "application/x-tl-import-col"
+
+
+# ── Auto-scroll helper ────────────────────────────────────────────────────────
+
+class _DragScrollHelper(QObject):
+    """Scrolls a QScrollArea while a drag is active near its top/bottom edge.
+
+    Usage: call start() just before drag.exec(), stop() immediately after.
+    The helper polls QCursor.pos() on a timer — no event-filter wiring needed.
+    """
+    _EDGE_PX   = 50    # px from viewport edge that triggers scrolling
+    _TICK_MS   = 20    # timer interval (ms)
+    _MAX_SPEED = 18    # pixels per tick at the very edge
+
+    def __init__(self, scroll_area, parent=None):
+        super().__init__(parent)
+        self._sa = scroll_area
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+
+    def _tick(self):
+        vp  = self._sa.viewport()
+        y   = vp.mapFromGlobal(QCursor.pos()).y()
+        h   = vp.height()
+        dy  = 0
+        if 0 <= y < self._EDGE_PX:
+            frac = 1.0 - y / self._EDGE_PX
+            dy   = -max(1, int(frac * self._MAX_SPEED))
+        elif h - self._EDGE_PX < y <= h:
+            frac = (y - (h - self._EDGE_PX)) / self._EDGE_PX
+            dy   = max(1, int(frac * self._MAX_SPEED))
+        if dy:
+            sb = self._sa.verticalScrollBar()
+            sb.setValue(sb.value() + dy)
+
+
+# ── Drag handle for ColumnConfigRow ──────────────────────────────────────────
+
+class _ColDragHandle(QLabel):
+    """Small grip icon that initiates a QDrag carrying the column name."""
+
+    def __init__(self, col_name: str, scroll_helper=None, parent=None):
+        super().__init__("⠿", parent)
+        self._col_name = col_name
+        self._drag_start: QPoint | None = None
+        self._scroll_helper = scroll_helper
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setFixedWidth(14)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setToolTip("Drag onto a group banner to reassign")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.pos()
+            event.accept()          # must accept so Qt delivers subsequent move events here
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is None:
+            return
+        if ((event.pos() - self._drag_start).manhattanLength()
+                < QApplication.startDragDistance()):
+            return
+        # Build a small label pixmap for drag feedback
+        pm = QPixmap(160, 20)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        p.setPen(QColor("#c0c0e0"))
+        p.setFont(self.font())
+        p.drawText(pm.rect(), Qt.AlignmentFlag.AlignVCenter, f"  {self._col_name}")
+        p.end()
+
+        mime = QMimeData()
+        mime.setData(_COL_DRAG_MIME, self._col_name.encode())
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(8, 10))
+        if self._scroll_helper:
+            self._scroll_helper.start()
+        drag.exec(Qt.DropAction.MoveAction)
+        if self._scroll_helper:
+            self._scroll_helper.stop()
+        self._drag_start = None
+
+
 # ── Column config row ─────────────────────────────────────────────────────────
 
 class ColumnConfigRow(QWidget):
-    def __init__(self, col_name: str, data: np.ndarray, color: str,
+    def __init__(self, col_name: str, data: np.ndarray,
                  is_time_candidate: bool = False,
-                 metadata: CsvMetadata = None, parent=None):
+                 metadata: CsvMetadata = None,
+                 col_info=None,          # ColumnInfo from parser plugin, or None
+                 drop_callback=None,     # callable(dragged_col_name, target_group) or None
+                 scroll_helper=None,     # _DragScrollHelper — auto-scroll during drag
+                 parent=None):
         super().__init__(parent)
         self.col_name = col_name
         self.data = data
         self._is_numeric = is_numeric_column(data)
         meta = metadata or CsvMetadata()
+        # col_info overrides the global CsvMetadata for per-column defaults
+        self._col_info = col_info
+        # Group assignment — updated by the import dialog's grouping dialog
+        self.col_group: str = col_info.group if (col_info and getattr(col_info, "group", "")) else ""
+        # Drag state — row initiates drag from anywhere (no click action on the row)
+        self._drag_start: QPoint | None = None
+        # Drop callback — set by ImportDialog so the row can act as a drop target
+        self._drop_callback = drop_callback
+        if drop_callback is not None:
+            self.setAcceptDrops(True)
+        # Auto-scroll helper shared with the containing scroll area
+        self._scroll_helper = scroll_helper
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(8)
 
+        layout.addWidget(_ColDragHandle(col_name, scroll_helper=scroll_helper))
+
+        # Default-skip: plugin may mark alarm/marker columns as skip=True
+        _plugin_skip = col_info.skip if col_info is not None else False
+
         self.chk_enable = QCheckBox()
-        self.chk_enable.setChecked(self._is_numeric and not is_time_candidate)
+        self.chk_enable.setChecked(
+            self._is_numeric and not is_time_candidate and not _plugin_skip)
         self.chk_enable.setToolTip("Import this column as a trace")
         layout.addWidget(self.chk_enable)
 
@@ -112,9 +289,23 @@ class ColumnConfigRow(QWidget):
         lbl.setMinimumWidth(110)
         lbl.setMaximumWidth(180)
         lbl.setFont(QFont("Courier New", 9))
+        # Stats shown as a tooltip rather than inline to save horizontal space
+        if self._is_numeric and len(data) > 0:
+            try:
+                d = data.astype(float)
+                valid = d[np.isfinite(d)]
+                if len(valid):
+                    lbl.setToolTip(
+                        f"n={len(data)}  min={valid.min():.3g}  max={valid.max():.3g}")
+                else:
+                    lbl.setToolTip(f"n={len(data)}  (no finite values)")
+            except Exception:
+                lbl.setToolTip(f"n={len(data)}")
         layout.addWidget(lbl)
 
-        self.edit_label = SciLineEdit(col_name)
+        _default_label = (col_info.display_name if col_info and col_info.display_name
+                          else col_name)
+        self.edit_label = SciLineEdit(_default_label)
         self.edit_label.setToolTip("Display label for this trace")
         self.edit_label.setMinimumWidth(90)
         self.edit_label.setMaximumWidth(140)
@@ -147,65 +338,97 @@ class ColumnConfigRow(QWidget):
             "Decimal: use '.' or ',' — both accepted")
         sl.addWidget(self.edit_offset)
 
-        self.edit_unit = SciLineEdit(meta.unit or "V")
-        self.edit_unit.setFixedWidth(38)
-        self.edit_unit.setToolTip("Physical unit label (V, A, °C, …)")
-        sl.addWidget(self.edit_unit)
-
         self.scale_widget.setEnabled(False)
         layout.addWidget(self.scale_widget)
 
+        # Unit is always visible/editable — useful even without gain/offset scaling
+        _default_unit = (col_info.unit if col_info and col_info.unit
+                         else (meta.unit or "V"))
+        layout.addWidget(QLabel("Unit:"))
+        self.edit_unit = SciLineEdit(_default_unit)
+        self.edit_unit.setFixedWidth(38)
+        self.edit_unit.setToolTip("Physical unit label (V, A, °C, …)")
+        layout.addWidget(self.edit_unit)
+
         layout.addStretch()
-
-        # Color swatch
-        self.color = color
-        self.btn_color = QPushButton()
-        self.btn_color.setFixedSize(22, 20)
-        self.btn_color.setStyleSheet(
-            f"background-color: {color}; border: 1px solid #555;")
-        self.btn_color.clicked.connect(self._pick_color)
-        layout.addWidget(self.btn_color)
-
-        # Stats
-        if self._is_numeric and len(data) > 0:
-            try:
-                d = data.astype(float)
-                valid = d[np.isfinite(d)]
-                if len(valid):
-                    stats = (f"n={len(data)}"
-                             f"  min={valid.min():.3g}"
-                             f"  max={valid.max():.3g}")
-                else:
-                    stats = f"n={len(data)}"
-            except Exception:
-                stats = f"n={len(data)}"
-            lbl_stats = QLabel(stats)
-            lbl_stats.setStyleSheet("color: #888; font-size: 9px;")
-            layout.addWidget(lbl_stats)
+        # (Stats shown as tooltip on the column name label above)
 
         if not self._is_numeric:
             self.chk_enable.setChecked(False)
             self.chk_enable.setEnabled(False)
             self.chk_scale.setEnabled(False)
 
-        # Pre-fill from CSV metadata
-        if meta.gain is not None and meta.gain != 1.0:
+        # Pre-fill scaling: col_info (per-column plugin data) takes precedence
+        # over the global CsvMetadata values.
+        _gain   = col_info.gain   if col_info is not None else (meta.gain   or 1.0)
+        _offset = col_info.offset if col_info is not None else (meta.offset or 0.0)
+        if _gain != 1.0:
             self.chk_scale.setChecked(True)
-            self.edit_gain.setText(str(meta.gain))
-        if meta.offset is not None and meta.offset != 0.0:
+            self.edit_gain.setText(str(_gain))
+        if _offset != 0.0:
             self.chk_scale.setChecked(True)
-            self.edit_offset.setValue(meta.offset)
+            self.edit_offset.setText(str(_offset))
+
+    # ── Row-level drag (whole row is a drag source) ───────────────────────────
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Don't start a drag if the click landed on an interactive child
+            child = self.childAt(event.pos())
+            if not isinstance(child, (QCheckBox, QLineEdit)):
+                self._drag_start = event.pos()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is None:
+            return
+        if ((event.pos() - self._drag_start).manhattanLength()
+                < QApplication.startDragDistance()):
+            return
+        pm = QPixmap(200, 20)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        p.setPen(QColor("#c0c0e0"))
+        p.setFont(self.font())
+        p.drawText(pm.rect(), Qt.AlignmentFlag.AlignVCenter, f"  {self.col_name}")
+        p.end()
+        mime = QMimeData()
+        mime.setData(_COL_DRAG_MIME, self.col_name.encode())
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(8, 10))
+        if self._scroll_helper:
+            self._scroll_helper.start()
+        drag.exec(Qt.DropAction.MoveAction)
+        if self._scroll_helper:
+            self._scroll_helper.stop()
+        self._drag_start = None
+
+    # ── Row as drop target ────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if (event.mimeData().hasFormat(_COL_DRAG_MIME) and
+                event.mimeData().data(_COL_DRAG_MIME).data().decode() != self.col_name):
+            event.acceptProposedAction()
+            self.setStyleSheet("border: 1px solid #6060c0;")
+
+    def dragLeaveEvent(self, event):
+        super().dragLeaveEvent(event)
+        self.setStyleSheet("")
+
+    def dropEvent(self, event):
+        self.setStyleSheet("")
+        col_name = event.mimeData().data(_COL_DRAG_MIME).data().decode()
+        if self._drop_callback and col_name != self.col_name:
+            self._drop_callback(col_name, self.col_group)
+        event.acceptProposedAction()
 
     def _toggle_scaling(self, enabled: bool):
         self.scale_widget.setEnabled(enabled)
 
-    def _pick_color(self):
-        from PyQt6.QtWidgets import QColorDialog
-        c = QColorDialog.getColor(QColor(self.color), self, "Pick Trace Color")
-        if c.isValid():
-            self.color = c.name()
-            self.btn_color.setStyleSheet(
-                f"background-color: {self.color}; border: 1px solid #555;")
 
     def get_scaling(self) -> ScalingConfig:
         gain   = self.edit_gain.get_value(1.0)
@@ -231,12 +454,13 @@ class ColumnConfigRow(QWidget):
 
 class ImportDialog(QDialog):
     def __init__(self, load_result: LoadResult,
-                 persistent_settings: dict = None, parent=None):
+                 persistent_settings: dict = None, theme=None, parent=None):
         super().__init__(parent)
         self.load_result = load_result
         self.result_traces: List[TraceModel] = []
         self._col_rows: Dict[str, ColumnConfigRow] = {}
         self._settings = persistent_settings or {}
+        self._theme = theme          # ThemeData / ThemeManager — for GroupingDialog
 
         self.setWindowTitle(f"Import: {load_result.filename}")
         self.setMinimumSize(900, 580)
@@ -262,6 +486,10 @@ class ImportDialog(QDialog):
             meta_hints.append(f"Offset={meta.offset:.6g}")
         if meta.unit:
             meta_hints.append(f"Unit={meta.unit}")
+        if self.load_result.parser_name:
+            info_parts.append(
+                f"<span style='color:#80a0ff'>🔌 Parser: "
+                f"{self.load_result.parser_name}</span>")
         if meta_hints:
             info_parts.append(
                 f"<span style='color:#80c080'>📋 Metadata: "
@@ -352,42 +580,76 @@ class ImportDialog(QDialog):
             b = QPushButton(label)
             b.clicked.connect(fn)
             tb.addWidget(b)
+        tb.addSpacing(16)
+        btn_group = QPushButton("Group…")
+        btn_group.setToolTip(
+            "Group columns by unit, name pattern, or enabled state.\n"
+            "Assigned groups are used when traces are added to the channel panel.")
+        btn_group.clicked.connect(self._open_grouping_dialog)
+        tb.addWidget(btn_group)
+        btn_new_group = QPushButton("New Group…")
+        btn_new_group.setToolTip(
+            "Create an empty named group.\n"
+            "Drag channels onto the group banner to assign them.")
+        btn_new_group.clicked.connect(self._create_empty_group)
+        tb.addWidget(btn_new_group)
         tb.addStretch()
         cl.addLayout(tb)
 
+        # ── Column header row ─────────────────────────────────────────
+        col_hdr = QWidget()
+        col_hdr.setStyleSheet(
+            "background: #12122a; border-bottom: 1px solid #2a2a4a;")
+        hdr_layout = QHBoxLayout(col_hdr)
+        hdr_layout.setContentsMargins(4, 2, 4, 2)
+        hdr_layout.setSpacing(8)
+        _hdr_style = "color: #6060a0; font-size: 9px;"
+        for _txt, _w, _stretch in [
+            ("✓",             20, 0),
+            ("Column",       120, 0),
+            ("Display Label", 90, 0),
+            ("Scale",         50, 0),
+            ("Gain / Offset", 160, 1),
+            ("Unit",          38, 0),
+        ]:
+            _h = QLabel(_txt)
+            _h.setStyleSheet(_hdr_style)
+            if _stretch:
+                _h.setMinimumWidth(_w)
+                hdr_layout.addWidget(_h, 1)
+            else:
+                _h.setFixedWidth(_w)
+                hdr_layout.addWidget(_h)
+        cl.addWidget(col_hdr)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        self._drag_scroll = _DragScrollHelper(scroll, parent=self)
         sw = QWidget()
-        sl = QVBoxLayout(sw)
-        sl.setSpacing(2)
+        self._col_scroll_layout = QVBoxLayout(sw)
+        self._col_scroll_layout.setSpacing(2)
 
-        # Get trace colours from ThemeManager if available, else use safe defaults
-        try:
-            from core.theme_manager import ThemeManager
-            import os
-            _tm_tmp = ThemeManager()
-            _trace_palette = _tm_tmp.trace_colors
-        except Exception:
-            _trace_palette = ["#F0C040","#40C0F0","#F04080","#40F080","#F08040",
-                              "#A040F0","#40F0F0","#F0F040","#F04040","#4080F0"]
+        self._group_fold_state: Dict[str, bool] = {}   # group_name → collapsed
+        self._manual_groups: List[str] = []            # groups created without any columns yet
 
-        color_idx = 0
-        for i, (col_name, data) in enumerate(self.load_result.columns.items()):
-            is_time = col_name == self.load_result.suggested_time_col
-            color = _trace_palette[color_idx % len(_trace_palette)]
-            if is_numeric_column(data) and not is_time:
-                color_idx += 1
-            row = ColumnConfigRow(col_name, data, color,
-                                   is_time_candidate=is_time, metadata=meta)
+        # ── Create all ColumnConfigRow widgets (no layout placement yet) ──
+        # col_group is initialised from parser-supplied group info inside
+        # ColumnConfigRow.__init__ (via col_info.group).
+        for col_name in self.load_result.columns:
+            data     = self.load_result.columns[col_name]
+            is_time  = col_name == self.load_result.suggested_time_col
+            col_info = self.load_result.column_infos.get(col_name)
+            row = ColumnConfigRow(col_name, data,
+                                  is_time_candidate=is_time, metadata=meta,
+                                  col_info=col_info,
+                                  drop_callback=self._on_col_dropped_on_group,
+                                  scroll_helper=self._drag_scroll)
+            row.setParent(sw)
             self._col_rows[col_name] = row
-            if i > 0 and i % 5 == 0:
-                line = QFrame()
-                line.setFrameShape(QFrame.Shape.HLine)
-                line.setStyleSheet("color: #333;")
-                sl.addWidget(line)
-            sl.addWidget(row)
 
-        sl.addStretch()
+        self._group_rows: Dict[str, List] = {}
+        self._rebuild_column_list()
+
         scroll.setWidget(sw)
         cl.addWidget(scroll)
         tabs.addTab(col_tab, "Columns && Scaling")
@@ -470,6 +732,65 @@ class ImportDialog(QDialog):
             r.toggled.connect(self._update_duration_label)
         self.combo_time_col.currentTextChanged.connect(self._update_duration_label)
         self._update_duration_label()
+
+        # Wall-clock anchor override
+        wc_box = QGroupBox("Wall-Clock Anchor (t=0)")
+        wcl = QVBoxLayout(wc_box)
+        wc_row = QHBoxLayout()
+        self.chk_t0_override = QCheckBox("Override t=0 wall clock")
+        self.chk_t0_override.setChecked(
+            self._settings.get("import_t0_override_enabled", False))
+        self.chk_t0_override.setToolTip(
+            "Enter an ISO 8601 datetime to use as the real-world moment\n"
+            "corresponding to t=0, overriding any value from the parser.")
+        wc_row.addWidget(self.chk_t0_override)
+        self.edit_t0_wallclock = QLineEdit()
+        self.edit_t0_wallclock.setPlaceholderText(
+            "ISO: 2024-03-15T14:23:00   or   Unix epoch: 1713450000")
+        self.edit_t0_wallclock.setMinimumWidth(280)
+        self.edit_t0_wallclock.setToolTip(
+            "ISO 8601: YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD HH:MM:SS[.mmm]\n"
+            "Unix epoch: plain integer or decimal seconds since 1970-01-01 00:00 UTC\n"
+            "  e.g. 1713450000  or  1713450000.123\n"
+            "Leave blank to keep the parser-supplied wall-clock anchor.")
+        wc_row.addWidget(self.edit_t0_wallclock)
+        wc_row.addStretch()
+        wcl.addLayout(wc_row)
+
+        # Epoch timezone row — shown only when the field contains a bare epoch number
+        self._epoch_tz_widget = QWidget()
+        epoch_tz_row = QHBoxLayout(self._epoch_tz_widget)
+        epoch_tz_row.setContentsMargins(0, 0, 0, 0)
+        epoch_tz_row.addSpacing(20)
+        epoch_tz_row.addWidget(QLabel("If Epoch:"))
+        self.rb_epoch_utc   = QRadioButton("GMT / UTC")
+        self.rb_epoch_local = QRadioButton("Local time")
+        self._epoch_tz_group = QButtonGroup(self)
+        self._epoch_tz_group.addButton(self.rb_epoch_utc,   0)
+        self._epoch_tz_group.addButton(self.rb_epoch_local, 1)
+        _epoch_local_saved = self._settings.get("import_epoch_local", False)
+        self.rb_epoch_local.setChecked(_epoch_local_saved)
+        self.rb_epoch_utc.setChecked(not _epoch_local_saved)
+        epoch_tz_row.addWidget(self.rb_epoch_utc)
+        epoch_tz_row.addWidget(self.rb_epoch_local)
+        epoch_tz_row.addStretch()
+        self._epoch_tz_widget.setVisible(False)
+        wcl.addWidget(self._epoch_tz_widget)
+
+        _hint_parts = []
+        if self.load_result.t0_wall_clock:
+            _hint_parts.append(f"Parser supplied: {self.load_result.t0_wall_clock}")
+        if self.load_result.source_time_format == "unix_epoch":
+            _hint_parts.append("(time column was Unix epoch — already converted)")
+        if _hint_parts:
+            _hint = QLabel("  ".join(_hint_parts))
+            _hint.setStyleSheet("color: #6060a0; font-size: 9px;")
+            wcl.addWidget(_hint)
+        self.edit_t0_wallclock.setEnabled(self.chk_t0_override.isChecked())
+        self.chk_t0_override.toggled.connect(self.edit_t0_wallclock.setEnabled)
+        self.edit_t0_wallclock.textChanged.connect(self._validate_t0_wallclock_input)
+        tl.addWidget(wc_box)
+
         tl.addStretch()
         tabs.addTab(time_tab, "Time Base")
 
@@ -494,6 +815,20 @@ class ImportDialog(QDialog):
             "applied immediately to new data before you have had a chance\n"
             "to configure the trigger for the new file.")
         og.addWidget(self.chk_reset_retrigger)
+        self.chk_remove_cursors = QCheckBox("Remove cursors on import")
+        self.chk_remove_cursors.setChecked(
+            self._settings.get("import_remove_cursors", True))
+        self.chk_remove_cursors.setToolTip(
+            "Clear both cursors and their readouts when import completes.")
+        og.addWidget(self.chk_remove_cursors)
+        self.chk_honor_skip_rows = QCheckBox("Honor parser skip-row hints")
+        self.chk_honor_skip_rows.setChecked(
+            self._settings.get("import_honor_skip_rows", True))
+        self.chk_honor_skip_rows.setToolTip(
+            "If the parser plugin marks certain rows to skip (e.g. repeated\n"
+            "headers between segments), they are dropped during file load.\n"
+            "Change takes effect on the next import.")
+        og.addWidget(self.chk_honor_skip_rows)
         og.addStretch()
         layout.addWidget(opt_box)
 
@@ -511,6 +846,20 @@ class ImportDialog(QDialog):
         btn_layout.addWidget(btn_cancel)
         btn_layout.addWidget(btn_ok)
         layout.addLayout(btn_layout)
+
+    def _validate_t0_wallclock_input(self, text: str):
+        """Live red-highlight when the wall-clock override field can't be parsed."""
+        text = text.strip()
+        if not text:
+            self.edit_t0_wallclock.setStyleSheet("")
+            self._epoch_tz_widget.setVisible(False)
+            return
+        self._epoch_tz_widget.setVisible(_is_plain_epoch(text))
+        try:
+            _parse_wallclock_input(text)
+            self.edit_t0_wallclock.setStyleSheet("")
+        except ValueError:
+            self.edit_t0_wallclock.setStyleSheet("background: #3a1010;")
 
     def _sps_changed(self):
         try:
@@ -598,6 +947,243 @@ class ImportDialog(QDialog):
             row.edit_offset.setText(offset)
             row.edit_unit.setText(unit)
 
+    # ── Column list rebuild ───────────────────────────────────────────────────
+
+    def _on_group_fold_changed(self, group_name: str, collapsed: bool):
+        self._group_fold_state[group_name] = collapsed
+
+    def _on_col_dropped_on_group(self, col_name: str, group_name: str):
+        """Called when a ColumnConfigRow drag is dropped onto a group header."""
+        row = self._col_rows.get(col_name)
+        if row is None:
+            return
+        row.col_group = "" if group_name == "__ungrouped__" else group_name
+        self._rebuild_column_list()
+
+    def _rebuild_column_list(self):
+        """Rebuild the scroll-area column list to reflect current row.col_group values.
+        Existing ColumnConfigRow widgets are reused in-place — all user edits survive.
+        Called once at construction and again after every grouping operation."""
+        sl = self._col_scroll_layout
+
+        # Remove everything currently in the layout (headers, dividers, rows).
+        # setParent(None) detaches each widget without deleting it.
+        while sl.count():
+            item = sl.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        # Re-group: follow load_result.columns order so the original file order
+        # is preserved within each group.
+        groups_order: List[str] = []
+        groups_cols: Dict[str, List[str]] = {}
+        ungrouped: List[str] = []
+        for col_name in self.load_result.columns:
+            row = self._col_rows.get(col_name)
+            if row is None:
+                continue
+            grp = row.col_group
+            if grp:
+                if grp not in groups_cols:
+                    groups_order.append(grp)
+                    groups_cols[grp] = []
+                groups_cols[grp].append(col_name)
+            else:
+                ungrouped.append(col_name)
+
+        # Include manually created groups that may still be empty
+        for mg in self._manual_groups:
+            if mg not in groups_cols:
+                groups_order.append(mg)
+                groups_cols[mg] = []
+
+        self._group_rows = {}
+
+        if groups_order:
+            for grp in groups_order:
+                self._group_rows[grp] = []
+                hdr = _ImportGroupHeader(
+                    grp, self._group_rows[grp],
+                    on_drop=self._on_col_dropped_on_group,
+                    on_fold_changed=self._on_group_fold_changed,
+                    theme=self._theme)
+                sl.addWidget(hdr)
+                for col_name in groups_cols[grp]:
+                    row = self._col_rows[col_name]
+                    self._group_rows[grp].append(row)
+                    sl.addWidget(row)
+                    row.show()
+                if self._group_fold_state.get(grp, False):
+                    hdr.set_collapsed(True)
+            if ungrouped:
+                self._group_rows["__ungrouped__"] = []
+                hdr = _ImportGroupHeader(
+                    "Ungrouped", self._group_rows["__ungrouped__"],
+                    on_drop=self._on_col_dropped_on_group,
+                    on_fold_changed=self._on_group_fold_changed,
+                    theme=self._theme)
+                sl.addWidget(hdr)
+                for col_name in ungrouped:
+                    row = self._col_rows[col_name]
+                    self._group_rows["__ungrouped__"].append(row)
+                    sl.addWidget(row)
+                    row.show()
+                if self._group_fold_state.get("__ungrouped__", False):
+                    hdr.set_collapsed(True)
+        else:
+            for i, col_name in enumerate(self.load_result.columns):
+                row = self._col_rows.get(col_name)
+                if row is None:
+                    continue
+                if i > 0 and i % 5 == 0:
+                    line = QFrame()
+                    line.setFrameShape(QFrame.Shape.HLine)
+                    line.setStyleSheet("color: #333;")
+                    sl.addWidget(line)
+                sl.addWidget(row)
+                row.show()
+
+        sl.addStretch()
+
+    # ── Grouping ──────────────────────────────────────────────────────────────
+
+    def _create_empty_group(self):
+        """Prompt for a name and add an empty group banner to the column list."""
+        existing = {row.col_group for row in self._col_rows.values() if row.col_group}
+        existing |= set(self._manual_groups)
+        name, ok = QInputDialog.getText(self, "New Group", "Group name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        # Deduplicate: append a numeric suffix if the name is already taken
+        base = name
+        suffix = 1
+        while name in existing:
+            name = f"{base}_{suffix:03d}"
+            suffix += 1
+        self._manual_groups.append(name)
+        self._rebuild_column_list()
+
+    def _open_grouping_dialog(self):
+        existing = {row.col_group for row in self._col_rows.values() if row.col_group}
+        dlg = GroupingDialog(existing_group_names=existing,
+                             theme=self._theme, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        method, pattern, create_inside, custom_name = dlg.get_config()
+        if method == "unit":
+            self._apply_import_group_by_unit(create_inside, custom_name)
+        elif method == "pattern":
+            if not pattern:
+                return
+            self._apply_import_group_by_pattern(pattern, create_inside, custom_name)
+        elif method == "enabled":
+            self._apply_import_group_enabled(custom_name)
+
+    def _unique_import_group_name(self, base: str, allocated: set = None) -> str:
+        existing = {row.col_group for row in self._col_rows.values() if row.col_group}
+        if allocated:
+            existing |= allocated
+        if base not in existing:
+            return base
+        for i in range(1, 1000):
+            candidate = f"{base}_{i:03d}"
+            if candidate not in existing:
+                return candidate
+        return base
+
+    def _apply_import_group_by_unit(self, create_inside: bool, custom_name: str = ""):
+        rows = list(self._col_rows.values())
+        allocated: set = set()
+
+        def _alloc(base: str) -> str:
+            name = self._unique_import_group_name(base, allocated)
+            allocated.add(name)
+            return name
+
+        if create_inside:
+            group_units: Dict[str, set] = {}
+            for row in rows:
+                g = row.col_group or "__ungrouped__"
+                unit = row.edit_unit.text().strip() or "Other"
+                group_units.setdefault(g, set()).add(unit)
+            target_map: Dict[tuple, str] = {}
+            for old_g, units in group_units.items():
+                if len(units) <= 1:
+                    continue
+                for unit in units:
+                    suffix = f"{custom_name}_{unit}" if custom_name else unit
+                    base = suffix if old_g == "__ungrouped__" else f"{old_g}_{suffix}"
+                    target_map[(old_g, unit)] = _alloc(base)
+            for row in rows:
+                key = (row.col_group or "__ungrouped__",
+                       row.edit_unit.text().strip() or "Other")
+                if key in target_map:
+                    row.col_group = target_map[key]
+        else:
+            unit_target: Dict[str, str] = {}
+            for row in rows:
+                unit = row.edit_unit.text().strip() or "Other"
+                if unit not in unit_target:
+                    base = f"{custom_name}_{unit}" if custom_name else unit
+                    unit_target[unit] = _alloc(base)
+            for row in rows:
+                row.col_group = unit_target[row.edit_unit.text().strip() or "Other"]
+        self._rebuild_column_list()
+
+    def _apply_import_group_by_pattern(self, pattern: str, create_inside: bool,
+                                        custom_name: str = ""):
+        import fnmatch as _fnmatch
+        pat_lower = pattern.lower()
+        name_repr = pattern.replace("*", "(ALL)")
+        rows = list(self._col_rows.values())
+        allocated: set = set()
+
+        def _alloc(base: str) -> str:
+            name = self._unique_import_group_name(base, allocated)
+            allocated.add(name)
+            return name
+
+        def _matches(row) -> bool:
+            label = (row.edit_label.text().strip() or row.col_name).lower()
+            return _fnmatch.fnmatch(label, pat_lower)
+
+        if create_inside:
+            group_has_nonmatch: Dict[str, bool] = {}
+            for row in rows:
+                g = row.col_group or "__ungrouped__"
+                if not _matches(row):
+                    group_has_nonmatch[g] = True
+            group_target: Dict[str, str] = {}
+            for g, _ in group_has_nonmatch.items():
+                suffix = custom_name or name_repr
+                base = suffix if g == "__ungrouped__" else f"{g}_{suffix}"
+                group_target[g] = _alloc(base)
+            for row in rows:
+                if not _matches(row):
+                    continue
+                old_g = row.col_group or "__ungrouped__"
+                if old_g in group_target:
+                    row.col_group = group_target[old_g]
+        else:
+            base = custom_name or f"Group_{name_repr}"
+            group_name = _alloc(base)
+            for row in rows:
+                if _matches(row):
+                    row.col_group = group_name
+        self._rebuild_column_list()
+
+    def _apply_import_group_enabled(self, custom_name: str = ""):
+        base = custom_name or "Enabled"
+        group_name = self._unique_import_group_name(base)
+        for row in self._col_rows.values():
+            if row.chk_enable.isChecked():
+                row.col_group = group_name
+        self._rebuild_column_list()
+
     def _do_import(self):
         use_time_col = self.radio_time_col.isChecked()
         time_col_name = self.combo_time_col.currentText() if use_time_col else None
@@ -628,6 +1214,19 @@ class ImportDialog(QDialog):
         t0_sample = int(self.edit_t0_sample.get_value(0))
         t0_time   = self.edit_t0_time.get_value(0.0)
 
+        # Wall-clock anchor override (blank string = no override)
+        _wc_override = ""
+        if self.chk_t0_override.isChecked():
+            _raw_wc = self.edit_t0_wallclock.text().strip()
+            if _raw_wc:
+                _epoch_local = (self._epoch_tz_widget.isVisible() and
+                                self.rb_epoch_local.isChecked())
+                try:
+                    _wc_override = _parse_wallclock_input(_raw_wc, epoch_local=_epoch_local)
+                except ValueError as e:
+                    QMessageBox.warning(self, "Invalid Wall-Clock Value", str(e))
+                    return
+
         traces = []
         for col_name, row in self._col_rows.items():
             if not row.chk_enable.isChecked():
@@ -650,16 +1249,73 @@ class ImportDialog(QDialog):
                 elif t0_time != 0.0:
                     td = td - t0_time
 
+            # Trim raw_data and time_data to the valid range declared by the
+            # parser via #trace_data_range= headers.  This strips the leading/
+            # trailing empty-cell padding that the exporter writes when traces
+            # have different time extents, restoring the original array length.
+            _dr = self.load_result.trace_data_ranges.get(col_name)
+            if _dr is not None:
+                r0_0 = _dr[0] - 1        # 0-based inclusive start
+                r1_0 = _dr[1]             # 0-based exclusive end
+                raw = raw[r0_0:r1_0]
+                if td is not None:
+                    td = td[r0_0:r1_0]
+
+            col_info = self.load_result.column_infos.get(col_name)
+            _trace_name = row.edit_label.text().strip() or col_name
+            _col_group = row.col_group
+
+            # Per-trace sample rate from #trace_meta= takes precedence over
+            # the file-level value derived from the time column / UI spinboxes.
+            _ci_sps = col_info.sample_rate if (col_info and col_info.sample_rate) else None
+            _trace_sps = _ci_sps if _ci_sps else sps
+            _trace_dt  = (1.0 / _trace_sps) if _trace_sps > 0 else dt
+
+            # Per-trace wall-clock anchor; falls back to file-level value.
+            _trace_t0wc = (col_info.t0_wall_clock
+                           if (col_info and col_info.t0_wall_clock)
+                           else self.load_result.t0_wall_clock)
+
+            # Per-trace segment settings (from #trace_settings= headers)
+            _ts_seg = (self.load_result.trace_segment_settings.get(col_name)
+                       or self.load_result.trace_segment_settings.get(_trace_name)
+                       or {})
+            # Resolve segment list once so we can derive defaults from it.
+            _trace_segs = (self.load_result.trace_segments.get(col_name)
+                           or self.load_result.trace_segments.get(_trace_name)
+                           or self.load_result.segments)
+            _has_multi_segs = bool(_trace_segs and len(_trace_segs) >= 2)
+            # For fresh multi-segment imports (no #trace_settings= header):
+            # default primary to segment 0 and viewmode to "dimmed" so the
+            # segment rendering kicks in immediately without a manual first step.
+            _default_primary = (self.load_result.primary_segment
+                                if self.load_result.primary_segment is not None
+                                else (0 if _has_multi_segs else None))
+            _default_viewmode = "dimmed" if _has_multi_segs else ""
             trace = TraceModel(
-                name=col_name,
+                name=_trace_name,
                 raw_data=raw,
                 time_data=td,
-                sample_rate=sps,
-                dt=dt,
-                color=row.color,
+                sample_rate=_trace_sps,
+                dt=_trace_dt,
                 label=row.edit_label.text().strip() or col_name,
-                unit=scaling.unit if scaling.enabled else "raw",
+                unit=scaling.unit,
                 scaling=scaling,
+                # Instrument channel metadata (preserved from file headers)
+                coupling=col_info.coupling if col_info else "",
+                impedance=col_info.impedance if col_info else "",
+                bwlimit=col_info.bwlimit if col_info else "",
+                # Source provenance — available to trace-manipulation plugins
+                source_file=self.load_result.filename,
+                original_col_name=col_name,
+                col_group=_col_group,
+                # Wall-clock time anchor: dialog override beats per-trace, beats file-level
+                t0_wall_clock=(_wc_override if _wc_override else _trace_t0wc),
+                source_time_format=self.load_result.source_time_format,
+                # Segment metadata — per-trace if available, file-level fallback
+                segments=_trace_segs,
+                primary_segment=_ts_seg.get("primary_segment", _default_primary),
+                non_primary_viewmode=_ts_seg.get("non_primary_viewmode", _default_viewmode),
             )
 
             # For sample-based time, apply t0 offset via dt-based shift
@@ -677,6 +1333,11 @@ class ImportDialog(QDialog):
         self.replace_existing    = self.chk_replace.isChecked()
         self.reset_view          = self.chk_reset_view.isChecked()
         self.reset_retrigger     = self.chk_reset_retrigger.isChecked()
+        self.remove_cursors      = self.chk_remove_cursors.isChecked()
+        self.honor_skip_rows     = self.chk_honor_skip_rows.isChecked()
+        self._settings["import_honor_skip_rows"]    = self.honor_skip_rows
+        self._settings["import_t0_override_enabled"] = self.chk_t0_override.isChecked()
+        self._settings["import_epoch_local"]         = self.rb_epoch_local.isChecked()
         # Persist last-used global scale values
         self._settings["last_gain"]   = self.edit_global_gain.text().strip()
         self._settings["last_offset"] = self.edit_global_offset.text().strip()
@@ -687,8 +1348,112 @@ class ImportDialog(QDialog):
         self.accept()
 
 
+class _ImportGroupHeader(QWidget):
+    """Styled group header bar: fold toggle, ✓ All / ✗ None, and drop target.
+
+    Accepts drops of _COL_DRAG_MIME (column name bytes).  When a column is
+    dropped, on_drop(col_name, group_name) is called so the ImportDialog can
+    update row.col_group and rebuild the list.
+
+    Colours are derived from the active theme so the header looks correct in
+    every theme.  Falls back to neutral values when theme=None.
+    """
+
+    def __init__(self, group_name: str, rows_list: list,
+                 on_drop=None, on_fold_changed=None, theme=None, parent=None):
+        super().__init__(parent)
+        self._group_name      = group_name
+        self._rows_list       = rows_list
+        self._on_drop         = on_drop
+        self._on_fold_changed = on_fold_changed
+        self._collapsed       = False
+
+        # Derive colours from theme; fall back to mid-neutral values that work
+        # reasonably on any background rather than hardcoded dark-only colours.
+        _pv = (lambda k, d: theme.pv(k, d)) if theme else (lambda _, d: d)
+        bg      = _pv("bg_panel",  "#1e1e2e")
+        border  = _pv("border",    "#3a3a5a")
+        accent  = _pv("accent",    "#6060c0")
+        text_hd = _pv("text_dim",  "#8888bb")
+
+        self._base_style = (
+            f"background: {bg}; "
+            f"border-top: 1px solid {border}; border-bottom: 1px solid {border};")
+        self._drop_style = (
+            f"background: {bg}; "
+            f"border-top: 2px solid {accent}; border-bottom: 2px solid {accent};")
+
+        self.setFixedHeight(28)
+        self.setStyleSheet(self._base_style)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptDrops(True)
+
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(8, 3, 4, 3)
+
+        self._lbl = QLabel(f"▼  {group_name}")
+        self._lbl.setStyleSheet(
+            f"color: {accent}; font-weight: bold; font-size: 10px; "
+            f"background: transparent; border: none;")
+        hl.addWidget(self._lbl)
+        hl.addStretch()
+
+        btn_all  = QPushButton("✓ All")
+        btn_none = QPushButton("✗ None")
+        btn_all.setFixedSize(52, 18)
+        btn_none.setFixedSize(52, 18)
+        # Keep the All/None buttons subtly coloured but theme-neutral
+        btn_all.setStyleSheet(
+            f"QPushButton {{ font-size: 9px; color: {text_hd}; background: transparent; "
+            f"border: 1px solid {border}; border-radius: 2px; }} "
+            f"QPushButton:hover {{ color: #80e080; border-color: #408040; }}")
+        btn_none.setStyleSheet(
+            f"QPushButton {{ font-size: 9px; color: {text_hd}; background: transparent; "
+            f"border: 1px solid {border}; border-radius: 2px; }} "
+            f"QPushButton:hover {{ color: #e08080; border-color: #804040; }}")
+        btn_all.clicked.connect(
+            lambda: [r.chk_enable.setChecked(True)
+                     for r in self._rows_list if r.chk_enable.isEnabled()])
+        btn_none.clicked.connect(
+            lambda: [r.chk_enable.setChecked(False)
+                     for r in self._rows_list if r.chk_enable.isEnabled()])
+        hl.addWidget(btn_all)
+        hl.addWidget(btn_none)
+
+    def set_collapsed(self, collapsed: bool):
+        self._collapsed = collapsed
+        self._lbl.setText(f"{'▶' if collapsed else '▼'}  {self._group_name}")
+        for r in self._rows_list:
+            r.setVisible(not collapsed)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.set_collapsed(not self._collapsed)
+        if self._on_fold_changed:
+            self._on_fold_changed(self._group_name, self._collapsed)
+
+    # ── Drag-drop target ──────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(_COL_DRAG_MIME):
+            event.acceptProposedAction()
+            self.setStyleSheet(self._drop_style)
+
+    def dragLeaveEvent(self, event):
+        super().dragLeaveEvent(event)
+        self.setStyleSheet(self._base_style)
+
+    def dropEvent(self, event):
+        self.setStyleSheet(self._base_style)
+        col_name = event.mimeData().data(_COL_DRAG_MIME).data().decode()
+        if self._on_drop:
+            self._on_drop(col_name, self._group_name)
+        event.acceptProposedAction()
+
+
 def _fmt_duration(dur: float) -> str:
     if dur <= 0: return "0 s"
+    if dur < 1e-9: return f"{dur*1e12:.3g} ps"
     if dur < 1e-6: return f"{dur*1e9:.3g} ns"
     if dur < 1e-3: return f"{dur*1e6:.3g} µs"
     if dur < 1:    return f"{dur*1e3:.3g} ms"

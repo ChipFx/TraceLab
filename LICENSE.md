@@ -1,6 +1,6 @@
 # ChipFX TraceLab — License
 
-**Copyright © [YEAR] [YOUR NAME / ChipFX]**  
+**Copyright © 2026 Robert van Leeuwen, ChipFX**  
 All rights reserved.
 
 ---
@@ -38,10 +38,11 @@ non-exclusive, free-of-charge license to:
      in derived software.
 
 2. **Branding Retention (Requested, Not Mandatory)**  
-   We kindly request — but do not legally require — that the TraceLab branding
-   (logo, name, and "Powered by ChipFX TraceLab" notice) be retained in the
-   user interface of distributed versions. Retaining the branding helps the
-   project gain visibility and supports continued development.
+   We kindly request — but do not legally require, for complicated lawyery reasons — 
+   that the TraceLab branding (logo, name, and "Powered by ChipFX TraceLab" 
+   notice) be retained in the user interface of distributed versions. 
+   Retaining the branding helps the project gain visibility and supports continued development.
+   Consider this the "be a decent human" clause.
 
 3. **Notice File**  
    All copies or substantial portions of the software must include the
@@ -66,5 +67,5 @@ non-exclusive, free-of-charge license to:
 
 ---
 
-*This license was last updated: 2026-04-17*  
+*This license was last updated: 2026-04-21*  
 *For questions, contact: http://chipfx.com*

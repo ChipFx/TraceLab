@@ -24,6 +24,9 @@ from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
 from core.plugin_manager import PluginManager
 from core.scope_status_bar import ScopeStatusBar, BAR_H
+from core.language_manager import get_language_manager
+from core.notice_manager import get_notice_manager
+from core.notice_bar_widget import NoticeBarWidget
 from core.draw_mode import (
     DEFAULT_DENSITY_PEN_MAPPING,
     DEFAULT_DRAW_MODE,
@@ -84,11 +87,220 @@ def _hex_perceived_luminance(hex_color: str) -> float:
     return 0.299 * r + 0.587 * g + 0.114 * b
 
 
+# ── CSV export helpers ────────────────────────────────────────────────────────
+
+def _meta_header_comments(traces) -> list:
+    """
+    Build TraceLab '#trace_meta=' comment lines for a set of exported traces.
+
+    Everything is per-trace — different captures can have different sample rates,
+    wall-clock anchors and channel metadata.
+
+    Per-trace format (one line per trace that has any metadata):
+      #trace_meta={"label","sps=10000","dt=0.0001","t0_wall_clock=...","unit=V",
+                   "coupling=DC","impedance=1M","bwlimit=200M"}
+
+    Rules:
+      - Both sps= and dt= are written when set; neither is skipped because they
+        are stored as separate floats and round-tripping through only one can
+        accumulate error.
+      - t0_wall_clock= is written per-trace; each capture has its own anchor.
+      - unit=, coupling=, impedance=, bwlimit= written when non-empty.
+      - gain= / offset= are intentionally omitted: the exported data is already
+        processed_data (scaling already applied), so writing them would cause
+        double-application on re-import.
+      - The first token is the trace label (= column name in the CSV header),
+        so the parser can match #trace_meta to the right column.
+    """
+    lines = []
+    for trace in traces:
+        attrs = []
+        if trace.sample_rate and trace.sample_rate != 1.0:
+            attrs.append(f"sps={trace.sample_rate:.10g}")
+        if trace.dt and trace.dt != 1.0:
+            attrs.append(f"dt={trace.dt:.10g}")
+        if trace.t0_wall_clock:
+            attrs.append(f"t0_wall_clock={trace.t0_wall_clock}")
+        if trace.unit and trace.unit not in ("", "raw"):
+            attrs.append(f"unit={trace.unit}")
+        if trace.coupling:
+            attrs.append(f"coupling={trace.coupling}")
+        if trace.impedance:
+            attrs.append(f"impedance={trace.impedance}")
+        if trace.bwlimit:
+            attrs.append(f"bwlimit={trace.bwlimit}")
+        if attrs:
+            quoted = ",".join(f'"{a}"' for a in attrs)
+            lines.append(f'#trace_meta={{"{trace.label}",{quoted}}}')
+
+    # Group membership — one #addgroup= line per unique group, listing all
+    # member labels.  The first token in the braces is the group name;
+    # subsequent tokens are column names (= trace labels in the exported CSV).
+    groups: dict = {}
+    for trace in traces:
+        if trace.col_group:
+            groups.setdefault(trace.col_group, []).append(trace.label)
+    for group_name, members in groups.items():
+        quoted = ",".join(f'"{m}"' for m in members)
+        lines.append(f'#addgroup={{"{group_name}",{quoted}}}')
+
+    return lines
+
+
+def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
+    """
+    Viewport-clipped flat CSV export (existing behaviour).
+    When primary_only=True and a trace carries segments, only the primary
+    segment's slice is exported (no segment headers written).
+    """
+    import numpy as np
+
+    def _seg_slice(trace):
+        """Return (time_array, data_array) for the relevant segment slice."""
+        if primary_only and trace.segments:
+            si = trace.primary_segment if trace.primary_segment is not None else 0
+            si = max(0, min(si, len(trace.segments) - 1))
+            s, e = trace.segments[si][0], trace.segments[si][1]
+            return trace.time_axis[s:e], trace.processed_data[s:e]
+        return trace.time_axis, trace.processed_data
+
+    ref_ta, _ = _seg_slice(traces[0])
+    mask  = (ref_ta >= x0) & (ref_ta <= x1)
+    ref_t = ref_ta[mask]
+
+    col_slices = [_seg_slice(t) for t in traces]
+
+    # Per-trace valid time window: half-sample tolerance at each end so that
+    # the exact first/last sample still matches despite floating-point jitter.
+    trace_lo = []
+    trace_hi = []
+    for (ta, _), trace in zip(col_slices, traces):
+        if len(ta):
+            eps = trace.dt * 0.5 if trace.dt > 0 else 1e-12
+            trace_lo.append(ta[0]  - eps)
+            trace_hi.append(ta[-1] + eps)
+        else:
+            trace_lo.append(None)
+            trace_hi.append(None)
+
+    # Build data rows, recording the first and last row (1-based) that each
+    # trace actually contributes a value — needed for #trace_data_range= headers.
+    first_row = [None] * len(traces)
+    last_row  = [None] * len(traces)
+    data_lines = []
+
+    for row_idx, t_val in enumerate(ref_t, start=1):
+        row = [f"{t_val:.10g}"]
+        for i, ((ta, ya), trace) in enumerate(zip(col_slices, traces)):
+            lo, hi = trace_lo[i], trace_hi[i]
+            if lo is None or t_val < lo or t_val > hi:
+                row.append("")        # empty cell — outside this trace's time range
+            else:
+                if len(ta) < 2:
+                    row.append(f"{ya[0]:.10g}" if len(ya) else "")
+                else:
+                    idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
+                    idx = max(0, min(idx, len(ya) - 1))
+                    row.append(f"{ya[idx]:.10g}")
+                if first_row[i] is None:
+                    first_row[i] = row_idx
+                last_row[i] = row_idx
+        data_lines.append(",".join(row))
+
+    # Range headers for traces that don't cover the full exported window.
+    # Omitted when the trace spans every row (no information gain).
+    n_rows = len(ref_t)
+    range_comments = []
+    for i, trace in enumerate(traces):
+        r0, r1 = first_row[i], last_row[i]
+        if r0 is not None and r1 is not None and (r0 != 1 or r1 != n_rows):
+            range_comments.append(
+                f'#trace_data_range={{"{trace.label}",{r0},{r1}}}')
+
+    lines = _meta_header_comments(traces)
+    lines.extend(range_comments)
+    lines.append("time," + ",".join(t.label for t in traces))
+    lines.extend(data_lines)
+    return lines
+
+
+def _build_segmented_csv(traces):
+    """
+    Full-data segmented TraceLab native export.
+    Segmented traces expand into .SEG0, .SEG1, … columns with segment
+    headers; non-segmented traces export as a single column.
+    All data is written without viewport clipping.
+    """
+    import numpy as np
+
+    header_comments = []
+    col_order  = ["Time"]
+    col_arrays = {}
+
+    # Reference time axis: first segment of the first segmented trace.
+    # All LeCroy-style segments share an identical trigger-relative time axis,
+    # so one copy is sufficient for the Time column.
+    ref_time = None
+    for trace in traces:
+        if trace.segments is not None:
+            s0, e0 = trace.segments[0][0], trace.segments[0][1]
+            ref_time = trace.time_axis[s0:e0]
+            break
+    if ref_time is None:
+        ref_time = traces[0].time_axis
+    col_arrays["Time"] = ref_time
+    n_rows = len(ref_time)
+
+    for trace in traces:
+        if trace.segments is not None:
+            seg_col_names = [f"{trace.label}.SEG{i}"
+                             for i in range(len(trace.segments))]
+
+            # #segments= header (named-column form)
+            header_comments.append(
+                '#segments=("{}",{})'.format(
+                    trace.label,
+                    ",".join(f'"{n}"' for n in seg_col_names)))
+
+            # #segment_meta= and per-segment column data
+            for i, (s, e, t0_abs, t0_rel) in enumerate(trace.segments):
+                seg_data = trace.processed_data[s:e]
+                header_comments.append(
+                    f'#segment_meta={{"{trace.label}",{i},1,'
+                    f'{len(seg_data)},{t0_abs:.6f},{t0_rel:.10g}}}')
+                col_order.append(seg_col_names[i])
+                col_arrays[seg_col_names[i]] = seg_data
+
+            # #trace_settings= header  (positional: name, primary_segment, viewmode)
+            ps  = trace.primary_segment
+            vm  = trace.non_primary_viewmode or ""
+            header_comments.append(
+                f'#trace_settings={{"{trace.label}",'
+                f'{"null" if ps is None else ps},'
+                f'"{vm}"}}')
+        else:
+            col_order.append(trace.label)
+            col_arrays[trace.label] = trace.processed_data
+
+    lines = _meta_header_comments(traces) + header_comments
+    lines.append(",".join(col_order))
+    for row_idx in range(n_rows):
+        row = [f"{ref_time[row_idx]:.10g}"]
+        for col_name in col_order[1:]:
+            arr = col_arrays.get(col_name)
+            if arr is not None and row_idx < len(arr):
+                row.append(f"{arr[row_idx]:.10g}")
+            else:
+                row.append("")   # empty cell for shorter segments
+        lines.append(",".join(row))
+    return lines
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ChipFX TraceLab")
-        self.resize(1400, 800)
+        self.resize(1100, 680)
 
         self.theme = ThemeManager()
         self._traces: List[TraceModel] = []
@@ -145,6 +357,11 @@ class MainWindow(QMainWindow):
         s["viewport_preset_min"]     = self._limits_config.get("preset_min", 2048)
         s["viewport_preset_max"]     = self._limits_config.get("preset_max", 50_000)
         s["retrigger_extrap_mode"] = self._retrigger_extrap_mode
+        s["advanced_ui"] = dict(self._adv_ui)
+        s["time_scale_mode"] = self._time_scale_mode
+        s["smart_scale"] = dict(self._smart_scale)
+        s["process_segments"] = self._process_segments
+        s["scroll_primaries"] = self._scroll_primaries
         s["lane_label_size"] = self._lane_label_size
         s["show_lane_labels"] = self._show_lane_labels
         s["allow_theme_force_labels"] = self._allow_theme_force_labels
@@ -168,10 +385,14 @@ class MainWindow(QMainWindow):
         # Apply saved font scale
         if "font_scale" in self._settings:
             self._apply_font_scale(self._settings["font_scale"])
+        # Apply saved status bar scale
+        self._scope_status.set_scale(self._settings.get("status_bar_scale", 1.0))
         # Restore last view mode
         self._set_display_mode(self._display_mode, save=False)
         # Set branding on status bar
         self._scope_status.set_branding(self._get_branding_path())
+        # Window icon — render a square version of the branding SVG
+        self._set_window_icon()
 
     # ── UI Construction ────────────────────────────────────────────────
 
@@ -180,6 +401,12 @@ class MainWindow(QMainWindow):
         self._import_replace          = self._settings.get("import_replace", True)
         self._import_reset_view       = self._settings.get("import_reset_view", True)
         self._import_reset_retrigger  = self._settings.get("import_reset_retrigger", True)
+        self._rejection_enabled       = self._settings.get("rejection_enabled", False)
+        self._rejection_max_lines     = self._settings.get("rejection_max_lines", 10)
+        self._export_segments_mode    = self._settings.get("export_segments_mode", "all")
+        self._segments_dim_opacity    = self._settings.get("segments_dim_opacity", 30)
+        self._segments_dash_size      = self._settings.get("segments_dash_size", 6)
+        self._segments_gap_size       = self._settings.get("segments_gap_size", 6)
         self._y_lock_auto = self._settings.get("y_lock_auto", True)
         self._fft_min_freq = self._settings.get("fft_min_freq", 1.0)
         self._viewport_min_pts = self._settings.get("viewport_min_pts", 1024)
@@ -222,6 +449,53 @@ class MainWindow(QMainWindow):
         self._epoch_anchor_level: float = 0.0
         self._epoch_anchor_edge:  int   = -1
 
+        # ── Advanced UI settings ──────────────────────────────────────────────
+        _adv_defaults = {
+            "statusbar_scroll":      True,
+            "scroll_zoom_enabled":   True,
+            "scroll_list_enabled":   True,
+            "scroll_modifier_keys":  ["ctrl", "alt", "shift"],
+            "scroll_default":        "zoom",
+            "arrow_mode":            "pan_time",
+            "split_min_lane_height": 80,
+            "div_halves_px":         15,
+            "div_fifths_px":         30,
+            "div_tenths_px":         60,
+            "div_subdiv_label":      False,
+        }
+        self._adv_ui: dict = {**_adv_defaults,
+                              **self._settings.get("advanced_ui", {})}
+
+        # ── Time-axis scale mode ──────────────────────────────────────────────
+        # "standard" | "smart" | "real_time"
+        self._time_scale_mode: str = self._settings.get("time_scale_mode", "standard")
+
+        # ── Smart time-axis scale settings ────────────────────────────────────
+        _smart_defaults = {
+            "enabled":     False,
+            "max_seconds": 300,
+            "max_minutes": 120,
+            "max_hours":   24,
+        }
+        self._smart_scale: dict = {**_smart_defaults,
+                                   **self._settings.get("smart_scale", {})}
+        # Keep "enabled" consistent with the mode field
+        self._smart_scale["enabled"] = (self._time_scale_mode == "smart")
+
+        # ── Segment view rendering ────────────────────────────────────────────
+        self._process_segments: bool = bool(
+            self._settings.get("process_segments", True))
+        self._scroll_primaries: bool = bool(
+            self._settings.get("scroll_primaries", True))
+
+        # ── Language + notice infrastructure ─────────────────────────────────
+        _lang = self._settings.get("language", "en")
+        self._language_manager = get_language_manager(_lang)
+        self._notice_manager   = get_notice_manager()
+        # Cycle interval: float seconds, settings.json only (not in UI)
+        self._notice_cycle_interval_s: float = float(
+            self._settings.get("notice_cycle_interval_s", 3.0))
+
         # ── Periodicity estimation ────────────────────────────────────────────
         # Migrate any old method names that may live in settings.json
         _tier_migrate = {
@@ -247,6 +521,12 @@ class MainWindow(QMainWindow):
         self._channel_panel.order_changed.connect(self._on_channel_order_changed)
         self._channel_panel.interp_changed.connect(self._on_channel_interp_changed)
         self._channel_panel.reset_color_requested.connect(self._on_reset_trace_color)
+        self._channel_panel.trace_renamed.connect(self._on_trace_renamed)
+        self._channel_panel.segment_changed.connect(self._on_segment_changed)
+        self._channel_panel.unit_changed.connect(self._on_unit_changed)
+        self._channel_panel.trace_context_menu_requested.connect(
+            self._show_channel_context_menu)
+        self._channel_panel.set_scroll_primaries(self._scroll_primaries)
         self._splitter.addWidget(self._channel_panel)
 
         self._interp_mode = self._settings.get("interp_mode", "linear")
@@ -285,6 +565,15 @@ class MainWindow(QMainWindow):
         self._plot.sinc_active_changed.connect(self._on_sinc_active_changed)
         self._plot.view_changed.connect(self._refresh_status_bar)
         self._plot.view_changed.connect(self._on_view_changed_retrigger)
+        self._plot.trace_context_menu_requested.connect(
+            self._show_channel_context_menu)
+
+        # 0-ms single-shot timer coalesces rapid back-to-back _refresh_status_bar
+        # calls (e.g. hiding all 32 channels) into one actual redraw.
+        self._status_bar_refresh_timer = QTimer()
+        self._status_bar_refresh_timer.setSingleShot(True)
+        self._status_bar_refresh_timer.setInterval(0)
+        self._status_bar_refresh_timer.timeout.connect(self._do_refresh_status_bar)
 
         # Wrap plot + status bar in a vertical container
         plot_container = QWidget()
@@ -301,14 +590,30 @@ class MainWindow(QMainWindow):
         self._scope_status = ScopeStatusBar(self.theme.statusbar_palette())
         self._scope_status.toggle_trace_interp.connect(
             self._on_status_bar_toggle_interp)
+        self._scope_status.trace_context_menu_requested.connect(
+            self._show_channel_context_menu)
         # Insert status bar BEFORE the range bar — achieved by the fact
         # that _plot already has its range_bar at its bottom. We just add
         # the status bar after _plot in the outer container so visually:
         # [plot+range_bar] [status_bar] -- but range_bar is inside _plot.
         # Better: hide range_bar from _plot and add it here after status bar.
         self._plot._range_bar.setParent(None)  # detach from plot's layout
+        self._plot._range_bar.t0_date_requested.connect(self._show_t0_date_dialog)
         pcl.addWidget(self._scope_status)
         pcl.addWidget(self._plot._range_bar)
+
+        # Propagate advanced-UI settings to plot and status bar
+        self._plot.set_scroll_settings(self._adv_ui)
+        self._plot.set_min_lane_height(self._adv_ui.get("split_min_lane_height", 80))
+        self._scope_status.set_statusbar_scroll_enabled(
+            self._adv_ui.get("statusbar_scroll", True))
+        self._plot.set_div_settings(self._adv_ui)
+        self._plot.set_smart_scale(self._smart_scale)
+        self._plot.set_real_time(self._build_real_time_settings())
+        self._plot.set_process_segments(self._process_segments)
+        self._plot.set_segment_dim_opacity(self._segments_dim_opacity)
+        self._plot.set_segment_dash_pattern(
+            self._segments_dash_size, self._segments_gap_size)
 
         self._plot_container = plot_container
         self._splitter.addWidget(plot_container)
@@ -321,19 +626,21 @@ class MainWindow(QMainWindow):
         self._cursor_panel.set_t0_at_a.connect(self._cursor_set_t0_at_a)
         self._cursor_panel.jump_to_t0.connect(self._jump_to_t0)
         self._cursor_panel.remove_cursors.connect(self._plot.clear_cursors)
+        self._cursor_panel.remove_cursors.connect(self._cursor_panel.clear_readout)
         right_splitter.addWidget(self._cursor_panel)
 
         self._trigger_panel = TriggerPanel()
         self._trigger_panel.trigger_found.connect(self._on_trigger_found)
         self._trigger_panel.set_time_zero.connect(self._on_trigger_set_t0)
+        self._trigger_panel.restore_original_t0.connect(self._on_restore_original_t0)
         self._trigger_panel.place_cursor.connect(self._plot.set_cursor)
         self._trigger_panel.retrigger_update_requested.connect(self._reapply_retrigger)
         self._trigger_panel.chk_auto_retrigger.setChecked(
             self._settings.get("auto_retrigger", False))
         right_splitter.addWidget(self._trigger_panel)
 
-        right_splitter.setStretchFactor(0, 2)
-        right_splitter.setStretchFactor(1, 1)
+        right_splitter.setStretchFactor(0, 1)
+        right_splitter.setStretchFactor(1, 0)
         right_splitter.setSizes([420, 280])
         self._splitter.addWidget(right_splitter)
 
@@ -343,8 +650,20 @@ class MainWindow(QMainWindow):
         self._splitter.setSizes([180, 820, 310])
         main_layout.addWidget(self._splitter)
 
+        # Install app-level event filter so arrow keys work regardless of
+        # which child widget (e.g. pyqtgraph ViewBox) currently holds focus.
+        from PyQt6.QtWidgets import QApplication as _QApp
+        _QApp.instance().installEventFilter(self)
+
     def _build_menus(self):
+        from PyQt6.QtWidgets import QStyleFactory
         mb = self.menuBar()
+        # Use Fusion style for the menu bar so font-size is always respected.
+        # The native Windows style draws resting-state items via GDI and ignores
+        # Qt font settings; Fusion is fully Qt-drawn and scales correctly.
+        fusion = QStyleFactory.create("Fusion")
+        if fusion:
+            mb.setStyle(fusion)
 
         # ── File ──────────────────────────────────────────────────────
         file_menu = mb.addMenu("File")
@@ -460,6 +779,59 @@ class MainWindow(QMainWindow):
         self._theme_submenu = view_menu.addMenu("Theme")
         self._rebuild_theme_menu()
 
+        view_menu.addSeparator()
+        seg_view_menu = view_menu.addMenu("Segments")
+        seg_view_menu.setToolTipsVisible(True)
+        self._act_process_segments = seg_view_menu.addAction("Process Segments")
+        self._act_process_segments.setCheckable(True)
+        self._act_process_segments.setChecked(self._process_segments)
+        self._act_process_segments.setToolTip(
+            "When enabled, only the primary segment is drawn as the main trace;\n"
+            "other segments are shown according to their non-primary view mode.")
+        self._act_process_segments.toggled.connect(self._toggle_process_segments)
+        self._act_scroll_primaries = seg_view_menu.addAction("Scroll Primaries")
+        self._act_scroll_primaries.setCheckable(True)
+        self._act_scroll_primaries.setChecked(self._scroll_primaries)
+        self._act_scroll_primaries.setToolTip(
+            "When enabled, hovering the mouse over a channel in the panel\n"
+            "and scrolling the wheel steps through its primary segment.")
+        self._act_scroll_primaries.toggled.connect(self._toggle_scroll_primaries)
+        seg_view_menu.addSeparator()
+        seg_view_menu.addAction("Dim Opacity…").triggered.connect(
+            self._dlg_segments_dim_opacity)
+        seg_dash_menu = seg_view_menu.addMenu("Dash Settings")
+        seg_dash_menu.addAction("Dash Size…").triggered.connect(
+            self._dlg_segments_dash_size)
+        seg_dash_menu.addAction("Gap Size…").triggered.connect(
+            self._dlg_segments_gap_size)
+
+        view_menu.addSeparator()
+        time_scale_menu = view_menu.addMenu("Time Scale")
+        ts_group = QActionGroup(self)
+        ts_group.setExclusive(True)
+        self._act_ts_standard  = time_scale_menu.addAction("Standard")
+        self._act_ts_smart     = time_scale_menu.addAction("Smart Scale  (MM:SS / HH:MM:SS…)")
+        self._act_ts_realtime  = time_scale_menu.addAction("Real Time")
+        for act in (self._act_ts_standard, self._act_ts_smart, self._act_ts_realtime):
+            act.setCheckable(True)
+            ts_group.addAction(act)
+        self._act_ts_standard.setToolTip("Label the time axis with SI prefixes (ns/µs/ms/s/ks).")
+        self._act_ts_smart.setToolTip(
+            "Long time axes display as MM:SS, HH:MM:SS, or DD:HH:MM:SS instead of kilo-seconds.")
+        self._act_ts_realtime.setToolTip(
+            "Show absolute wall-clock time on the axis.\n"
+            "Requires at least one loaded trace with a t0 wall-clock timestamp.")
+        if self._time_scale_mode == "smart":
+            self._act_ts_smart.setChecked(True)
+        elif self._time_scale_mode == "real_time":
+            self._act_ts_realtime.setChecked(True)
+        else:
+            self._act_ts_standard.setChecked(True)
+        ts_group.triggered.connect(self._on_time_scale_changed)
+        time_scale_menu.addSeparator()
+        time_scale_menu.addAction("Smart Scale Settings…").triggered.connect(
+            self._dlg_smart_scale_settings)
+
         # ── Analysis ──────────────────────────────────────────────────
         analysis_menu = mb.addMenu("Analysis")
         a = analysis_menu.addAction("FFT...")
@@ -522,6 +894,7 @@ class MainWindow(QMainWindow):
         self._act_rt_averaging.setChecked(self._retrigger_mode == MODE_AVERAGING)
         self._act_rt_averaging.setToolTip(
             "Average multiple trigger-aligned segments to reduce noise.")
+        persist_group.addAction(self._act_rt_averaging)
         self._act_rt_averaging.triggered.connect(
             self._toggle_retrigger_averaging)
 
@@ -532,6 +905,7 @@ class MainWindow(QMainWindow):
         self._act_rt_interp.setToolTip(
             "Interleave multiple trigger-aligned segments to increase "
             "effective sample resolution.")
+        persist_group.addAction(self._act_rt_interp)
         self._act_rt_interp.triggered.connect(
             self._toggle_retrigger_interpolation)
 
@@ -600,8 +974,11 @@ class MainWindow(QMainWindow):
 
         # ── Settings ──────────────────────────────────────────────────
         settings_menu = mb.addMenu("Settings")
-        settings_menu.addAction("Font Scale...").triggered.connect(
+        scale_menu = settings_menu.addMenu("Scale")
+        scale_menu.addAction("Font Scale...").triggered.connect(
             self._show_font_scale_dialog)
+        scale_menu.addAction("Status Bar Scale...").triggered.connect(
+            self._show_status_bar_scale_dialog)
         settings_menu.addAction("Decimal Separator...").triggered.connect(
             self._show_decimal_sep_dialog)
         settings_menu.addSeparator()
@@ -709,6 +1086,158 @@ class MainWindow(QMainWindow):
         self._act_allow_force_labels.triggered.connect(
             self._toggle_allow_theme_force_labels)
 
+        settings_menu.addSeparator()
+        import_menu = settings_menu.addMenu("Import")
+        import_menu.setToolTipsVisible(True)
+        rejection_menu = import_menu.addMenu("Rejection")
+        rejection_menu.setToolTipsVisible(True)
+        rejection_menu.setToolTip(
+            "Configure if and how many lines between header and data\n"
+            "get rejected if they are malformed before an error occurs.")
+
+        self._act_rejection_enabled = rejection_menu.addAction("Enabled")
+        self._act_rejection_enabled.setCheckable(True)
+        self._act_rejection_enabled.setChecked(self._rejection_enabled)
+        self._act_rejection_enabled.setToolTip(
+            "When enabled, lines between the column header and the first\n"
+            "valid data row are silently skipped if they contain no\n"
+            "recognisable numeric data (wrong column count, pure text, etc.).\n"
+            "Useful for formats that embed extra comment or unit rows.")
+        self._act_rejection_enabled.triggered.connect(
+            self._toggle_rejection_enabled)
+
+        rejection_menu.addAction("Max Lines…").triggered.connect(
+            self._dlg_rejection_max_lines)
+
+        settings_menu.addSeparator()
+        export_menu = settings_menu.addMenu("Export")
+        export_menu.setToolTipsVisible(True)
+        seg_export_menu = export_menu.addMenu("Segments")
+        seg_export_menu.setToolTipsVisible(True)
+        seg_export_group = QActionGroup(self)
+        seg_export_group.setExclusive(True)
+        self._act_export_seg_all = seg_export_menu.addAction("Export All Always")
+        self._act_export_seg_all.setCheckable(True)
+        self._act_export_seg_all.setToolTip(
+            "Export every segment of a segmented trace.\n"
+            "Each segment becomes its own column (Trace.SEG0, Trace.SEG1, …).")
+        self._act_export_seg_primary = seg_export_menu.addAction("Export Primary Only")
+        self._act_export_seg_primary.setCheckable(True)
+        self._act_export_seg_primary.setToolTip(
+            "Export only the primary segment of each segmented trace.\n"
+            "If no primary is set, segment 0 is used.\n"
+            "The exported file is non-segmented (no #segments= headers).")
+        seg_export_group.addAction(self._act_export_seg_all)
+        seg_export_group.addAction(self._act_export_seg_primary)
+        (self._act_export_seg_primary
+         if self._export_segments_mode == "primary_only"
+         else self._act_export_seg_all).setChecked(True)
+        self._act_export_seg_all.triggered.connect(
+            lambda: self._set_export_segments_mode("all"))
+        self._act_export_seg_primary.triggered.connect(
+            lambda: self._set_export_segments_mode("primary_only"))
+
+        settings_menu.addSeparator()
+        adv_ui_menu = settings_menu.addMenu("Advanced UI")
+        adv_ui_menu.setToolTipsVisible(True)
+
+        # ── Mouse → Scroll submenu ────────────────────────��────────────
+        scroll_menu = adv_ui_menu.addMenu("Mouse → Scroll")
+        scroll_menu.setToolTipsVisible(True)
+
+        self._act_statusbar_scroll = scroll_menu.addAction("Enable Status Bar Scrolling")
+        self._act_statusbar_scroll.setCheckable(True)
+        self._act_statusbar_scroll.setChecked(self._adv_ui.get("statusbar_scroll", True))
+        self._act_statusbar_scroll.setToolTip(
+            "Mouse wheel scrolls the channel-block status bar horizontally.\n"
+            "Wheel tilt (if present) snaps one block at a time.")
+        self._act_statusbar_scroll.triggered.connect(self._toggle_statusbar_scroll)
+
+        scroll_menu.addSeparator()
+
+        self._act_scroll_zoom = scroll_menu.addAction("Zoom with Scroll Wheel")
+        self._act_scroll_zoom.setCheckable(True)
+        self._act_scroll_zoom.setChecked(self._adv_ui.get("scroll_zoom_enabled", True))
+        self._act_scroll_zoom.setToolTip(
+            "Mouse wheel zooms the trace view (pyqtgraph default).")
+        self._act_scroll_zoom.triggered.connect(self._toggle_scroll_zoom)
+
+        self._act_scroll_list = scroll_menu.addAction("Scroll Trace List with Scroll Wheel")
+        self._act_scroll_list.setCheckable(True)
+        self._act_scroll_list.setChecked(self._adv_ui.get("scroll_list_enabled", True))
+        self._act_scroll_list.setToolTip(
+            "Mouse wheel can scroll the split-view trace list vertically\n"
+            "(controlled by modifier keys or default action).")
+        self._act_scroll_list.triggered.connect(self._toggle_scroll_list)
+
+        scroll_menu.addSeparator()
+        scroll_default_menu = scroll_menu.addMenu("Default Scroll Action")
+        scroll_default_menu.setToolTipsVisible(True)
+        _sdg = QActionGroup(self)
+        _sdg.setExclusive(True)
+        self._act_scroll_default_zoom = scroll_default_menu.addAction("Zoom (no modifier)")
+        self._act_scroll_default_zoom.setCheckable(True)
+        self._act_scroll_default_zoom.setChecked(
+            self._adv_ui.get("scroll_default", "zoom") == "zoom")
+        self._act_scroll_default_zoom.setToolTip(
+            "Without a modifier key → zoom; with modifier → scroll list.")
+        _sdg.addAction(self._act_scroll_default_zoom)
+        self._act_scroll_default_list = scroll_default_menu.addAction("Scroll List (no modifier)")
+        self._act_scroll_default_list.setCheckable(True)
+        self._act_scroll_default_list.setChecked(
+            self._adv_ui.get("scroll_default", "zoom") == "scroll_list")
+        self._act_scroll_default_list.setToolTip(
+            "Without a modifier key → scroll list; with modifier → zoom.")
+        _sdg.addAction(self._act_scroll_default_list)
+        self._act_scroll_default_zoom.triggered.connect(
+            lambda: self._set_scroll_default("zoom"))
+        self._act_scroll_default_list.triggered.connect(
+            lambda: self._set_scroll_default("scroll_list"))
+
+        scroll_menu.addSeparator()
+        scroll_menu.addAction("Set Modifier Keys…").triggered.connect(
+            self._dlg_scroll_modifier_keys)
+
+        # ── Keyboard → Arrows submenu ──────────────────────────────────
+        arrows_menu = adv_ui_menu.addMenu("Keyboard → Arrows")
+        arrows_menu.setToolTipsVisible(True)
+        _akg = QActionGroup(self)
+        _akg.setExclusive(True)
+        arrow_mode = self._adv_ui.get("arrow_mode", "pan_time")
+        self._act_arrow_off = arrows_menu.addAction("Off / do not use")
+        self._act_arrow_off.setCheckable(True)
+        self._act_arrow_off.setChecked(arrow_mode == "off")
+        self._act_arrow_off.setToolTip("Arrow keys have no effect on the plot.")
+        _akg.addAction(self._act_arrow_off)
+        self._act_arrow_pan = arrows_menu.addAction("Pan time axis (Left / Right)")
+        self._act_arrow_pan.setCheckable(True)
+        self._act_arrow_pan.setChecked(arrow_mode == "pan_time")
+        self._act_arrow_pan.setToolTip(
+            "Left/Right arrows pan the time axis by 10% of the visible span.\n"
+            "Up/Down arrows scroll the split-view trace list.")
+        _akg.addAction(self._act_arrow_pan)
+        self._act_arrow_statusbar = arrows_menu.addAction("Pan status bar by 1 block")
+        self._act_arrow_statusbar.setCheckable(True)
+        self._act_arrow_statusbar.setChecked(arrow_mode == "scroll_statusbar")
+        self._act_arrow_statusbar.setToolTip(
+            "Left/Right arrows snap the status bar one channel block at a time.")
+        _akg.addAction(self._act_arrow_statusbar)
+        self._act_arrow_off.triggered.connect(
+            lambda: self._set_arrow_mode("off"))
+        self._act_arrow_pan.triggered.connect(
+            lambda: self._set_arrow_mode("pan_time"))
+        self._act_arrow_statusbar.triggered.connect(
+            lambda: self._set_arrow_mode("scroll_statusbar"))
+
+        # ── Split View submenu ─────────────────────────────────────────
+        split_view_menu = adv_ui_menu.addMenu("Split View")
+        split_view_menu.addAction("Minimum Trace Height…").triggered.connect(
+            self._dlg_min_lane_height)
+
+        # ── Div Settings ───────────────────────────────────────────────
+        adv_ui_menu.addAction("Div Settings…").triggered.connect(
+            self._dlg_div_settings)
+
         # ── Plugins ───────────────────────────────────────────────────────
         self._plugins_menu = mb.addMenu("Plugins")
         self._plugins_menu.addAction("Reload Plugins").triggered.connect(
@@ -777,6 +1306,14 @@ class MainWindow(QMainWindow):
         self._status_lbl = QLabel("Ready  |  No data loaded")
         self._status_lbl.setStyleSheet("padding: 2px 8px;")
         self.statusBar().addWidget(self._status_lbl)
+
+        self._notice_bar = NoticeBarWidget(
+            self._notice_manager,
+            self._language_manager,
+            cycle_interval_s=self._notice_cycle_interval_s,
+        )
+        self.statusBar().addPermanentWidget(self._notice_bar)
+
         self._cursor_status = QLabel("")
         self._cursor_status.setStyleSheet("padding: 2px 8px; color: #aaa;")
         self.statusBar().addPermanentWidget(self._cursor_status)
@@ -816,7 +1353,11 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        result = load_csv(path)
+        result = load_csv(path,
+                          rejection_enabled=self._rejection_enabled,
+                          rejection_max_lines=self._rejection_max_lines,
+                          honor_skip_rows=self._settings.get(
+                              "import_honor_skip_rows", True))
         if result.error:
             QMessageBox.critical(self, "Load Error", result.error)
             return
@@ -825,7 +1366,7 @@ class MainWindow(QMainWindow):
 
         # Pass persistent settings to dialog
         dlg = ImportDialog(result, persistent_settings=self._settings,
-                           parent=self)
+                           theme=self.theme, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -835,14 +1376,21 @@ class MainWindow(QMainWindow):
         self._settings["import_replace"]          = self._import_replace
         self._settings["import_reset_view"]       = self._import_reset_view
         self._settings["import_reset_retrigger"]  = dlg.reset_retrigger
+        self._settings["import_remove_cursors"]   = dlg.remove_cursors
+        self._settings["import_honor_skip_rows"]  = dlg.honor_skip_rows
 
         if dlg.reset_retrigger:
             self._set_retrigger_mode(MODE_OFF)
 
+        if dlg.remove_cursors:
+            self._plot.clear_cursors()
+            self._cursor_panel.clear_readout()
+
         if dlg.replace_existing:
             self._clear_all(confirm=False)
 
-        self._batch_import_traces(dlg.result_traces)
+        self._batch_import_traces(dlg.result_traces,
+                                   replace_existing=dlg.replace_existing)
 
         if dlg.reset_view:
             meta = result.metadata
@@ -854,32 +1402,65 @@ class MainWindow(QMainWindow):
 
         self._update_status()
 
-    def _batch_import_traces(self, traces: List[TraceModel]) -> None:
+    def _unique_trace_name(self, name: str) -> str:
+        """Return name, or name_001 / name_002 … if name is already taken."""
+        existing = {t.name for t in self._traces}
+        if name not in existing:
+            return name
+        i = 1
+        while True:
+            candidate = f"{name}_{i:03d}"
+            if candidate not in existing:
+                return candidate
+            i += 1
+
+    def _batch_import_traces(self, traces: List[TraceModel],
+                             replace_existing: bool = True) -> None:
         """Add/replace multiple traces in a single plot rebuild.
-        Used by _open_csv so 8 traces cause one rebuild, not eight."""
+        Used by _open_csv so 8 traces cause one rebuild, not eight.
+        When replace_existing=False, name collisions get a _001/_002 suffix
+        instead of overwriting the existing trace."""
         for trace in traces:
             existing_names = [t.name for t in self._traces]
             if trace.name in existing_names:
-                idx = existing_names.index(trace.name)
-                old_trace = self._traces[idx]
-                trace.color = old_trace.color
-                trace.theme_color_index = old_trace.theme_color_index
-                trace.use_theme_color = old_trace.use_theme_color
-                self._traces[idx] = trace
-                self._channel_panel.refresh_all()
+                if replace_existing:
+                    idx = existing_names.index(trace.name)
+                    old_trace = self._traces[idx]
+                    trace.color = old_trace.color
+                    trace.theme_color_index = old_trace.theme_color_index
+                    trace.use_theme_color = old_trace.use_theme_color
+                    self._traces[idx] = trace
+                    self._channel_panel.refresh_all()
+                else:
+                    # Keep both — rename the incoming trace to avoid collision
+                    unique = self._unique_trace_name(trace.name)
+                    trace.name  = unique
+                    trace.label = unique
+                    n = len(self._traces)
+                    trace.reset_color_to_theme(n)
+                    trace.sync_theme_color(self.theme.active_theme)
+                    self._traces.append(trace)
+                    self._channel_panel.add_trace(trace)
             else:
                 n = len(self._traces)
                 trace.reset_color_to_theme(n)
                 trace.sync_theme_color(self.theme.active_theme)
+                if trace.original_time_zero is None and trace.time_axis is not None and len(trace.time_axis):
+                    trace.original_time_zero = float(trace.time_axis[0])
                 self._traces.append(trace)
                 self._channel_panel.add_trace(trace)
         # Single plot rebuild for the whole batch
         self._plot.batch_add_traces(traces)
         self._refresh_trigger_channels()
         self._refresh_status_bar()
+        self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
+        if self._time_scale_mode == "real_time":
+            self._apply_time_scale()
         # Start async period estimation for every trace (after UI is live)
         for trace in traces:
             self._estimate_period_async(trace)
+        self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _add_trace(self, trace: TraceModel):
         """Add or replace a single trace (used by plugins/retrigger; not import)."""
@@ -901,6 +1482,8 @@ class MainWindow(QMainWindow):
         n = len(self._traces)
         trace.reset_color_to_theme(n)
         trace.sync_theme_color(self.theme.active_theme)
+        if trace.original_time_zero is None and trace.time_axis is not None and len(trace.time_axis):
+            trace.original_time_zero = float(trace.time_axis[0])
 
         self._traces.append(trace)
         self._channel_panel.add_trace(trace)
@@ -908,6 +1491,9 @@ class MainWindow(QMainWindow):
         self._estimate_period_async(trace)
         self._refresh_trigger_channels()
         self._refresh_status_bar()
+        self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
+        self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _remove_trace(self, trace_name: str):
         self._traces = [t for t in self._traces if t.name != trace_name]
@@ -915,6 +1501,9 @@ class MainWindow(QMainWindow):
         self._plot.remove_trace(trace_name)
         self._refresh_trigger_channels()
         self._update_status()
+        self._cursor_panel.set_trace_order(self._channel_panel.get_ordered_names())
+        self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _clear_all(self, confirm: bool = True):
         if confirm and self._traces:
@@ -934,6 +1523,8 @@ class MainWindow(QMainWindow):
         self._last_retrigger_span = 0.0
         self._refresh_trigger_channels()
         self._update_status()
+        self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
 
     def _export_csv(self):
         if not self._traces:
@@ -951,23 +1542,15 @@ class MainWindow(QMainWindow):
         if not visible:
             return
 
-        import numpy as np
-        ref_t = visible[0].time_axis
-        mask = (ref_t >= x0) & (ref_t <= x1)
-        ref_t = ref_t[mask]
+        any_segmented = any(t.segments is not None for t in visible)
+        primary_only  = (self._export_segments_mode == "primary_only")
 
-        lines = ["time," + ",".join(t.label for t in visible)]
-        for t_val in ref_t:
-            row = [f"{t_val:.10g}"]
-            for trace in visible:
-                ta = trace.time_axis
-                ya = trace.processed_data
-                idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
-                idx = max(0, min(idx, len(ya) - 1))
-                row.append(f"{ya[idx]:.10g}")
-            lines.append(",".join(row))
+        if any_segmented and not primary_only:
+            lines = _build_segmented_csv(visible)
+        else:
+            lines = _build_flat_csv(visible, x0, x1, primary_only=primary_only)
 
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         self._status_lbl.setText(f"Exported: {os.path.basename(path)}")
 
@@ -1052,6 +1635,60 @@ class MainWindow(QMainWindow):
 
         return ""
 
+    def _set_window_icon(self):
+        """Load icon.svg (icon.svg → branding_Dark.svg → nothing) and apply
+        to both the window title bar and the OS taskbar / program bar.
+
+        On Windows, also sets the AppUserModelID so the OS assigns our icon
+        to the taskbar button instead of grouping it under the Python icon.
+        """
+        base   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        assets = os.path.join(base, "assets")
+
+        # Resolution order: dedicated icon first, branding fallback second
+        icon_path = None
+        for name in ("icon.svg", "branding_Dark.svg"):
+            candidate = os.path.join(assets, name)
+            if os.path.exists(candidate):
+                icon_path = candidate
+                break
+        if icon_path is None:
+            return
+
+        try:
+            from PyQt6.QtSvg import QSvgRenderer
+            from PyQt6.QtCore import QRectF
+            from PyQt6.QtGui import QPainter
+            from PyQt6.QtWidgets import QApplication
+            renderer = QSvgRenderer(icon_path)
+            if not renderer.isValid():
+                return
+            # Build a multi-resolution QIcon so it looks sharp at every DPI
+            icon = QIcon()
+            bg = QColor("#060610")
+            for size in (16, 32, 48, 64, 128, 256):
+                px = QPixmap(size, size)
+                px.fill(bg)
+                p = QPainter(px)
+                renderer.render(p, QRectF(0, 0, size, size))
+                p.end()
+                icon.addPixmap(px)
+            # Title-bar icon
+            self.setWindowIcon(icon)
+            # Taskbar / program-bar icon (all platforms)
+            QApplication.instance().setWindowIcon(icon)
+            # Windows: set AppUserModelID so the OS replaces the Python
+            # interpreter icon with ours in the taskbar
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                        "ChipFX.TraceLab.1")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # ── Display / Theme ────────────────────────────────────────────────
 
     def _set_display_mode(self, mode: str, save: bool = True):
@@ -1084,6 +1721,7 @@ class MainWindow(QMainWindow):
                 self._show_lane_labels,
                 self._allow_theme_force_labels,
                 self._lane_label_spacing)
+            self._refresh_t0_date_indicator()
         if hasattr(self, '_help_window'):
             self._help_window.apply_theme(self._build_help_theme_dict())
         if save:
@@ -1139,6 +1777,256 @@ class MainWindow(QMainWindow):
             self._lane_label_spacing)
         self._save_settings()
 
+    def _toggle_rejection_enabled(self, checked: bool):
+        self._rejection_enabled = checked
+        self._settings["rejection_enabled"] = checked
+        self._save_settings()
+
+    def _dlg_rejection_max_lines(self):
+        val, ok = QInputDialog.getInt(
+            self, "Rejection — Max Lines",
+            "Maximum number of malformed lines to skip between the\n"
+            "column header and the first valid data row.\n"
+            "Lines beyond this limit are passed through normally.",
+            self._rejection_max_lines, 1, 1000, 1)
+        if ok:
+            self._rejection_max_lines = val
+            self._settings["rejection_max_lines"] = val
+            self._save_settings()
+
+    def _set_export_segments_mode(self, mode: str):
+        self._export_segments_mode = mode
+        self._settings["export_segments_mode"] = mode
+        self._save_settings()
+
+    def _toggle_process_segments(self, enabled: bool):
+        self._process_segments = enabled
+        self._plot.set_process_segments(enabled)
+        self._save_settings()
+
+    def _toggle_scroll_primaries(self, enabled: bool):
+        self._scroll_primaries = enabled
+        self._channel_panel.set_scroll_primaries(enabled)
+        self._save_settings()
+
+    def _on_time_scale_changed(self, action):
+        if action is self._act_ts_smart:
+            self._time_scale_mode = "smart"
+        elif action is self._act_ts_realtime:
+            self._time_scale_mode = "real_time"
+        else:
+            self._time_scale_mode = "standard"
+        self._apply_time_scale()
+        self._save_settings()
+
+    def _update_realtime_notice(self):
+        """Attach or detach the 'real_time without date' notice as appropriate."""
+        active = (
+            self._time_scale_mode == "real_time"
+            and bool(self._traces)
+            and not self._get_active_t0_wall_clock()
+        )
+        self._notice_manager.set("realtime_no_date", active)
+
+    def _apply_time_scale(self):
+        """Push the current time-scale mode to the plot axes and cursor panel."""
+        self._smart_scale["enabled"] = (self._time_scale_mode == "smart")
+        self._plot.set_smart_scale(self._smart_scale)
+        rt_settings = self._build_real_time_settings()
+        self._plot.set_real_time(rt_settings)
+        # Update cursor panel
+        t0_dt = None
+        if self._time_scale_mode == "real_time":
+            from datetime import datetime
+            t0_str = self._get_active_t0_wall_clock()
+            if t0_str:
+                try:
+                    t0_dt = datetime.fromisoformat(t0_str)
+                except ValueError:
+                    pass
+        self._cursor_panel.set_time_scale_mode(
+            self._time_scale_mode, self._smart_scale, t0_dt)
+        self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
+
+    def _build_real_time_settings(self) -> dict:
+        """Build the real-time axis settings dict from current state."""
+        enabled = (self._time_scale_mode == "real_time")
+        t0_str = self._get_active_t0_wall_clock() if enabled else ""
+        accent = getattr(self, "theme", None)
+        accent = accent.pv("accent") if accent is not None else "#1e88e5"
+        return {"enabled": enabled, "t0_wall_clock": t0_str, "accent_color": accent}
+
+    def _get_active_t0_wall_clock(self) -> str:
+        """Return t0_wall_clock ISO string from the first trace that has one."""
+        for trace in self._traces:
+            if getattr(trace, "t0_wall_clock", ""):
+                return trace.t0_wall_clock
+        return ""
+
+    def _refresh_t0_date_indicator(self):
+        """Update the RangeBar button checked state to reflect whether a date is set."""
+        has_date = bool(self._get_active_t0_wall_clock())
+        self._plot._range_bar.set_date_indicator(has_date)
+
+    def _show_t0_date_dialog(self):
+        """Open the themed t=0 wall-clock date editor popup."""
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                      QLabel, QLineEdit, QDialogButtonBox,
+                                      QRadioButton, QButtonGroup)
+        from core.import_dialog import _parse_wallclock_input
+
+        current = self._get_active_t0_wall_clock()
+
+        # ── Build dialog — inherits app-global stylesheet automatically ────
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Set t=0 date")
+        dlg.setMinimumWidth(400)
+
+        vlay = QVBoxLayout(dlg)
+        vlay.setSpacing(8)
+
+        hint = QLabel(
+            "Enter wall-clock date/time for t=0:\n"
+            "ISO:   2024-03-15T14:23:00\n"
+            "Epoch: 1713450000  or  1713450000.123"
+        )
+        hint.setWordWrap(True)
+        vlay.addWidget(hint)
+
+        edit = QLineEdit(current)
+        edit.setPlaceholderText("e.g. 2024-03-15T14:23:00  or  1713450000")
+        vlay.addWidget(edit)
+
+        # ── Epoch timezone row (mirrors Import Dialog) ─────────────────────
+        tz_row = QHBoxLayout()
+        tz_row.addWidget(QLabel("If Epoch:"))
+        rb_utc   = QRadioButton("GMT / UTC")
+        rb_local = QRadioButton("Local time")
+        tz_grp   = QButtonGroup(dlg)
+        tz_grp.addButton(rb_utc,   0)
+        tz_grp.addButton(rb_local, 1)
+        epoch_local_default = self._settings.get("import_epoch_local", False)
+        rb_local.setChecked(epoch_local_default)
+        rb_utc.setChecked(not epoch_local_default)
+        tz_row.addWidget(rb_utc)
+        tz_row.addWidget(rb_local)
+        tz_row.addStretch()
+        vlay.addLayout(tz_row)
+
+        err_lbl = QLabel("")
+        err_lbl.setStyleSheet("color: #e55;")
+        err_lbl.setWordWrap(True)
+        vlay.addWidget(err_lbl)
+
+        btns = QDialogButtonBox()
+        ok_btn     = btns.addButton("OK",    QDialogButtonBox.ButtonRole.AcceptRole)
+        clear_btn  = btns.addButton("Clear", QDialogButtonBox.ButtonRole.ResetRole)
+        btns.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        vlay.addWidget(btns)
+
+        def _on_accept():
+            text = edit.text().strip()
+            epoch_local = rb_local.isChecked()
+            try:
+                iso = _parse_wallclock_input(text, epoch_local=epoch_local)
+            except ValueError as exc:
+                err_lbl.setText(str(exc))
+                return
+            self._settings["import_epoch_local"] = epoch_local
+            for trace in self._traces:
+                trace.t0_wall_clock = iso
+            dlg.accept()
+            self._on_t0_date_applied()
+
+        def _on_clear():
+            for trace in self._traces:
+                trace.t0_wall_clock = ""
+            dlg.accept()
+            self._on_t0_date_applied()
+
+        ok_btn.clicked.connect(_on_accept)
+        clear_btn.clicked.connect(_on_clear)
+        btns.rejected.connect(dlg.reject)
+
+        dlg.exec()
+
+    def _on_t0_date_applied(self):
+        """Refresh real-time axis and notice state after a t0_wall_clock change."""
+        self._plot.set_real_time(self._build_real_time_settings())
+        self._update_realtime_notice()
+        self._refresh_t0_date_indicator()
+        self._refresh_status_bar()
+
+    def _dlg_smart_scale_settings(self):
+        from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox, QLineEdit
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Smart Scale Settings")
+        fl = QFormLayout(dlg)
+        fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        e_s = QLineEdit(str(self._smart_scale.get("max_seconds", 300)))
+        e_m = QLineEdit(str(self._smart_scale.get("max_minutes", 120)))
+        e_h = QLineEdit(str(self._smart_scale.get("max_hours",   24)))
+        fl.addRow("Switch to MM:SS above (seconds):", e_s)
+        fl.addRow("Switch to HH:MM:SS above (minutes):", e_m)
+        fl.addRow("Switch to DD:HH:MM:SS above (hours):", e_h)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        fl.addRow(bb)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            try:
+                self._smart_scale["max_seconds"] = float(e_s.text())
+            except ValueError:
+                pass
+            try:
+                self._smart_scale["max_minutes"] = float(e_m.text())
+            except ValueError:
+                pass
+            try:
+                self._smart_scale["max_hours"] = float(e_h.text())
+            except ValueError:
+                pass
+            self._plot.set_smart_scale(self._smart_scale)
+            self._save_settings()
+
+    def _dlg_segments_dim_opacity(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Dim Opacity",
+            "Opacity for non-primary segments when dimmed (10 – 90 %):",
+            self._segments_dim_opacity, 10, 90, 5)
+        if ok:
+            self._segments_dim_opacity = val
+            self._settings["segments_dim_opacity"] = val
+            self._plot.set_segment_dim_opacity(val)
+            self._save_settings()
+
+    def _dlg_segments_dash_size(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Dash Size",
+            "Drawn dash length in pixels for non-primary segments (1 – 50):",
+            self._segments_dash_size, 1, 50, 1)
+        if ok:
+            self._segments_dash_size = val
+            self._settings["segments_dash_size"] = val
+            self._plot.set_segment_dash_pattern(
+                self._segments_dash_size, self._segments_gap_size)
+            self._save_settings()
+
+    def _dlg_segments_gap_size(self):
+        val, ok = QInputDialog.getInt(
+            self, "Segments — Gap Size",
+            "Gap length in pixels between dashes for non-primary segments (1 – 50):",
+            self._segments_gap_size, 1, 50, 1)
+        if ok:
+            self._segments_gap_size = val
+            self._settings["segments_gap_size"] = val
+            self._plot.set_segment_dash_pattern(
+                self._segments_dash_size, self._segments_gap_size)
+            self._save_settings()
+
     # ── Cursors ────────────────────────────────────────────────────────
 
     def _start_cursor_placement(self, cursor_id: int):
@@ -1157,6 +2045,12 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
 
     def _refresh_status_bar(self):
+        """Schedule a status-bar refresh on the next event loop tick.
+        Multiple calls within the same synchronous call stack coalesce into one."""
+        if hasattr(self, '_status_bar_refresh_timer'):
+            self._status_bar_refresh_timer.start()
+
+    def _do_refresh_status_bar(self):
         if not hasattr(self, '_scope_status'):
             return
         x0, x1 = self._plot.get_current_view_range()
@@ -1174,6 +2068,7 @@ class MainWindow(QMainWindow):
         sinc_active = self._plot.get_sinc_active()
         unit_map = {t.name: getattr(t, 'unit', '') for t in self._traces}
         self._cursor_panel.set_trace_units(unit_map)
+        self._cursor_panel.set_y_spacings(y_major_divs)
         interp_map = {t.name: getattr(t, '_interp_mode_override',
                                        self._interp_mode)
                       for t in self._traces}
@@ -1183,38 +2078,42 @@ class MainWindow(QMainWindow):
             sinc_active, settings=self._settings)
 
     def _get_x_major_tick(self) -> float:
-        """Return the actual major X tick spacing in data units (seconds)."""
+        """Return the X tick spacing to show as div in the status bar.
+        Reads the cached result from the last axis render so the status bar
+        always agrees with what was actually drawn (no size mismatch)."""
+        subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
             if self._plot._lanes:
-                lane = next(iter(self._plot._lanes.values()))
-                ax = lane.getPlotItem().getAxis('bottom')
-                vr = lane.getPlotItem().viewRange()[0]
-                w = lane.width() or 800
-                ticks = ax.tickSpacing(vr[0], vr[1], w)
-                if ticks:
-                    return float(ticks[0][0])
+                ax = next(iter(self._plot._lanes.values())).getPlotItem().getAxis('bottom')
             elif self._plot._mode == "overlay":
-                pi = self._plot._overlay_widget.getPlotItem()
-                ax = pi.getAxis('bottom')
-                vr = pi.viewRange()[0]
-                w = self._plot._overlay_widget.width() or 800
-                ticks = ax.tickSpacing(vr[0], vr[1], w)
-                if ticks:
-                    return float(ticks[0][0])
+                ax = self._plot._overlay_widget.getPlotItem().getAxis('bottom')
+            else:
+                ax = None
+            if ax is not None:
+                cached = getattr(ax, '_last_tick_result', None)
+                if cached:
+                    return float(cached[-1][0] if subdiv_label else cached[0][0])
         except Exception:
             pass
         x0, x1 = self._plot.get_current_view_range()
         return (x1 - x0) / 10.0
 
     def _get_y_major_tick(self, lane) -> float:
-        """Return the actual major Y tick spacing for a lane."""
+        """Return the Y tick spacing to show as div in the status bar.
+        Reads the cached result from the last axis render so the status bar
+        always agrees with what was actually drawn (no size mismatch).
+        Falls back to span/10 before the first render — never calls tickSpacing
+        directly so the cache is never poisoned by the wrong axis size."""
+        subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
             ax = lane.getPlotItem().getAxis('left')
+            cached = getattr(ax, '_last_tick_result', None)
+            if cached:
+                return float(cached[-1][0] if subdiv_label else cached[0][0])
+            # Pre-render fallback: rough estimate, no tickSpacing call
             vr = lane.getPlotItem().viewRange()[1]
-            h = lane.height() or 300
-            ticks = ax.tickSpacing(vr[0], vr[1], h)
-            if ticks:
-                return float(ticks[0][0])
+            span = abs(vr[1] - vr[0])
+            return span / 10.0 if span > 0 else 0.0
         except Exception:
             pass
         return 0.0
@@ -1237,17 +2136,19 @@ class MainWindow(QMainWindow):
             t = trace.time_axis
             y = trace.processed_data
             if len(t):
-                t_mins.append(float(t.min()))
-                t_maxs.append(float(t.max()))
+                t_finite = t[np.isfinite(t)]
+                if len(t_finite):
+                    t_mins.append(float(t_finite.min()))
+                    t_maxs.append(float(t_finite.max()))
             if len(y):
-                y_mins.append(float(y.min()))
-                y_maxs.append(float(y.max()))
+                y_finite = y[np.isfinite(y)]
+                if len(y_finite):
+                    y_mins.append(float(y_finite.min()))
+                    y_maxs.append(float(y_finite.max()))
         if not t_mins:
             self._plot.zoom_full()
             return
         t0, t1 = min(t_mins), max(t_maxs)
-        y0, y1 = min(y_mins), max(y_maxs)
-        pad_y = (y1 - y0) * 0.05 or 0.1
         # Suppress per-lane redraws while setting ranges — one clean refresh at end
         self._plot._set_lanes_suppress(True)
         try:
@@ -1256,12 +2157,23 @@ class MainWindow(QMainWindow):
                     pi = lane.getPlotItem()
                     pi.disableAutoRange()
                     pi.setXRange(t0, t1, padding=0.02)
-                    pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
+                    # Per-lane Y range — avoids forcing mV-scale lanes to the
+                    # global V-scale range, which would produce nonsense Y/div.
+                    y = lane.trace.processed_data
+                    y_finite = y[np.isfinite(y)] if len(y) else np.array([])
+                    if len(y_finite):
+                        y0 = float(y_finite.min())
+                        y1 = float(y_finite.max())
+                        pad_y = (y1 - y0) * 0.05 or 0.1
+                        pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
             else:
                 pi = self._plot._overlay_widget.getPlotItem()
                 pi.disableAutoRange()
                 pi.setXRange(t0, t1, padding=0.02)
-                pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
+                if y_mins:
+                    y0, y1 = min(y_mins), max(y_maxs)
+                    pad_y = (y1 - y0) * 0.05 or 0.1
+                    pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
         finally:
             self._plot._set_lanes_suppress(False)
             self._plot.refresh_all()
@@ -1271,10 +2183,36 @@ class MainWindow(QMainWindow):
 
     def _on_trace_visibility(self, name: str, visible: bool):
         self._plot.set_trace_visible(name, visible)
+        self._refresh_status_bar()
 
     def _on_trace_color(self, name: str, color: str):
         self._plot.refresh_all()
         self._refresh_status_bar()
+
+    def _on_trace_renamed(self, _trace_name: str, _new_label: str):
+        """Propagate a label change from the channel panel to plot and status bar."""
+        self._plot.refresh_all()      # redraws overlay legend / lane labels
+        self._refresh_status_bar()    # status bar block uses trace.label
+
+    def _on_segment_changed(self, trace_name: str):
+        """Refresh the lane/visual for a trace whose primary_segment or viewmode changed."""
+        if self._plot._mode == "split":
+            lane = self._plot._lanes.get(trace_name)
+            if lane:
+                lane.refresh_curve()
+        else:
+            visual = self._plot._overlay_visuals.get(trace_name)
+            if visual:
+                visual.refresh_curve(self._plot.get_current_view_range())
+
+    def _on_unit_changed(self, trace_name: str, *_):
+        """Refresh the y-axis label when a channel's unit is changed by the user."""
+        lane = self._plot._lanes.get(trace_name)
+        if lane:
+            lane.refresh_curve()   # _add_trace_curve already calls _y_axis.set_unit
+        else:
+            self._plot.refresh_all()   # overlay mode — _ov_y_axis picks up first visible unit
+        self._refresh_status_bar()     # keeps cursor-panel unit map current
 
     # ── Analysis ──────────────────────────────────────────────────────
 
@@ -1311,21 +2249,54 @@ class MainWindow(QMainWindow):
     # ── Plugins ───────────────────────────────────────────────────────
 
     def _update_plugin_menu(self):
+        # Remove all dynamic entries (including any submenus we created before)
         actions = self._plugins_menu.actions()
         for act in actions[self._plugin_actions_start:]:
+            if act.menu():          # submenu — clean up the child QMenu too
+                act.menu().deleteLater()
             self._plugins_menu.removeAction(act)
 
+        from core.plugin_manager import _group_canonical
         plugins = self._plugins.get_plugins()
         if not plugins:
             a = QAction("(No plugins found)", self)
             a.setEnabled(False)
             self._plugins_menu.addAction(a)
         else:
+            # Separate grouped from ungrouped; preserve first-seen order per group
+            groups_order = []                      # display names in first-seen order
+            groups_map   = {}                      # canonical_key → (display, [plugins])
+            ungrouped    = []
             for p in plugins:
-                a = QAction(f"{p.name} [{p.plugin_type}]", self)
-                a.setStatusTip(p.description)
-                a.triggered.connect(lambda checked, _p=p: self._run_plugin(_p))
-                self._plugins_menu.addAction(a)
+                if not p.group:
+                    ungrouped.append(p)
+                else:
+                    key = _group_canonical(p.group)
+                    if key not in groups_map:
+                        groups_map[key] = (p.group, [])
+                        groups_order.append(key)
+                    groups_map[key][1].append(p)
+
+            def _plugin_action(parent, plug):
+                a = QAction(f"{plug.name}  [{plug.plugin_type}]", parent)
+                a.setStatusTip(plug.description)
+                a.triggered.connect(lambda checked, _p=plug: self._run_plugin(_p))
+                return a
+
+            # Add one sub-menu per named group
+            for key in groups_order:
+                display, group_plugins = groups_map[key]
+                sub = self._plugins_menu.addMenu(display)
+                for gp in group_plugins:
+                    sub.addAction(_plugin_action(sub, gp))
+
+            # Ungrouped: always put in an "Ungrouped" sub-menu
+            if ungrouped:
+                if groups_order:
+                    self._plugins_menu.addSeparator()
+                sub = self._plugins_menu.addMenu("Ungrouped")
+                for p in ungrouped:
+                    sub.addAction(_plugin_action(sub, p))
 
         if self._plugins.load_errors:
             self._plugins_menu.addSeparator()
@@ -1556,6 +2527,19 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
         self._apply_retrigger(t_pos)
 
+    @staticmethod
+    def _shift_trace_wall_clock(trace, delta_s: float):
+        """Shift trace.t0_wall_clock by *delta_s* seconds (in-place)."""
+        if not getattr(trace, "t0_wall_clock", ""):
+            return
+        from datetime import datetime, timedelta
+        try:
+            dt = datetime.fromisoformat(trace.t0_wall_clock)
+            dt = dt + timedelta(seconds=delta_s)
+            trace.t0_wall_clock = dt.isoformat()
+        except Exception:
+            pass
+
     def _on_trigger_set_t0(self, t_pos: float):
         """Shift all trace time axes so t_pos becomes 0."""
         x0, x1 = self._plot.get_current_view_range()
@@ -1572,6 +2556,8 @@ class MainWindow(QMainWindow):
                 import numpy as np
                 trace.time_data = trace.time_axis - t_pos
             trace._computed_time = None  # invalidate cache
+            # Keep wall-clock anchor in sync: new t=0 is the old t_pos instant
+            self._shift_trace_wall_clock(trace, t_pos)
 
         self._plot.refresh_all()
 
@@ -1581,8 +2567,55 @@ class MainWindow(QMainWindow):
 
         self._plot.zoom_x_range(shifted_x0, shifted_x1)
         self._plot._update_range_bar()
+        # Push updated wall-clock anchor into the axis and cursor panel so the
+        # real-time date display doesn't jump (the axis caches _t0_wall_clock_dt
+        # and won't pick up the new value from _refresh_status_bar alone).
+        self._apply_time_scale()
         self._refresh_status_bar()
         self._status_lbl.setText(f"t=0 set to trigger at {t_pos:.6g} s")
+
+    def _on_restore_original_t0(self):
+        """Shift all traces back to their original time positions at import."""
+        ref = next(
+            (t for t in self._traces
+             if t.original_time_zero is not None
+             and t.time_axis is not None and len(t.time_axis)),
+            None)
+        if ref is None:
+            return
+        # All traces shift together so compute the accumulated global shift
+        # from any one reference trace.
+        total_shift = float(ref.time_axis[0]) - ref.original_time_zero
+        if total_shift == 0.0:
+            return
+
+        x0, x1 = self._plot.get_current_view_range()
+        cursor_positions = dict(self._plot._cursors)
+
+        for trace in self._traces:
+            if trace.time_data is not None:
+                trace.time_data = trace.time_data - total_shift
+            else:
+                trace.time_data = trace.time_axis - total_shift
+            trace._computed_time = None
+            # Wall-clock must shift by total_shift (which is negative when traces
+            # have been shifted forward), so that real times stay invariant.
+            # Note: NOT -total_shift — the time-data shift is (data - total_shift)
+            # which moves data forward by -total_shift; to compensate, t0_wall_clock
+            # moves backward by total_shift (i.e. += total_shift, which is negative).
+            self._shift_trace_wall_clock(trace, total_shift)
+
+        self._plot.refresh_all()
+
+        for cid, pos in cursor_positions.items():
+            if pos is not None:
+                self._plot.set_cursor(cid, pos - total_shift)
+
+        self._plot.zoom_x_range(x0 - total_shift, x1 - total_shift)
+        self._plot._update_range_bar()
+        self._apply_time_scale()
+        self._refresh_status_bar()
+        self._status_lbl.setText("t=0 restored to original import position")
 
     def _refresh_trigger_channels(self):
         self._trigger_panel.update_traces(self._traces)
@@ -1612,14 +2645,21 @@ class MainWindow(QMainWindow):
                 ag.addAction(a)
                 a.triggered.connect(
                     lambda _, n=name, m=mode:
-                        self._plot.set_interp_mode_for_trace(n, m))
+                        self._on_channel_interp_changed(n, m))
 
     # ── Channel order ─────────────────────────────────────────────────
 
     def _on_channel_order_changed(self, name_order: list):
-        """Channel panel drag-reorder → update plot and cursor table."""
+        """Channel panel drag-reorder → update plot, cursor table and status bar."""
         self._plot.reorder_traces(name_order)
         self._cursor_panel.set_trace_order(name_order)
+        # Keep self._traces in channel-panel order so the status bar blocks
+        # appear in the same sequence as the trace panel rows.
+        name_to_trace = {t.name: t for t in self._traces}
+        ordered = [name_to_trace[n] for n in name_order if n in name_to_trace]
+        extras  = [t for t in self._traces if t.name not in set(name_order)]
+        self._traces = ordered + extras
+        self._refresh_status_bar()
 
     # ── Settings dialogs ───────────────────────────────────────────────
 
@@ -1663,19 +2703,86 @@ class MainWindow(QMainWindow):
         layout.addLayout(bh)
         dlg.exec()
 
+    def _show_status_bar_scale_dialog(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Status Bar Scale")
+        dlg.setFixedWidth(340)
+        layout = QVBoxLayout(dlg)
+
+        current = self._settings.get("status_bar_scale", 1.0)
+        layout.addWidget(QLabel(
+            "Scale the channel status bar height and its content.\n"
+            "Independent of the global font scale.\n"
+            "Applied immediately — no restart required."))
+
+        hl = QHBoxLayout()
+        hl.addWidget(QLabel("Scale:"))
+        spin = QDoubleSpinBox()
+        spin.setRange(0.5, 2.0)
+        spin.setSingleStep(0.05)
+        spin.setDecimals(2)
+        spin.setValue(current)
+        hl.addWidget(spin)
+        hl.addWidget(QLabel("  (1.0 = 110 px, 2.0 = 220 px)"))
+        layout.addLayout(hl)
+
+        def apply():
+            scale = spin.value()
+            self._settings["status_bar_scale"] = scale
+            self._scope_status.set_scale(scale)
+            # Force a full status bar rebuild at the new scale
+            self._refresh_status_bar()
+
+        bh = QHBoxLayout()
+        btn_apply = QPushButton("Apply")
+        btn_apply.clicked.connect(apply)
+        btn_ok = QPushButton("OK")
+        btn_ok.clicked.connect(lambda: (apply(), dlg.accept()))
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(dlg.reject)
+        bh.addWidget(btn_apply); bh.addStretch()
+        bh.addWidget(btn_cancel); bh.addWidget(btn_ok)
+        layout.addLayout(bh)
+        dlg.exec()
+
     def _apply_font_scale(self, scale: float):
-        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtWidgets import QApplication, QStyleFactory
         from PyQt6.QtGui import QFont
         app = QApplication.instance()
         base_size = 10  # pt
+        pt = max(7, int(base_size * scale))
         f = QFont()
-        f.setPointSize(max(7, int(base_size * scale)))
+        f.setPointSize(pt)
         app.setFont(f)
+        # Class-specific override — takes priority over the app-wide font for
+        # QMenuBar instances even when the native style ignores app.setFont().
+        app.setFont(f, "QMenuBar")
         # Re-apply stylesheet with scaled font-size
         app.setStyleSheet(self.theme.get_stylesheet(font_scale=scale))
         if hasattr(self, '_help_window'):
             self._help_window.set_font_size(max(7, int(base_size * scale)))
             self._help_window.apply_theme(self._build_help_theme_dict())
+        # On Windows, QWindowsVistaStyle draws QMenuBar resting-state items via
+        # GDI/uxtheme which ignores Qt font settings. Force Fusion style (fully
+        # Qt-drawn) every scale change, then set both font and inline stylesheet
+        # so the layout recalculates the item height.
+        mb = self.menuBar()
+        fusion = QStyleFactory.create("Fusion")
+        if fusion:
+            mb.setStyle(fusion)
+        mb.setFont(f)
+        mb.setStyleSheet(f"font-size: {pt}pt;")
+        mb.update()
+        # Propagate to panels that use inline stylesheets
+        if hasattr(self, '_channel_panel'):
+            self._channel_panel.set_font_scale(scale)
+        if hasattr(self, '_trigger_panel'):
+            self._trigger_panel.set_font_scale(scale)
+        # Y-axis label area width
+        if hasattr(self, '_plot'):
+            y_axis_w = max(40, int(60 * scale))
+            self._plot.set_y_axis_label_width(y_axis_w)
 
     def _show_decimal_sep_dialog(self):
         from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
@@ -1870,6 +2977,136 @@ class MainWindow(QMainWindow):
         if ok:
             self._settings["periodicity_estimation_timeout"] = val
 
+    # ── Status bar navigation helper ───────────────────────────────────
+
+    def _statusbar_snap(self, direction: int):
+        """Scroll the status bar to the next whole block edge.
+        direction: +1 = towards higher scroll value (right), -1 = towards left.
+        Always moves at least one edge even if already on a boundary."""
+        sb   = self._scope_status._ch_scroll.horizontalScrollBar()
+        step = 122   # BLOCK_W(120) + SEP_W(2)
+        pos  = sb.value()
+        if direction > 0:
+            new_pos = (pos // step + 1) * step
+        else:
+            if pos % step == 0:
+                new_pos = max(0, pos - step)
+            else:
+                new_pos = (pos // step) * step
+        sb.setValue(new_pos)
+
+    # ── Advanced UI helpers ────────────────────────────────────────────
+
+    def _adv_ui_save(self):
+        self._adv_ui_apply()
+        self._settings["advanced_ui"] = dict(self._adv_ui)
+
+    def _adv_ui_apply(self):
+        self._plot.set_scroll_settings(self._adv_ui)
+        self._plot.set_min_lane_height(
+            self._adv_ui.get("split_min_lane_height", 80))
+        self._scope_status.set_statusbar_scroll_enabled(
+            self._adv_ui.get("statusbar_scroll", True))
+        self._plot.set_div_settings(self._adv_ui)
+
+    def _toggle_statusbar_scroll(self, checked: bool):
+        self._adv_ui["statusbar_scroll"] = checked
+        self._adv_ui_save()
+
+    def _toggle_scroll_zoom(self, checked: bool):
+        self._adv_ui["scroll_zoom_enabled"] = checked
+        self._adv_ui_save()
+
+    def _toggle_scroll_list(self, checked: bool):
+        self._adv_ui["scroll_list_enabled"] = checked
+        self._adv_ui_save()
+
+    def _set_scroll_default(self, action: str):
+        self._adv_ui["scroll_default"] = action
+        self._adv_ui_save()
+
+    def _set_arrow_mode(self, mode: str):
+        self._adv_ui["arrow_mode"] = mode
+        self._adv_ui_save()
+
+    def _dlg_scroll_modifier_keys(self):
+        current = ", ".join(self._adv_ui.get("scroll_modifier_keys",
+                                             ["ctrl", "alt", "shift"]))
+        text, ok = QInputDialog.getText(
+            self, "Scroll Modifier Keys",
+            "Comma-separated list of modifier keys that switch the scroll action.\n"
+            "Valid values: ctrl, alt, shift  (e.g. 'ctrl, alt')\n\n"
+            "Any one of the listed keys triggers the alternate scroll mode:",
+            text=current)
+        if ok:
+            keys = [k.strip().lower() for k in text.split(",")]
+            keys = [k for k in keys if k in ("ctrl", "alt", "shift")]
+            self._adv_ui["scroll_modifier_keys"] = keys or ["ctrl"]
+            self._adv_ui_save()
+
+    def _dlg_min_lane_height(self):
+        current = int(self._adv_ui.get("split_min_lane_height", 80))
+        val, ok = QInputDialog.getInt(
+            self, "Minimum Trace Height",
+            "Minimum height of each split-view trace lane (pixels).\n"
+            "Smaller values let you view more traces at once on a small screen.",
+            current, 40, 800, 10)
+        if ok:
+            self._adv_ui["split_min_lane_height"] = val
+            self._adv_ui_save()
+
+    def _dlg_div_settings(self):
+        from PyQt6.QtWidgets import (QDialog, QFormLayout, QSpinBox,
+                                     QCheckBox, QDialogButtonBox)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Div Settings")
+        form = QFormLayout(dlg)
+
+        sb_halves = QSpinBox()
+        sb_halves.setRange(1, 500)
+        sb_halves.setSuffix(" px")
+        sb_halves.setToolTip(
+            "Minimum major-tick pixel height/width to draw a midpoint (÷2) sub-division line.")
+        sb_halves.setValue(int(self._adv_ui.get("div_halves_px", 15)))
+        form.addRow("Show ÷2 sub-div above:", sb_halves)
+
+        sb_fifths = QSpinBox()
+        sb_fifths.setRange(1, 500)
+        sb_fifths.setSuffix(" px")
+        sb_fifths.setToolTip(
+            "Minimum major-tick pixel size to draw four (÷5) sub-division lines.")
+        sb_fifths.setValue(int(self._adv_ui.get("div_fifths_px", 30)))
+        form.addRow("Show ÷5 sub-div above:", sb_fifths)
+
+        sb_tenths = QSpinBox()
+        sb_tenths.setRange(1, 500)
+        sb_tenths.setSuffix(" px")
+        sb_tenths.setToolTip(
+            "Minimum major-tick pixel size to draw nine (÷10) sub-division lines.")
+        sb_tenths.setValue(int(self._adv_ui.get("div_tenths_px", 60)))
+        form.addRow("Show ÷10 sub-div above:", sb_tenths)
+
+        chk_subdiv = QCheckBox("Show /DIV status on sub-divisions")
+        chk_subdiv.setToolTip(
+            "When enabled, the status bar reports the finest visible sub-division spacing\n"
+            "instead of the major tick spacing.\n"
+            "Default off: the status bar always shows the major division.")
+        chk_subdiv.setChecked(bool(self._adv_ui.get("div_subdiv_label", False)))
+        form.addRow("", chk_subdiv)
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._adv_ui["div_halves_px"]    = sb_halves.value()
+            self._adv_ui["div_fifths_px"]    = sb_fifths.value()
+            self._adv_ui["div_tenths_px"]    = sb_tenths.value()
+            self._adv_ui["div_subdiv_label"] = chk_subdiv.isChecked()
+            self._adv_ui_save()
+
     def _set_extrap_mode(self, mode: str) -> None:
         """Switch extrapolation behaviour and re-render."""
         self._retrigger_extrap_mode = mode
@@ -1890,15 +3127,167 @@ class MainWindow(QMainWindow):
         self._plot.set_draw_mode(mode)
         self._settings["draw_mode"] = mode
 
-    def _on_reset_trace_color(self, trace_name: str):
-        """Reset a single trace to its theme-default colour."""
-        idx = next((i for i, t in enumerate(self._traces)
-                    if t.name == trace_name), 0)
-        for trace in self._traces:
-            if trace.name == trace_name:
-                trace.reset_color_to_theme(idx)
+    # ── Unified channel context menu ──────────────────────────────────────
+
+    def _show_channel_context_menu(self, trace_name: str, global_pos):
+        """Single right-click menu for channel panel, split lane, overlay label and status bar."""
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QActionGroup
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        in_overlay = (self._display_mode == "overlay")
+        menu = QMenu(self)
+
+        # ── Interpolation ──────────────────────────────────────────────
+        interp_menu = menu.addMenu("Interpolation")
+        mode = getattr(trace, '_interp_mode_override', 'linear')
+        ag = QActionGroup(interp_menu)
+        ag.setExclusive(True)
+        for m, lbl in [("linear", "Linear"),
+                        ("cubic",  "Cubic Spline"),
+                        ("sinc",   "Sinc (sin(x)/x)")]:
+            a = interp_menu.addAction(lbl)
+            a.setCheckable(True)
+            a.setChecked(mode == m)
+            ag.addAction(a)
+            a.triggered.connect(
+                lambda _, _m=m: self._on_channel_interp_changed(trace_name, _m))
+
+        menu.addSeparator()
+
+        # ── Rename / Unit / Color ──────────────────────────────────────
+        menu.addAction("Rename…").triggered.connect(
+            lambda: self._do_rename_trace(trace_name))
+        menu.addAction("Change Unit…").triggered.connect(
+            lambda: self._do_change_unit(trace_name))
+        menu.addAction("Change Color…").triggered.connect(
+            lambda: self._do_change_color(trace_name))
+        menu.addAction("Restore Default Colours").triggered.connect(
+            lambda: self._on_reset_trace_color(trace_name))
+
+        # ── Segments (only when 2+ segments present) ──────────────────
+        segs = getattr(trace, 'segments', None)
+        if segs and len(segs) >= 2:
+            menu.addSeparator()
+            seg_menu = menu.addMenu("Segments")
+            pri_menu = seg_menu.addMenu("Primary Segment")
+            pri_ag = QActionGroup(pri_menu)
+            pri_ag.setExclusive(True)
+            cur_primary = getattr(trace, 'primary_segment', None)
+            none_act = pri_menu.addAction("None (show all)")
+            none_act.setCheckable(True)
+            none_act.setChecked(cur_primary is None)
+            pri_ag.addAction(none_act)
+            none_act.triggered.connect(
+                lambda _: self._do_set_primary_segment(trace_name, None))
+            for idx in range(len(segs)):
+                a = pri_menu.addAction(f"Segment {idx}")
+                a.setCheckable(True)
+                a.setChecked(cur_primary == idx)
+                pri_ag.addAction(a)
+                a.triggered.connect(
+                    lambda _, i=idx: self._do_set_primary_segment(trace_name, i))
+            seg_menu.addSeparator()
+            mode_menu = seg_menu.addMenu("Non-primary View")
+            mode_ag = QActionGroup(mode_menu)
+            mode_ag.setExclusive(True)
+            cur_mode = (getattr(trace, 'non_primary_viewmode', '') or '').strip()
+            for mk, ml in [("hide",   "Hide"),
+                            ("dimmed", "Dimmed"),
+                            ("dashed", "Dashed"),
+                            ("",       "Regular (full opacity)")]:
+                ma = mode_menu.addAction(ml)
+                ma.setCheckable(True)
+                ma.setChecked(cur_mode == mk)
+                mode_ag.addAction(ma)
+                ma.triggered.connect(
+                    lambda _, _mk=mk: self._do_set_viewmode(trace_name, _mk))
+
+        menu.addSeparator()
+
+        # ── View scaling ───────────────────────────────────────────────
+        menu.addAction("Auto Scale Y").triggered.connect(
+            lambda: self._plot.auto_scale_trace(trace_name, "y"))
+        menu.addAction("Auto Scale X+Y").triggered.connect(
+            lambda: self._plot.auto_scale_trace(trace_name, "both"))
+
+        # ── Bring to Front (overlay with 2+ visible traces only) ──────
+        visible_count = sum(1 for t in self._traces if t.visible)
+        if in_overlay and visible_count > 1:
+            menu.addSeparator()
+            menu.addAction("Bring to Front").triggered.connect(
+                lambda: self._plot.bring_trace_to_front(trace_name))
+
+        menu.addSeparator()
+
+        # ── Remove ────────────────────────────────────────────────────
+        menu.addAction("Remove Trace").triggered.connect(
+            lambda: self._remove_trace(trace_name))
+
+        menu.exec(global_pos)
+
+    def _do_rename_trace(self, trace_name: str):
+        from PyQt6.QtWidgets import QInputDialog
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        new_label, ok = QInputDialog.getText(
+            self, "Rename Trace", "New label:", text=trace.label)
+        if ok and new_label.strip():
+            trace.label = new_label.strip()
+            self._channel_panel.refresh_all()
+            self._on_trace_renamed(trace_name, trace.label)
+
+    def _do_change_unit(self, trace_name: str):
+        from PyQt6.QtWidgets import QInputDialog
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        new_unit, ok = QInputDialog.getText(
+            self, "Change Unit", "New unit:", text=trace.unit)
+        if ok:
+            new_unit = new_unit.strip()
+            trace.unit = new_unit
+            if trace.scaling:
+                trace.scaling.unit = new_unit
+            self._channel_panel.refresh_all()
+            self._on_unit_changed(trace_name, new_unit)
+
+    def _do_change_color(self, trace_name: str):
+        from PyQt6.QtWidgets import QColorDialog
+        from PyQt6.QtGui import QColor
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        c = QColorDialog.getColor(QColor(trace.color), self)
+        if c.isValid():
+            trace.set_user_color(c.name())
+            self._channel_panel.refresh_all()
+            self._on_trace_color(trace_name, trace.color)
+
+    def _do_set_primary_segment(self, trace_name: str, idx):
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        trace.primary_segment = idx
+        self._on_segment_changed(trace_name)
+
+    def _do_set_viewmode(self, trace_name: str, mode: str):
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        trace.non_primary_viewmode = mode
+        self._on_segment_changed(trace_name)
+
+    def _on_reset_trace_color(self, _trace_name: str = None):
+        """Reset ALL traces to theme-default colours based on their current display order."""
+        ordered = self._channel_panel.get_ordered_names()
+        for i, name in enumerate(ordered):
+            trace = next((t for t in self._traces if t.name == name), None)
+            if trace is not None:
+                trace.reset_color_to_theme(i)
                 trace.sync_theme_color(self.theme.active_theme)
-                break
         self._channel_panel.refresh_all()
         self._plot.refresh_all()
         self._refresh_status_bar()
@@ -1935,12 +3324,6 @@ class MainWindow(QMainWindow):
         elif mode == MODE_PERSIST_PAST:
             self._persist_settings["selection"] = "last"
             self._persist_settings["emphasis"]  = "last"
-        self._act_rt_averaging.blockSignals(True)
-        self._act_rt_averaging.setChecked(False)
-        self._act_rt_averaging.blockSignals(False)
-        self._act_rt_interp.blockSignals(True)
-        self._act_rt_interp.setChecked(False)
-        self._act_rt_interp.blockSignals(False)
         self._plot.clear_persistence_layers()
         self._plot.clear_retrigger_curve()
         self._last_retrigger_results.clear()
@@ -1954,12 +3337,6 @@ class MainWindow(QMainWindow):
         if checked:
             self._retrigger_mode = MODE_AVERAGING
             self._epoch_anchor_idx = None   # re-anchor at the new trigger pos
-            self._act_persist_off.blockSignals(True)
-            self._act_persist_off.setChecked(True)
-            self._act_persist_off.blockSignals(False)
-            self._act_rt_interp.blockSignals(True)
-            self._act_rt_interp.setChecked(False)
-            self._act_rt_interp.blockSignals(False)
         else:
             self._retrigger_mode = MODE_OFF
         self._plot.clear_persistence_layers()
@@ -1975,12 +3352,6 @@ class MainWindow(QMainWindow):
         if checked:
             self._retrigger_mode = MODE_INTERPOLATION
             self._epoch_anchor_idx = None   # re-anchor at the new trigger pos
-            self._act_persist_off.blockSignals(True)
-            self._act_persist_off.setChecked(True)
-            self._act_persist_off.blockSignals(False)
-            self._act_rt_averaging.blockSignals(True)
-            self._act_rt_averaging.setChecked(False)
-            self._act_rt_averaging.blockSignals(False)
         else:
             self._retrigger_mode = MODE_OFF
         self._plot.clear_persistence_layers()
@@ -1990,6 +3361,24 @@ class MainWindow(QMainWindow):
         self._update_retrigger_controls()
         if checked:
             self._reapply_retrigger()
+
+    def _get_trace_segment_data(self, trace):
+        """Return (time_array, data_array) appropriate for retrigger/persistence/averaging.
+
+        When Process Segments is on and the trace has multiple segments, returns
+        only the primary segment's slice.  When primary_segment is None, segment 0
+        is used so the tools operate on a single coherent window.  Falls back to
+        the full arrays when segment processing is off or the trace is not segmented.
+        """
+        segs = getattr(trace, 'segments', None)
+        if not self._process_segments or not segs or len(segs) < 2:
+            return trace.time_axis, trace.processed_data
+        primary = trace.primary_segment
+        if primary is None:
+            primary = 0
+        primary = max(0, min(primary, len(segs) - 1))
+        s, e = segs[primary][0], segs[primary][1]
+        return trace.time_axis[s:e], trace.processed_data[s:e]
 
     def _apply_retrigger(self, t_pos: float):
         """
@@ -2025,9 +3414,10 @@ class MainWindow(QMainWindow):
         if trig_trace is None or len(trig_trace.time_axis) < 2:
             return
 
-        trig_t = trig_trace.time_axis
-        trig_y = trig_trace.processed_data
-        dt_est = float(trig_t[1] - trig_t[0])
+        trig_t, trig_y = self._get_trace_segment_data(trig_trace)
+        dt_est = float(trig_t[1] - trig_t[0]) if len(trig_t) >= 2 else 0.0
+        if len(trig_t) < 2:
+            return
 
         # ── Epoch selection ───────────────────────────────────────────────────
         #
@@ -2263,8 +3653,7 @@ class MainWindow(QMainWindow):
         for trace in self._traces:
             if not trace.visible:
                 continue
-            t = trace.time_axis
-            y = trace.processed_data
+            t, y = self._get_trace_segment_data(trace)
             if len(t) < 2:
                 continue
 
@@ -2695,6 +4084,72 @@ class MainWindow(QMainWindow):
         self._status_lbl.setText(
             f"Themes reloaded: {len(self.theme.available_themes)} found.")
 
+    def eventFilter(self, _obj, event):
+        """App-level event filter — intercepts arrow keys globally so they work
+        regardless of which child widget (pyqtgraph ViewBox etc.) has focus.
+
+        Only fires when this window is the active top-level window and no text-
+        entry widget has focus (so typing in QLineEdit / QSpinBox is unaffected)."""
+        from PyQt6.QtCore import QEvent as _QEvent
+        from PyQt6.QtWidgets import (QApplication as _QApp,
+                                      QLineEdit, QTextEdit,
+                                      QAbstractSpinBox, QAbstractItemView)
+        if event.type() != _QEvent.Type.KeyPress:
+            return False
+        # Only handle when this window is the active window
+        if not self.isActiveWindow():
+            return False
+        # Don't steal keys from text-entry or list widgets
+        fw = _QApp.instance().focusWidget()
+        if isinstance(fw, (QLineEdit, QTextEdit, QAbstractSpinBox,
+                           QAbstractItemView)):
+            return False
+
+        key  = event.key()
+        mode = self._adv_ui.get("arrow_mode", "pan_time")
+
+        if mode == "pan_time":
+            if key == Qt.Key.Key_Left:
+                self._plot.pan_x(-0.1); return True
+            if key == Qt.Key.Key_Right:
+                self._plot.pan_x(0.1);  return True
+            if key == Qt.Key.Key_Up:
+                sb = self._plot._scroll.verticalScrollBar()
+                sb.setValue(sb.value() - 80); return True
+            if key == Qt.Key.Key_Down:
+                sb = self._plot._scroll.verticalScrollBar()
+                sb.setValue(sb.value() + 80); return True
+
+        elif mode == "scroll_statusbar":
+            if key == Qt.Key.Key_Left:
+                self._statusbar_snap(-1); return True
+            if key == Qt.Key.Key_Right:
+                self._statusbar_snap(+1); return True
+
+        return False
+
     def closeEvent(self, event):
+        # ── Stop all pending/repeating timers ─────────────────────────────────
+        # Parentless timers (_status_bar_refresh_timer, plot's _rebuild_timer
+        # and _range_timer) are not stopped by Qt's parent-child teardown.
+        # If they fire during window destruction they callback into half-dead
+        # C++ objects → segfault.
+        self._status_bar_refresh_timer.stop()
+        self._plot._rebuild_timer.stop()
+        self._plot._range_timer.stop()
+
+        # ── Wait for background period-estimation threads ──────────────────────
+        # Workers are QThread children of this window (parent=self).  Qt's
+        # destructor calls ~QThread() on every child object; calling that on a
+        # *running* thread is undefined behaviour → segfault.
+        # estimate_period() is pure computation with no Qt event loop, so
+        # quit() has no effect — we must wait() / terminate().
+        for worker in self.findChildren(_PeriodEstimateWorker):
+            if worker.isRunning():
+                worker.wait(2000)          # give the computation up to 2 s
+                if worker.isRunning():     # still going — force-stop
+                    worker.terminate()
+                    worker.wait(500)
+
         self._save_settings()
         event.accept()

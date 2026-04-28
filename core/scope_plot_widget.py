@@ -3,14 +3,15 @@ core/scope_plot_widget.py
 Main oscilloscope plot widget — split lanes and overlay modes.
 """
 
+import math
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph import InfiniteLine
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QMenu, QColorDialog, QInputDialog,
                                QLineEdit, QPushButton, QFrame, QSizePolicy)
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QAction
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent, QRectF
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QAction, QPen
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from core.trace_model import TraceModel
@@ -146,13 +147,19 @@ def _upsample_for_display(
     return sinc_interpolate_to_n(t, y, viewport_min_pts)
 
 
-def _eng_format(value: float, unit: str) -> str:
+def _eng_format(value: float, unit: str, spacing: float = None) -> str:
     """
     Format a float with engineering-style SI prefix and unit.
+
+    When ``spacing`` is provided (tick interval in the same units as value),
+    the number of decimal places is computed so that adjacent ticks cannot
+    produce identical labels.  Without spacing a short-but-readable heuristic
+    is used (not safe for closely-spaced ticks).
+
     Examples:  0.001 V  ->  '1 mV'
                0.000099 V -> '99 µV'
                1500 Hz    -> '1.5 kHz'
-               0.1 V      -> '100 mV'   (100 mV shorter than 0.1 V)
+               0.1 V      -> '100 mV'
     """
     if value == 0:
         return f"0 {unit}"
@@ -164,40 +171,338 @@ def _eng_format(value: float, unit: str) -> str:
     for scale, prefix in prefixes:
         if abs_v >= scale * 0.9999:
             scaled = value / scale
-            # Choose decimal places to keep it short
-            if abs(scaled) >= 100:
-                s = f"{scaled:.0f}"
-            elif abs(scaled) >= 10:
-                s = f"{scaled:.1f}".rstrip('0').rstrip('.')
+            if spacing is not None and spacing > 0:
+                # Enough decimal places so that spacing/scale differences are
+                # never rounded away.  E.g. spacing=0.05, scale=1 → dp=2.
+                scaled_sp = abs(spacing / scale)
+                dp = max(0, -int(math.floor(math.log10(scaled_sp)))) if scaled_sp < 1 else 0
+                dp = min(dp, 9)   # guard against pathological inputs
+                s = f"{scaled:.{dp}f}"
             else:
-                s = f"{scaled:.2f}".rstrip('0').rstrip('.')
+                # Heuristic for status-bar / non-tick uses
+                if abs(scaled) >= 100:
+                    s = f"{scaled:.0f}"
+                elif abs(scaled) >= 10:
+                    s = f"{scaled:.1f}".rstrip('0').rstrip('.')
+                else:
+                    s = f"{scaled:.2f}".rstrip('0').rstrip('.')
             return f"{s} {prefix}{unit}"
     # Fallback for very small values
     return f"{value:.3e} {unit}"
 
 
 class EngineeringTimeAxisItem(pg.AxisItem):
-    """X-axis that labels ticks with SI time prefixes: ns, µs, ms, s, ks."""
+    """X-axis with SI time prefixes (ns/µs/ms/s/ks) or smart MM:SS / HH:MM:SS display."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._smart       = False
+        self._smart_max_s = 300.0   # seconds above which → MM:SS
+        self._smart_max_m = 120.0   # minutes above which → HH:MM:SS
+        self._smart_max_h = 24.0    # hours   above which → DD:HH:MM:SS
+        self._div_cfg: dict = {}
+        self._real_time        = False
+        self._t0_wall_clock_dt = None  # datetime | None
+        self._rt_accent_color: str = "#1e88e5"
+        # Per-render-cycle anchor state (reset in generateDrawSpecs)
+        self._rt_anchor_label: str   = ""
+        self._rt_anchor_t:     float = 0.0
+        self._rt_max_spacing:  float = 0.0
+
+    def set_div_settings(self, cfg: dict):
+        self._div_cfg = cfg or {}
+        self.picture = None
+        self.update()
+
+    def tickSpacing(self, minVal, maxVal, size):
+        ticks = super().tickSpacing(minVal, maxVal, size)
+        if not ticks or maxVal <= minVal or size <= 0:
+            return ticks
+        major = ticks[0][0]
+        if major <= 0:
+            return ticks
+        px_per_major = size * major / (maxVal - minVal)
+        result = [(major, ticks[0][1])]
+        if px_per_major >= self._div_cfg.get("div_tenths_px", 60):
+            result.append((major / 10.0, 0))
+        elif px_per_major >= self._div_cfg.get("div_fifths_px", 30):
+            result.append((major / 5.0, 0))
+        elif px_per_major >= self._div_cfg.get("div_halves_px", 15):
+            result.append((major / 2.0, 0))
+        self._last_tick_result = result   # cache for status-bar readback
+        return result
+
+    def tickValues(self, minVal, maxVal, size):
+        levels = super().tickValues(minVal, maxVal, size)
+        self._tick_level_counts = [len(lvl[1]) for lvl in levels]
+        return levels
+
+    def generateDrawSpecs(self, p):
+        # Reset per-render anchor so tickStrings picks up the major-level call
+        self._rt_anchor_label = ""
+        self._rt_max_spacing  = 0.0
+        result = super().generateDrawSpecs(p)
+        if result is None:
+            return result   # axis not yet sized
+        axisSpec, tickSpecs, textSpecs = result
+        self._fix_subdiv_alpha(tickSpecs)
+        if self._real_time and self._t0_wall_clock_dt is not None and self._rt_anchor_label:
+            self._inject_rt_anchor(tickSpecs, textSpecs, p)
+        return axisSpec, tickSpecs, textSpecs
+
+    def _fix_subdiv_alpha(self, tickSpecs):
+        """Re-apply a density-independent alpha to level-1 (sub-div) tick specs.
+        pyqtgraph's built-in formula multiplies by 0.05*length/N which renders
+        fine sub-divisions nearly invisible.  We override to a fixed fraction."""
+        if self.grid is False or not tickSpecs:
+            return
+        counts = getattr(self, '_tick_level_counts', [])
+        if len(counts) < 2:
+            return   # only major level, nothing to boost
+        n_major = counts[0]
+        if len(tickSpecs) <= n_major:
+            return   # all specs are major
+        sub_alpha = max(20, int(self.grid * 0.55))
+        for idx in range(n_major, len(tickSpecs)):
+            pen, p1, p2 = tickSpecs[idx]
+            pen = QPen(pen)
+            c = pen.color()
+            c.setAlpha(sub_alpha)
+            pen.setColor(c)
+            tickSpecs[idx] = (pen, p1, p2)
+
+    def set_smart_scale(self, settings: dict):
+        ss = settings or {}
+        self._smart       = bool(ss.get("enabled", False))
+        self._smart_max_s = float(ss.get("max_seconds", 300))
+        self._smart_max_m = float(ss.get("max_minutes", 120))
+        self._smart_max_h = float(ss.get("max_hours",   24))
+        self.picture = None   # invalidate cached axis rendering
+        self.update()
+
+    def set_real_time(self, settings: dict):
+        """Enable/disable real-time mode.  settings keys:
+            enabled (bool), t0_wall_clock (ISO-8601 str or ""), accent_color (hex str)
+        """
+        from datetime import datetime
+        rt = settings or {}
+        self._real_time = bool(rt.get("enabled", False))
+        t0_str = rt.get("t0_wall_clock", "") or ""
+        if self._real_time and t0_str:
+            try:
+                self._t0_wall_clock_dt = datetime.fromisoformat(t0_str)
+            except ValueError:
+                self._t0_wall_clock_dt = None
+        else:
+            self._t0_wall_clock_dt = None
+        if rt.get("accent_color"):
+            self._rt_accent_color = rt["accent_color"]
+        self.picture = None
+        self.update()
+
+    def set_accent_color(self, color: str):
+        self._rt_accent_color = color or "#1e88e5"
+        self.picture = None
+        self.update()
+
     def tickStrings(self, values, scale, spacing):
-        results = []
+        if not values:
+            return []
+        if self._real_time and self._t0_wall_clock_dt is not None:
+            return self._fmt_real_time_strings(values, spacing)
+        if not self._smart:
+            return self._eng_strings(values)
+
+        max_abs = max(abs(float(v)) for v in values)
+        if max_abs < self._smart_max_s:
+            return self._eng_strings(values)   # still in seconds range — keep SI
+
+        show_ms   = spacing < 1.0
+        max_m_thr = self._smart_max_m * 60.0
+        max_h_thr = self._smart_max_h * 3600.0
+
+        # Shared-prefix optimisation: when all visible ticks share the same
+        # whole-minute (or whole-hour) value, show only the seconds portion
+        # after the first tick to reduce label clutter.
+        use_prefix = False
+        if len(values) > 1 and max_abs >= max_m_thr and spacing < 60:
+            prefix_mins = [int(abs(float(v))) // 60 for v in values]
+            use_prefix = (len(set(prefix_mins)) == 1)
+
+        return [self._fmt_smart(float(v), max_abs, max_m_thr, max_h_thr,
+                                show_ms, use_prefix and i > 0)
+                for i, v in enumerate(values)]
+
+    @staticmethod
+    def _fmt_smart(t: float, max_abs: float,
+                   max_m_thr: float, max_h_thr: float,
+                   show_ms: bool, prefix_only: bool = False) -> str:
+        sign = "\u2212" if t < 0 else ""   # proper minus sign
+        a    = abs(t)
+        ms_str = f".{int(round((a % 1.0) * 1000)):03d}" if show_ms else ""
+        secs   = int(a) % 60
+        mins   = int(a) // 60 % 60
+        hours  = int(a) // 3600 % 24
+        days   = int(a) // 86400
+
+        if max_abs < max_m_thr:
+            total_mins = int(a) // 60
+            if prefix_only:
+                return f":{secs:02d}{ms_str}"
+            return f"{sign}{total_mins}:{secs:02d}{ms_str}"
+        elif max_abs < max_h_thr:
+            if prefix_only:
+                return f":{secs:02d}{ms_str}"
+            return f"{sign}{hours}:{mins:02d}:{secs:02d}{ms_str}"
+        else:
+            if prefix_only:
+                return f":{secs:02d}"
+            return f"{sign}{days}d {hours:02d}:{mins:02d}:{secs:02d}"
+
+    @staticmethod
+    def _eng_strings(values) -> list:
+        out = []
         for v in values:
             t = float(v)
             a = abs(t)
-            if a == 0:
-                results.append("0 s")
-            elif a < 1e-9:
-                results.append(f"{t*1e12:.4g} ps")
-            elif a < 1e-6:
-                results.append(f"{t*1e9:.4g} ns")
-            elif a < 1e-3:
-                results.append(f"{t*1e6:.4g} µs")
-            elif a < 1.0:
-                results.append(f"{t*1e3:.4g} ms")
-            elif a < 1e3:
-                results.append(f"{t:.4g} s")
-            else:
-                results.append(f"{t/1e3:.4g} ks")
-        return results
+            if   a == 0:   out.append("0 s")
+            elif a < 1e-9: out.append(f"{t*1e12:.4g} ps")
+            elif a < 1e-6: out.append(f"{t*1e9:.4g} ns")
+            elif a < 1e-3: out.append(f"{t*1e6:.4g} µs")
+            elif a < 1.0:  out.append(f"{t*1e3:.4g} ms")
+            elif a < 1e3:  out.append(f"{t:.4g} s")
+            else:           out.append(f"{t/1e3:.4g} ks")
+        return out
+
+    def _fmt_real_time_strings(self, values, spacing) -> list:
+        """Format tick labels in real-time mode.
+
+        The anchor is the EXACT viewport left edge (self.range[0]), not a grid
+        boundary.  This means:
+          • The anchor label at the left edge always shows the true wall-clock
+            time at that pixel, and ticks up/down continuously as you pan.
+          • Every visible tick shows its delta from the left edge, so adjacent
+            ticks always differ by exactly one major div's worth of time.
+
+        The anchor text is NOT returned as a tick label — it is injected by
+        generateDrawSpecs at the left edge so it can never be clipped.
+
+        Only the major-level tickStrings call (largest spacing) establishes the
+        anchor; minor-level calls reuse the same anchor_t for their deltas.
+        """
+        from datetime import timedelta
+
+        if spacing > self._rt_max_spacing:
+            # Major-level call — lock in the anchor at the exact left edge
+            self._rt_max_spacing = spacing
+            try:
+                t_anchor = float(self.range[0])
+            except Exception:
+                t_anchor = float(values[0])
+            anchor_dt = self._t0_wall_clock_dt + timedelta(seconds=t_anchor)
+            self._rt_anchor_label = self._fmt_rt_anchor(anchor_dt, spacing)
+            self._rt_anchor_t = t_anchor
+
+        t_anchor = self._rt_anchor_t
+        return [self._fmt_rt_delta(float(v) - t_anchor, spacing) for v in values]
+
+    def _inject_rt_anchor(self, tickSpecs, textSpecs, p):
+        """Inject the anchor label and accent line at pixel x=0 (left viewport edge).
+
+        1. Draws a thin accent-coloured vertical line at x=0 spanning the full
+           axis + plot height, giving a visual anchor for the timestamp.
+        2. Measures the rendered width of the anchor text and removes any tick
+           labels whose left edge would overlap it.
+        3. Appends the anchor label as a left-aligned, always-in-bounds textSpec.
+        """
+        from PyQt6.QtCore import QRectF, QPointF, Qt
+        from PyQt6.QtGui import QPen, QColor
+        label = self._rt_anchor_label
+        if not label:
+            return
+
+        bounds = self.boundingRect()
+
+        # ── 1. Accent line ────────────────────────────────────────────────────
+        # Extend from the top of the linked view (into the plot area) through
+        # the full axis height so the line visually connects label to data.
+        lv = self.linkedView()
+        if lv is not None and self.grid is not False:
+            tb = lv.mapRectToItem(self, lv.boundingRect())
+            line_top = tb.top()
+        else:
+            line_top = bounds.top()
+        accent_pen = QPen(QColor(self._rt_accent_color), 1.5)
+        tickSpecs.append((accent_pen, QPointF(0, line_top), QPointF(0, bounds.bottom())))
+
+        # ── 2. Borrow text-row geometry from existing tick labels ─────────────
+        if textSpecs:
+            sample = textSpecs[0][0]
+            y, h = sample.y(), sample.height()
+        else:
+            h = 12.0
+            y = bounds.bottom() - h - 2
+
+        # ── 3. Measure anchor label width and suppress overlapping tick labels ─
+        measure = QRectF(0, 0, 2000, 100)
+        anchor_w = p.boundingRect(measure, Qt.AlignmentFlag.AlignLeft, label).width()
+        # A tick label is centred at its tick x-position.
+        # It overlaps the anchor if  (tick_x - label_w/2)  < anchor_w.
+        filtered = []
+        for spec in textSpecs:
+            rect, flags, text = spec
+            tick_cx = rect.center().x()
+            lbl_w   = rect.width()
+            if tick_cx - lbl_w / 2 < anchor_w:
+                continue   # would overlap — suppress
+            filtered.append(spec)
+        textSpecs[:] = filtered
+
+        # ── 4. Inject anchor label ─────────────────────────────────────────────
+        rect  = QRectF(bounds.left() + 1, y, bounds.width() - 2, h)
+        flags = (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter |
+                 Qt.TextFlag.TextDontClip)
+        textSpecs.append((rect, flags, label))
+
+    @staticmethod
+    def _fmt_rt_anchor(dt, spacing: float) -> str:
+        """Absolute datetime label for the anchor (first visible major tick).
+        Precision tracks the tick spacing: ms when spacing < 1 s, else tenths.
+        """
+        if spacing < 1e-3:
+            # microsecond spacing or finer — ms precision is plenty (per spec)
+            ms = dt.microsecond // 1000
+            return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{ms:03d}"
+        else:
+            tenths = dt.microsecond // 100000
+            return dt.strftime("%Y-%m-%d %H:%M:%S.") + str(tenths)
+
+    @staticmethod
+    def _fmt_rt_delta(delta_s: float, spacing: float) -> str:
+        """Relative '+delta' label for every tick after the anchor."""
+        a = abs(delta_s)
+        sign = "+" if delta_s >= 0 else "\u2212"
+        if spacing >= 3600:
+            h  = int(a) // 3600
+            m  = int(a) // 60 % 60
+            s  = int(a) % 60
+            return f"{sign}{h}:{m:02d}:{s:02d}"
+        elif spacing >= 60:
+            total_m = int(a) // 60
+            s       = int(a) % 60
+            frac    = round((a % 1) * 10)
+            return f"{sign}{total_m}:{s:02d}.{frac}"
+        elif spacing >= 1:
+            frac = round((a % 1) * 10)
+            return f"{sign}{int(a)}.{frac}"
+        elif spacing >= 1e-3:
+            return f"{sign}{a * 1e3:.4g}ms"
+        elif spacing >= 1e-6:
+            return f"{sign}{a * 1e6:.4g}\u00b5s"
+        elif spacing >= 1e-9:
+            return f"{sign}{a * 1e9:.4g}ns"
+        else:
+            return f"{sign}{a:.4g}s"
 
 
 class EngineeringAxisItem(pg.AxisItem):
@@ -208,17 +513,165 @@ class EngineeringAxisItem(pg.AxisItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._unit = ""
+        self._div_cfg: dict = {}
+        self._ch_name: str = ""
+        self._last_tick_values: list = []   # [(spacing, [val, ...]), ...] from last tickValues call
+
+    def set_ch_name(self, name: str):
+        self._ch_name = name or ""
 
     def set_unit(self, unit: str):
         self._unit = unit or ""
+        self.picture = None   # invalidate cached axis rendering
+        self.update()         # schedule repaint so tickStrings() runs with new unit
+
+    def set_div_settings(self, cfg: dict):
+        self._div_cfg = cfg or {}
+        self.picture = None
+        self.update()
+
+    def tickSpacing(self, minVal, maxVal, size):
+        ticks = super().tickSpacing(minVal, maxVal, size)
+        if not ticks or maxVal <= minVal or size <= 0:
+            return ticks
+        major = ticks[0][0]
+        if major <= 0:
+            return ticks
+        # size is in logical pixels; user thresholds are in physical pixels.
+        # Multiply by DPR so the comparison is apples-to-apples.
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        dpr = screen.devicePixelRatio() if screen else 1.0
+        px_per_major = size * major / (maxVal - minVal) * dpr
+        result = [(major, ticks[0][1])]
+        if px_per_major >= self._div_cfg.get("div_tenths_px", 60):
+            result.append((major / 10.0, 0))
+        elif px_per_major >= self._div_cfg.get("div_fifths_px", 30):
+            result.append((major / 5.0, 0))
+        elif px_per_major >= self._div_cfg.get("div_halves_px", 15):
+            result.append((major / 2.0, 0))
+        self._last_tick_result = result   # cache for status-bar readback
+        return result
+
+    def tickValues(self, minVal, maxVal, size):
+        levels = super().tickValues(minVal, maxVal, size)
+        self._tick_level_counts = [len(lvl[1]) for lvl in levels]
+        self._last_tick_values = [(sp, list(vals)) for sp, vals in levels]
+        return levels
+
+    def generateDrawSpecs(self, p):
+        axisSpec, tickSpecs, textSpecs = super().generateDrawSpecs(p)
+        textSpecs = _filter_dense_labels(textSpecs)
+        if not textSpecs and tickSpecs:
+            try:
+                saved = self._salvage_one_label(tickSpecs)
+                if saved:
+                    textSpecs = [saved]
+            except Exception:
+                pass
+        self._fix_subdiv_alpha(tickSpecs)
+        return axisSpec, tickSpecs, textSpecs
+
+    def _salvage_one_label(self, tickSpecs):
+        """When pyqtgraph clips all tick labels off-screen (tight zoom, ticks near
+        lane edges), synthesise one label for the major-tick closest to the
+        view centre, clamped so its rect stays fully within the axis bounds.
+
+        Reads item-local y-coordinates directly from tickSpecs (which pyqtgraph
+        already computed correctly) to avoid any coordinate-mapping issues."""
+        if not self._last_tick_values:
+            return None
+        spacing, vals = self._last_tick_values[0]
+        if not vals:
+            return None
+        n_major = (getattr(self, '_tick_level_counts', None) or [0])[0]
+        n_major = min(n_major or len(vals), len(tickSpecs), len(vals))
+        if n_major == 0:
+            return None
+        # Pick the major tick value closest to the view centre
+        view = self.linkedView()
+        if view is None:
+            return None
+        vmin, vmax = view.viewRange()[1]
+        v_centre = (vmin + vmax) / 2.0
+        best_idx = min(range(len(vals)), key=lambda i: abs(vals[i] - v_centre))
+        best_val = vals[best_idx]
+        # Clamp index to available major tickSpecs
+        tick_idx = min(best_idx, n_major - 1)
+        _, pt1, pt2 = tickSpecs[tick_idx]
+        tick_y = (pt1.y() + pt2.y()) / 2.0   # item-local y from pyqtgraph
+        # Format the label
+        if self._unit and self._unit != "raw":
+            label = _eng_format(float(best_val), self._unit, spacing)
+        else:
+            strs = super().tickStrings([best_val], 1.0, spacing)
+            label = strs[0] if strs else str(best_val)
+        # Build rect within axis bounds.
+        # boundingRect() expands to include the plot view when grid is enabled,
+        # so we use geometry() for the x/width (just the axis strip itself).
+        geom = self.geometry()
+        axis_w = geom.width()
+        axis_h = geom.height()
+        tick_font = getattr(self, 'tickFont', None)
+        fm = QFontMetrics(tick_font if isinstance(tick_font, QFont) else QFont())
+        lh = fm.height()
+        top = tick_y - lh / 2.0
+        top = max(0.0, min(top, axis_h - lh))
+        rect = QRectF(0, top, axis_w, lh)
+        flags = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+        return (rect, int(flags), label)
+
+    def _fix_subdiv_alpha(self, tickSpecs):
+        """Re-apply a density-independent alpha to level-1 (sub-div) tick specs.
+        pyqtgraph's built-in formula multiplies by 0.05*length/N which renders
+        fine sub-divisions nearly invisible.  We override to a fixed fraction."""
+        if self.grid is False or not tickSpecs:
+            return
+        counts = getattr(self, '_tick_level_counts', [])
+        if len(counts) < 2:
+            return
+        n_major = counts[0]
+        if len(tickSpecs) <= n_major:
+            return
+        # Sub-divs should be just barely less prominent than major lines.
+        # Major lines end up at alpha≈self.grid; use 0.92 so they're distinguishable.
+        sub_alpha = max(40, int(self.grid * 0.92))
+        for idx in range(n_major, len(tickSpecs)):
+            pen, p1, p2 = tickSpecs[idx]
+            pen = QPen(pen)
+            c = pen.color()
+            c.setAlpha(sub_alpha)
+            pen.setColor(c)
+            tickSpecs[idx] = (pen, p1, p2)
 
     def tickStrings(self, values, scale, spacing):
         if not self._unit or self._unit in ("raw", ""):
             return super().tickStrings(values, scale, spacing)
-        # pyqtgraph passes scale for its own unit conversion; we handle SI
-        # prefixes ourselves in _eng_format, so use values directly (scale=1.0)
-        return [_eng_format(float(v), self._unit) for v in values]
+        # Pass spacing so _eng_format uses enough decimal places that
+        # adjacent ticks never produce identical labels.
+        return [_eng_format(float(v), self._unit, spacing) for v in values]
 
+
+
+def _filter_dense_labels(textSpecs: list) -> list:
+    """Drop Y-axis tick labels that overlap.
+
+    pyqtgraph returns textSpecs as [(QRectF, flags, text), ...].
+    The rects are computed from actual font metrics, so this is font-size-
+    independent.  Gridlines (in tickSpecs) are never affected.
+
+    A new label is accepted only if its top edge is at or below the previous
+    label's bottom edge (strict no-overlap).
+    """
+    if len(textSpecs) <= 1:
+        return textSpecs
+    # Sort top-to-bottom by rect vertical centre
+    by_y = sorted(textSpecs, key=lambda s: s[0].center().y())
+    kept = [by_y[0]]
+    for spec in by_y[1:]:
+        if spec[0].top() >= kept[-1][0].bottom():
+            kept.append(spec)
+    return kept
 
 
 def _theme_name(theme) -> str:
@@ -268,7 +721,8 @@ def _effective_color(color: str, theme_name: str) -> str:
 
 class RangeBar(QWidget):
     """Compact X/Y range input bar shown below the plot area."""
-    range_changed = pyqtSignal(float, float, float, float)  # x0,x1,y0,y1
+    range_changed      = pyqtSignal(float, float, float, float)  # x0,x1,y0,y1
+    t0_date_requested  = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -291,12 +745,26 @@ class RangeBar(QWidget):
         layout.addWidget(self.y1)
 
         btn = QPushButton("Apply")
-        btn.setFixedWidth(55)
+        btn.setMinimumWidth(44)
+        btn.setMaximumWidth(88)
         btn.clicked.connect(self._apply)
         layout.addWidget(btn)
         layout.addStretch()
 
-        self.setMaximumHeight(30)
+        self._t0_date_btn = QPushButton("Set t=0 date")
+        self._t0_date_btn.setMinimumWidth(72)
+        self._t0_date_btn.setMaximumWidth(144)
+        self._t0_date_btn.setCheckable(True)
+        self._t0_date_btn.clicked.connect(self.t0_date_requested)
+        layout.addWidget(self._t0_date_btn)
+
+    def set_date_indicator(self, has_date: bool, _accent_colour: str = ""):
+        """Toggle the button's checked state to reflect whether a date is set.
+
+        Uses QPushButton:checked from the app stylesheet so the accent colour
+        is always up-to-date after theme changes — no manual colour needed.
+        """
+        self._t0_date_btn.setChecked(has_date)
 
     def update_display(self, x0, x1, y0, y1):
         def fmt(v):
@@ -322,8 +790,9 @@ class RangeBar(QWidget):
 
 
 class TraceLane(pg.PlotWidget):
-    cursor_moved = pyqtSignal(float, int)
-    view_range_changed = pyqtSignal(object)  # passes self
+    cursor_moved             = pyqtSignal(float, int)
+    view_range_changed       = pyqtSignal(object)   # passes self
+    context_menu_requested   = pyqtSignal(str, object)  # (trace_name, QPoint global)
 
     def __init__(self, trace: TraceModel, style_context: TraceStyleContext,
                  y_lock_auto: bool = True,
@@ -337,6 +806,7 @@ class TraceLane(pg.PlotWidget):
         self._x_axis = EngineeringTimeAxisItem(orientation="bottom")
         unit = getattr(trace, 'unit', '') or ''
         self._y_axis.set_unit(unit)
+        self._y_axis.set_ch_name(getattr(trace, 'name', ''))
         super().__init__(parent=parent,
                          background=style_context.plot_colors["background"],
                          axisItems={"left": self._y_axis,
@@ -360,6 +830,10 @@ class TraceLane(pg.PlotWidget):
         self._limits_config: dict = dict(limits_config) if limits_config else dict(DEFAULT_LIMITS_CONFIG)
         self._suppress_view_redraws = False   # set True by ScopePlotWidget during batch zoom
         self._sinc_active = False         # True when sinc was actually used this draw
+        self._segment_curves: list = []   # non-primary segment overlay curves
+        self._process_segments: bool = True  # when False, render full trace ignoring segments
+        self._segment_dim_opacity: float = 0.30  # 0–1, for "dimmed" non-primary segments
+        self._segment_dash_pattern: Optional[list] = None  # Qt dash pattern for "dashed"
         self._render_t = np.array([])
         self._render_y = np.array([])
         self._visible_samples = 0
@@ -586,9 +1060,31 @@ class TraceLane(pg.PlotWidget):
     def _add_trace_curve(self):
         if self._curve is not None:
             self.removeItem(self._curve)
+        # Clean up non-primary segment curves from previous render
+        for sc in self._segment_curves:
+            try:
+                self.removeItem(sc)
+            except Exception:
+                pass
+        self._segment_curves = []
+
         t_full = self.trace.time_axis
         y_full = self.trace.processed_data
         self._sinc_active = False
+
+        # Determine segment processing state.
+        # primary_segment=None means no explicit primary; per spec this is
+        # equivalent to "show all segments as regular" — no slicing or styling.
+        segs = getattr(self.trace, 'segments', None)
+        primary = getattr(self.trace, 'primary_segment', None)
+        viewmode = (getattr(self.trace, 'non_primary_viewmode', '') or '').strip()
+        process_segs = (self._process_segments
+                        and segs is not None and len(segs) > 1
+                        and primary is not None and 0 <= primary < len(segs))
+        if process_segs:
+            p_start, p_end = segs[primary][0], segs[primary][1]
+            t_full = t_full[p_start:p_end]
+            y_full = y_full[p_start:p_end]
 
         # Window to the currently visible x-range FIRST — for all interp modes.
         # Downsampling must operate on visible samples only; applying it to the
@@ -633,6 +1129,45 @@ class TraceLane(pg.PlotWidget):
         if self._persist_curves:
             # Always keep main curve above all persistence ghost layers
             self._curve.setZValue(len(self._persist_curves) + 1)
+
+        # Non-primary segment overlays
+        if process_segs and viewmode != "hide":
+            t_all = self.trace.time_axis
+            y_all = self.trace.processed_data
+            color = self._display_color()
+            width_px = float(self.getPlotItem().vb.width())
+            seg_max_pts = _resolve_display_limit(self._limits_config, width_px)
+            for i, seg in enumerate(segs):
+                if i == primary:
+                    continue
+                s_s, s_e = seg[0], seg[1]
+                t_seg = t_all[s_s:s_e]
+                y_seg = y_all[s_s:s_e]
+                seg_mask = (t_seg >= x0) & (t_seg <= x1)
+                if int(seg_mask.sum()) >= 2:
+                    t_seg = t_seg[seg_mask]
+                    y_seg = y_seg[seg_mask]
+                if len(t_seg) < 2:
+                    continue
+                t_ds, y_ds = downsample_for_display(t_seg, y_seg, seg_max_pts)
+                if viewmode == "dimmed":
+                    c = QColor(color)
+                    c.setAlphaF(self._segment_dim_opacity)
+                    seg_pen = pg.mkPen(color=c, width=1)
+                elif viewmode == "dashed":
+                    seg_pen = pg.mkPen(color=color, width=1)
+                    if self._segment_dash_pattern:
+                        seg_pen.setStyle(Qt.PenStyle.CustomDashLine)
+                        seg_pen.setDashPattern(self._segment_dash_pattern)
+                    else:
+                        seg_pen.setStyle(Qt.PenStyle.DashLine)
+                else:
+                    seg_pen = pg.mkPen(color=color, width=1)
+                sc = self.plot(t_ds, y_ds, pen=seg_pen, antialias=False)
+                sc.setDownsampling(auto=True, method="peak")
+                sc.setClipToView(True)
+                self._segment_curves.append(sc)
+
         if self.y_lock_auto:
             self.getPlotItem().enableAutoRange(axis="y")
         self._redraw_labels()
@@ -690,13 +1225,16 @@ class TraceLane(pg.PlotWidget):
         y = self.trace.processed_data
         if len(t) < 2:
             return None
+        # Outside the trace's time range → no data at this cursor position
+        if t_pos < float(t[0]) or t_pos > float(t[-1]):
+            return None
         idx = np.searchsorted(t, t_pos)
-        if idx <= 0: return float(y[0])
-        if idx >= len(t): return float(y[-1])
-        t0, t1 = t[idx-1], t[idx]
-        y0, y1 = y[idx-1], y[idx]
-        if t1 == t0: return float(y0)
-        return float(y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0))
+        idx = max(1, min(idx, len(t) - 1))
+        t0, t1 = float(t[idx-1]), float(t[idx])
+        y0, y1 = float(y[idx-1]), float(y[idx])
+        v = y0 if t1 == t0 else y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0)
+        import math
+        return None if math.isnan(v) else v
 
     # ── Persistence / retrigger overlay ───────────────────────────────────────
 
@@ -796,23 +1334,7 @@ class TraceLane(pg.PlotWidget):
             self._apply_resolved_style()
 
     def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        act_color = QAction(f"Change Color: {self.trace.label}", self)
-        act_color.triggered.connect(self._change_color)
-        menu.addAction(act_color)
-        act_label = QAction("Rename Trace", self)
-        act_label.triggered.connect(self._rename)
-        menu.addAction(act_label)
-        menu.addSeparator()
-        act_y_auto = QAction("Auto Scale Y", self)
-        act_y_auto.triggered.connect(
-            lambda: self.getPlotItem().enableAutoRange(axis="y"))
-        menu.addAction(act_y_auto)
-        act_xy = QAction("Auto Scale X+Y", self)
-        act_xy.triggered.connect(
-            lambda: self.getPlotItem().enableAutoRange())
-        menu.addAction(act_xy)
-        menu.exec(event.globalPos())
+        self.context_menu_requested.emit(self.trace.name, event.globalPos())
 
     def _change_color(self):
         c = QColorDialog.getColor(QColor(self.trace.color), self)
@@ -899,6 +1421,10 @@ class OverlayTraceVisual:
         self._original_display_mode: Optional[str] = None
         self._original_dimmed_opacity: float = 0.5
         self._original_dash_pattern: Optional[list] = None
+        self._segment_curves: list = []
+        self._process_segments: bool = True
+        self._segment_dim_opacity: float = 0.30
+        self._segment_dash_pattern: Optional[list] = None
         self.curve = self.plot_item.plot([], [], pen=pg.mkPen(width=1.5),
                                          name=trace.label, antialias=False)
         self.curve.setDownsampling(auto=True, method="peak")
@@ -1005,9 +1531,30 @@ class OverlayTraceVisual:
         self._reapply_original_style()
 
     def refresh_curve(self, view_range: Tuple[float, float]):
+        # Clean up non-primary segment curves from previous render
+        for sc in self._segment_curves:
+            try:
+                self.plot_item.removeItem(sc)
+            except Exception:
+                pass
+        self._segment_curves = []
+
         t_full = self.trace.time_axis
         y_full = self.trace.processed_data
         x0, x1 = view_range
+
+        # Segment slicing — mirrors TraceLane._add_trace_curve logic
+        segs = getattr(self.trace, 'segments', None)
+        primary = getattr(self.trace, 'primary_segment', None)
+        viewmode = (getattr(self.trace, 'non_primary_viewmode', '') or '').strip()
+        process_segs = (self._process_segments
+                        and segs is not None and len(segs) > 1
+                        and primary is not None and 0 <= primary < len(segs))
+        if process_segs:
+            p_start, p_end = segs[primary][0], segs[primary][1]
+            t_full = t_full[p_start:p_end]
+            y_full = y_full[p_start:p_end]
+
         self._interpolated_view = False
         self._update_visible_samples(RenderViewport(
             width_px=max(1.0, float(self.plot_item.vb.width())),
@@ -1048,6 +1595,43 @@ class OverlayTraceVisual:
         self._reapply_original_style()
         if self._persist_curves:
             self.curve.setZValue(len(self._persist_curves) + 1)
+
+        # Non-primary segment overlays
+        if process_segs and viewmode != "hide":
+            t_all = self.trace.time_axis
+            y_all = self.trace.processed_data
+            color = self._display_color()
+            seg_max_pts = _resolve_display_limit(self._limits_config, width_px)
+            for i, seg in enumerate(segs):
+                if i == primary:
+                    continue
+                s_s, s_e = seg[0], seg[1]
+                t_seg = t_all[s_s:s_e]
+                y_seg = y_all[s_s:s_e]
+                seg_mask = (t_seg >= x0) & (t_seg <= x1)
+                if int(seg_mask.sum()) >= 2:
+                    t_seg = t_seg[seg_mask]
+                    y_seg = y_seg[seg_mask]
+                if len(t_seg) < 2:
+                    continue
+                t_ds, y_ds = downsample_for_display(t_seg, y_seg, seg_max_pts)
+                if viewmode == "dimmed":
+                    c = QColor(color)
+                    c.setAlphaF(self._segment_dim_opacity)
+                    seg_pen = pg.mkPen(color=c, width=1)
+                elif viewmode == "dashed":
+                    seg_pen = pg.mkPen(color=color, width=1)
+                    if self._segment_dash_pattern:
+                        seg_pen.setStyle(Qt.PenStyle.CustomDashLine)
+                        seg_pen.setDashPattern(self._segment_dash_pattern)
+                    else:
+                        seg_pen.setStyle(Qt.PenStyle.DashLine)
+                else:
+                    seg_pen = pg.mkPen(color=color, width=1)
+                sc = self.plot_item.plot(t_ds, y_ds, pen=seg_pen, antialias=False)
+                sc.setDownsampling(auto=True, method="peak")
+                sc.setClipToView(True)
+                self._segment_curves.append(sc)
 
     # ── Persistence / retrigger overlay ───────────────────────────────────────
 
@@ -1138,14 +1722,20 @@ class OverlayTraceVisual:
     def remove(self):
         self.clear_persistence_layers()
         self.clear_retrigger_curve()
+        for sc in self._segment_curves:
+            try:
+                self.plot_item.removeItem(sc)
+            except Exception:
+                pass
+        self._segment_curves = []
         self.plot_item.removeItem(self.curve)
 
 
 class ScopePlotWidget(QWidget):
-    cursor_values_changed = pyqtSignal(dict)
-
-    sinc_active_changed = pyqtSignal(bool)  # emitted when sinc kicks in/out
-    view_changed        = pyqtSignal()       # emitted (throttled) on pan/zoom
+    cursor_values_changed        = pyqtSignal(dict)
+    sinc_active_changed          = pyqtSignal(bool)  # emitted when sinc kicks in/out
+    view_changed                 = pyqtSignal()       # emitted (throttled) on pan/zoom
+    trace_context_menu_requested = pyqtSignal(str, object)  # (trace_name, QPoint global)
 
     def __init__(self, theme_manager, y_lock_auto: bool = True,
                  interp_mode: str = "linear",
@@ -1187,9 +1777,23 @@ class ScopePlotWidget(QWidget):
         }
         self._overlay_visuals: Dict[str, OverlayTraceVisual] = {}
         self._overlay_z_order: List[str] = []  # for bring-to-front
+        # Scroll / min-height settings (updated via set_scroll_settings / set_min_lane_height)
+        self._scroll_settings: dict = {}
+        self._min_lane_height: int = 80
+        self._y_axis_label_w: int = 60   # updated by set_y_axis_label_width
         # Persistence / retrigger state — reapplied after every rebuild
         self._persist_state: Dict[str, tuple] = {}       # name->(layers, t_ref)
         self._retrigger_curve_state: Dict[str, tuple] = {}  # name->(t_abs, data)
+        # Segment rendering state — applied to new lanes on rebuild
+        self._seg_process: bool = True
+        self._seg_dim_opacity: float = 0.30
+        self._seg_dash_pattern: Optional[list] = None
+        # Smart scale settings — applied to new lanes on rebuild
+        self._smart_scale_settings: dict = {}
+        # Real-time axis settings — applied to new lanes on rebuild
+        self._real_time_settings: dict = {}
+        # Div sub-division settings — applied to new lanes on rebuild
+        self._div_settings: dict = {}
 
         layout = QVBoxLayout(self)
         layout.setSpacing(1)
@@ -1213,6 +1817,8 @@ class ScopePlotWidget(QWidget):
         self._overlay_widget.hide()
         layout.addWidget(self._overlay_widget)
         self._setup_overlay()
+        # Intercept wheel events on overlay viewport for modifier-key scroll
+        self._overlay_widget.viewport().installEventFilter(self)
 
         # Range bar
         self._range_bar = RangeBar()
@@ -1225,6 +1831,15 @@ class ScopePlotWidget(QWidget):
         self._range_timer.setInterval(100)
         self._range_timer.timeout.connect(self._update_range_bar)
         self._range_timer.timeout.connect(self.view_changed)
+
+        # Debounce timer for visibility-driven rebuilds (0 ms = next event tick).
+        # Coalesces rapid back-to-back set_trace_visible calls (e.g. "None" with
+        # 32 channels) into a single _rebuild, preventing O(n²) widget churn.
+        self._rebuild_timer = QTimer()
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.setInterval(0)
+        self._rebuild_timer.timeout.connect(self._rebuild)
+
         self._theme_manager.themeChanged.connect(self._on_theme_changed)
 
     def _setup_overlay(self):
@@ -1275,10 +1890,15 @@ class ScopePlotWidget(QWidget):
 
     def _on_theme_changed(self, theme):
         self._apply_plot_theme(theme)
+        rt_enabled = bool(self._real_time_settings.get("enabled"))
         for lane in self._lanes.values():
             lane.apply_theme(theme)
+            if rt_enabled:
+                lane._x_axis.set_accent_color(theme.pv("accent"))
         for visual in self._overlay_visuals.values():
             visual.apply_theme(theme)
+        if rt_enabled:
+            self._ov_x_axis.set_accent_color(theme.pv("accent"))
         self._rebuild_overlay_legend()
         self._refresh_cursor_styles()
         self._overlay_widget.update()
@@ -1311,15 +1931,18 @@ class ScopePlotWidget(QWidget):
         self._refresh_overlay_visuals()
 
     def set_mode(self, mode: str):
+        # Snapshot the current x window before switching so the new mode
+        # inherits it — split and overlay use independent PlotItems.
+        _x0, _x1 = self.get_current_view_range()
         self._mode = mode
         if mode == "overlay":
             self._scroll.hide()
             self._overlay_widget.show()
-            self._rebuild_overlay()
+            self._rebuild_overlay(inherit_x=(_x0, _x1))
         else:
             self._overlay_widget.hide()
             self._scroll.show()
-            self._rebuild_split()
+            self._rebuild_split(inherit_x=(_x0, _x1))
 
     def get_cursor_placement_x(self, cursor_id: int) -> float:
         x0, x1 = self.get_current_view_range()
@@ -1341,13 +1964,20 @@ class ScopePlotWidget(QWidget):
             pi.enableAutoRange(axis="y")
 
     def set_interp_mode(self, mode: str):
-        """Switch global interpolation mode. Clears per-trace overrides."""
+        """Switch global interpolation mode. Clears per-trace overrides.
+        Updates existing lanes directly to avoid triggering auto-range."""
         self.interp_mode = mode
-        # Clear per-trace overrides so all traces follow global mode
         for trace in self.traces:
             if hasattr(trace, '_interp_mode_override'):
                 del trace._interp_mode_override
-        self._rebuild()
+        # Update lanes in-place — avoids the enableAutoRange() that _rebuild() triggers
+        vr = self.get_current_view_range()
+        for lane in self._lanes.values():
+            lane.interp_mode = mode
+            lane.refresh_curve()
+        for visual in self._overlay_visuals.values():
+            visual.interp_mode = mode
+            visual.refresh_curve(vr)
 
     def add_trace(self, trace: TraceModel):
         # Allow overwrite if name already exists
@@ -1396,7 +2026,9 @@ class ScopePlotWidget(QWidget):
         for t in self.traces:
             if t.name == trace_name:
                 t.visible = visible
-        self._rebuild()
+        # Defer the rebuild so rapid back-to-back calls (e.g. "None" button
+        # on 32 channels) only trigger one rebuild instead of n² widget churn.
+        self._rebuild_timer.start()
 
     def set_interp_mode_for_trace(self, trace_name: str, mode: str):
         """Set per-trace interpolation override."""
@@ -1431,6 +2063,111 @@ class ScopePlotWidget(QWidget):
         else:
             self._refresh_overlay_visuals()
 
+    def set_scroll_settings(self, settings: dict):
+        """Update modifier-key scroll behaviour from Advanced UI settings."""
+        self._scroll_settings = dict(settings)
+
+    def set_min_lane_height(self, height: int):
+        """Change minimum trace height; applies to all current and future lanes."""
+        self._min_lane_height = max(40, int(height))
+        for lane in self._lanes.values():
+            lane.setMinimumHeight(self._min_lane_height)
+
+    def set_smart_scale(self, settings: dict):
+        """Propagate smart_scale settings to overlay axis and all split-mode lanes."""
+        self._smart_scale_settings = dict(settings)
+        self._ov_x_axis.set_smart_scale(settings)
+        for lane in self._lanes.values():
+            lane._x_axis.set_smart_scale(settings)
+            lane.refresh_curve()
+
+    def set_real_time(self, settings: dict):
+        """Propagate real-time axis settings to overlay axis and all split-mode lanes."""
+        self._real_time_settings = dict(settings)
+        self._ov_x_axis.set_real_time(settings)
+        for lane in self._lanes.values():
+            lane._x_axis.set_real_time(settings)
+
+    def set_div_settings(self, cfg: dict):
+        """Propagate div sub-division settings to all axis items (X and Y, overlay and lanes)."""
+        self._div_settings = dict(cfg)
+        self._ov_x_axis.set_div_settings(cfg)
+        self._ov_y_axis.set_div_settings(cfg)
+        for lane in self._lanes.values():
+            lane._x_axis.set_div_settings(cfg)
+            lane._y_axis.set_div_settings(cfg)
+
+    def set_process_segments(self, enabled: bool):
+        """Enable/disable segment-aware rendering on all lanes and overlay visuals."""
+        self._seg_process = enabled
+        for lane in self._lanes.values():
+            lane._process_segments = enabled
+            lane.refresh_curve()
+        vr = self.get_current_view_range()
+        for visual in self._overlay_visuals.values():
+            visual._process_segments = enabled
+            visual.refresh_curve(vr)
+
+    def set_segment_dim_opacity(self, opacity_pct: int):
+        """Set dim opacity (10–90%) for non-primary segments and refresh."""
+        opacity = max(0.1, min(0.9, opacity_pct / 100.0))
+        self._seg_dim_opacity = opacity
+        for lane in self._lanes.values():
+            lane._segment_dim_opacity = opacity
+            lane.refresh_curve()
+        vr = self.get_current_view_range()
+        for visual in self._overlay_visuals.values():
+            visual._segment_dim_opacity = opacity
+            visual.refresh_curve(vr)
+
+    def set_segment_dash_pattern(self, dash_size: int, gap_size: int):
+        """Set custom dash pattern for dashed non-primary segments and refresh."""
+        pattern = [float(dash_size), float(gap_size)]
+        self._seg_dash_pattern = pattern
+        for lane in self._lanes.values():
+            lane._segment_dash_pattern = pattern
+            lane.refresh_curve()
+        vr = self.get_current_view_range()
+        for visual in self._overlay_visuals.values():
+            visual._segment_dash_pattern = pattern
+            visual.refresh_curve(vr)
+
+    def eventFilter(self, obj, event):
+        """Intercept wheel events on TraceLane / overlay viewports.
+        Decides whether to zoom (pass to pyqtgraph) or scroll the lane list."""
+        if event.type() != QEvent.Type.Wheel:
+            return False
+
+        s = self._scroll_settings
+        zoom_on  = s.get("scroll_zoom_enabled", True)
+        list_on  = s.get("scroll_list_enabled", True)
+        default  = s.get("scroll_default", "zoom")
+        mod_keys = s.get("scroll_modifier_keys", ["ctrl", "alt", "shift"])
+
+        mods = event.modifiers()
+        modifier_held = (
+            ("ctrl"  in mod_keys and bool(mods & Qt.KeyboardModifier.ControlModifier)) or
+            ("alt"   in mod_keys and bool(mods & Qt.KeyboardModifier.AltModifier))    or
+            ("shift" in mod_keys and bool(mods & Qt.KeyboardModifier.ShiftModifier))
+        )
+
+        # Determine requested action
+        if default == "zoom":
+            action = "scroll_list" if modifier_held else "zoom"
+        else:
+            action = "zoom" if modifier_held else "scroll_list"
+
+        if action == "scroll_list" and list_on and self._mode == "split":
+            sb    = self._scroll.verticalScrollBar()
+            delta = event.angleDelta().y()
+            sb.setValue(sb.value() - delta * 3 // 8)
+            return True   # consumed — pyqtgraph won't zoom
+
+        if action == "zoom" and not zoom_on:
+            return True   # zoom disabled — consume silently
+
+        return False      # let pyqtgraph handle
+
     def set_limits_config(self, cfg: dict) -> None:
         """Hot-update the display-limit config and refresh all curves."""
         self._limits_config = dict(cfg)
@@ -1451,8 +2188,9 @@ class ScopePlotWidget(QWidget):
         else:
             self._rebuild_overlay()
 
-    def _rebuild_split(self):
+    def _rebuild_split(self, inherit_x=None):
         for lane in self._lanes.values():
+            lane.hide()          # must hide BEFORE setParent(None) or it flashes as a top-level window
             lane.setParent(None)
             lane.deleteLater()
         self._lanes.clear()
@@ -1472,16 +2210,42 @@ class ScopePlotWidget(QWidget):
                               allow_theme_force_labels=self._allow_theme_force_labels,
                               limits_config=self._limits_config)
             lane.viewport_min_pts = self.viewport_min_pts
-            lane.setMinimumHeight(80)
+            lane._process_segments = self._seg_process
+            lane._segment_dim_opacity = self._seg_dim_opacity
+            lane._segment_dash_pattern = self._seg_dash_pattern
+            if self._smart_scale_settings:
+                lane._x_axis.set_smart_scale(self._smart_scale_settings)
+            if self._real_time_settings:
+                lane._x_axis.set_real_time(self._real_time_settings)
+            if self._div_settings:
+                lane._x_axis.set_div_settings(self._div_settings)
+                lane._y_axis.set_div_settings(self._div_settings)
+            lane.setMinimumHeight(self._min_lane_height)
+            lane.viewport().installEventFilter(self)
             if first_lane is None:
                 first_lane = lane
             else:
                 lane.setXLink(first_lane)
             lane.cursor_moved.connect(self._on_cursor_moved)
+            lane.context_menu_requested.connect(self.trace_context_menu_requested)
             lane.view_range_changed.connect(
                 lambda _: self._range_timer.start())
             self._lanes[trace.name] = lane
             self._lanes_layout.addWidget(lane)
+            # Apply current Y-axis label width (overrides TraceLane's hardcoded 60)
+            lane.getPlotItem().getAxis("left").setWidth(self._y_axis_label_w)
+            # Defer refresh to next event loop tick — widget now has proper
+            # geometry and view range set via layout, avoiding zombie curves
+            # that would result from calling refresh_curve() before addWidget.
+            QTimer.singleShot(0, lane.refresh_curve)
+
+        # Apply inherited x range to the x-link master; all linked lanes follow.
+        # setXRange is synchronous so it takes effect before the deferred
+        # refresh_curve() calls run on the next event loop iteration.
+        if inherit_x is not None and first_lane is not None:
+            x0, x1 = inherit_x
+            if x1 > x0:
+                first_lane.getPlotItem().setXRange(x0, x1, padding=0)
 
         for cid, t_pos in self._cursors.items():
             if t_pos is not None:
@@ -1497,6 +2261,15 @@ class ScopePlotWidget(QWidget):
                 lane.set_retrigger_curve(t_abs, data)
 
         self._range_timer.start()
+
+    def set_y_axis_label_width(self, width: int):
+        """Set the Y-axis label area width for all lanes and the overlay.
+        Stored so that lanes created after this call (on data load) also pick it up."""
+        self._y_axis_label_w = width
+        for lane in self._lanes.values():
+            lane.getPlotItem().getAxis("left").setWidth(width)
+        if self._overlay_widget is not None:
+            self._overlay_widget.getPlotItem().getAxis("left").setWidth(width)
 
     def apply_lane_label_settings(self, size: int, show: bool, allow_force: bool,
                                    spacing: float = None):
@@ -1640,7 +2413,7 @@ class ScopePlotWidget(QWidget):
         self._update_overlay_legend_items()
         self._range_timer.start()
 
-    def _rebuild_overlay(self):
+    def _rebuild_overlay(self, inherit_x=None):
         pi = self._overlay_widget.getPlotItem()
         saved_view = pi.viewRange()
         had_items = bool(self._overlay_visuals)
@@ -1651,8 +2424,16 @@ class ScopePlotWidget(QWidget):
         visible = [t for t in self.traces if t.visible]
         self._overlay_z_order = [t.name for t in visible]
 
-        vr = pi.viewRange()
-        x0, x1 = vr[0]
+        # Decide the x range to use for initial curve renders.
+        # inherit_x (from a mode switch) takes priority; fall back to the
+        # overlay's own saved range when just rebuilding within overlay mode.
+        if inherit_x is not None and inherit_x[1] > inherit_x[0]:
+            x0, x1 = inherit_x
+        elif had_items:
+            x0, x1 = saved_view[0][0], saved_view[0][1]
+        else:
+            vr = pi.viewRange()
+            x0, x1 = vr[0]
 
         # Update Y-axis unit from first visible trace with a real unit
         unit = next((t.unit for t in visible
@@ -1665,10 +2446,17 @@ class ScopePlotWidget(QWidget):
             visual = OverlayTraceVisual(
                 pi, trace, self._style_context, mode, self.viewport_min_pts,
                 limits_config=self._limits_config)
+            visual._process_segments    = self._seg_process
+            visual._segment_dim_opacity = self._seg_dim_opacity
+            visual._segment_dash_pattern = self._seg_dash_pattern
             visual.refresh_curve((x0, x1))
             self._overlay_visuals[trace.name] = visual
 
-        if had_items:
+        if inherit_x is not None and inherit_x[1] > inherit_x[0]:
+            pi.setXRange(inherit_x[0], inherit_x[1], padding=0)
+            if self.y_lock_auto:
+                pi.enableAutoRange(axis="y")
+        elif had_items:
             pi.setXRange(saved_view[0][0], saved_view[0][1], padding=0)
             if self.y_lock_auto:
                 pi.enableAutoRange(axis="y")
@@ -1766,23 +2554,38 @@ class ScopePlotWidget(QWidget):
         """Move a trace curve to the top of the overlay z-order."""
         if self._mode != "overlay":
             return
-        if trace_name in self._overlay_visuals:
-            curve = self._overlay_visuals[trace_name].curve
-            pi = self._overlay_widget.getPlotItem()
-            pi.removeItem(curve)
-            pi.addItem(curve)
+        if trace_name not in self._overlay_z_order:
+            return
+        # Move to end of z-order list (highest z = drawn on top)
+        self._overlay_z_order.remove(trace_name)
+        self._overlay_z_order.append(trace_name)
+        # Re-assign z-values by position — avoids remove/re-add which crashes pyqtgraph
+        for i, name in enumerate(self._overlay_z_order):
+            visual = self._overlay_visuals.get(name)
+            if visual and visual.curve is not None:
+                visual.curve.setZValue(float(i))
+        # Rebuild legend so the front trace appears at the top of the label stack
+        self._rebuild_overlay_legend()
 
     def _overlay_context_menu(self, pos):
-        menu = QMenu(self._overlay_widget)
+        # Hit-test: if the click falls on a legend label, open the per-trace menu
+        scene_pos = self._overlay_widget.mapToScene(pos)
+        for i, item in enumerate(self._overlay_legend_items):
+            if item.sceneBoundingRect().contains(scene_pos):
+                if i < len(self._overlay_z_order):
+                    self.trace_context_menu_requested.emit(
+                        self._overlay_z_order[i],
+                        self._overlay_widget.mapToGlobal(pos))
+                return
 
-        # Bring-to-front submenu
+        # Background right-click: Bring-to-Front submenu + auto scale
+        menu = QMenu(self._overlay_widget)
         if self._overlay_z_order:
             front_menu = menu.addMenu("Bring to Front")
             for name in self._overlay_z_order:
                 trace = next((t for t in self.traces if t.name == name), None)
                 if trace:
-                    act = QAction(
-                        f"● {trace.label}", self._overlay_widget)
+                    act = QAction(f"● {trace.label}", self._overlay_widget)
                     act.setData(name)
                     act.triggered.connect(
                         lambda checked, n=name: self.bring_trace_to_front(n))
@@ -1798,6 +2601,22 @@ class ScopePlotWidget(QWidget):
             lambda: self._overlay_widget.getPlotItem().enableAutoRange())
         menu.addAction(act_xy)
         menu.exec(self._overlay_widget.mapToGlobal(pos))
+
+    def auto_scale_trace(self, trace_name: str, axis: str = "both"):
+        """Auto-scale the viewport for a trace; handles both split and overlay modes."""
+        if self._mode == "split":
+            lane = self._lanes.get(trace_name)
+            if lane:
+                if axis == "y":
+                    lane.getPlotItem().enableAutoRange(axis="y")
+                else:
+                    lane.getPlotItem().enableAutoRange()
+        else:
+            pi = self._overlay_widget.getPlotItem()
+            if axis == "y":
+                pi.enableAutoRange(axis="y")
+            else:
+                pi.enableAutoRange()
 
     # ── Cursors ───────────────────────────────────────────────────────
 

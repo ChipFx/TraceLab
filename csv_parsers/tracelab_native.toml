@@ -1,0 +1,45 @@
+# csv_parsers/tracelab_native.toml
+# Parser for the TraceLab native CSV format.
+#
+# TraceLab native files carry instrument / acquisition metadata in lines that
+# start with '#' before the column header row.  Supported keys include:
+#   #samplerate=, #gain=, #offset=, #unit=, #dt=, #time=, #coupling=, …
+#
+# This parser keeps all existing TraceLab metadata semantics and simply wraps
+# the existing parse_metadata_lines() logic so it goes through the unified
+# parser pipeline like every other format.
+#
+# Priority is intentionally low (5) so explicit-format parsers (LeCroy, Agilent …)
+# take precedence when their stronger patterns also match.
+
+name     = "TraceLab Native CSV"
+parser   = "tracelab_native.py"
+priority = 5
+
+# Detect: any of the well-known TraceLab '#key=value' markers in the first 20 lines.
+[[detection]]
+strategy = "any"
+
+    [[detection.rules]]
+    line_search = 20
+    pattern     = "^#(samplerate|sample_rate|fs|sps)="
+
+    [[detection.rules]]
+    line_search = 20
+    pattern     = "^#(gain|attenuation|atten)="
+
+    [[detection.rules]]
+    line_search = 20
+    pattern     = "^#(offset|unit|dt|time|coupling|impedance|bwlimit)="
+
+    [[detection.rules]]
+    line_search = 20
+    pattern     = "^#(zerotime|zero_time|t0|triggersample)="
+
+    [[detection.rules]]
+    line_search = 20
+    pattern     = "^#(viewtimestart|viewtimestop|viewsamplestart|viewsamplestop)="
+
+    [[detection.rules]]
+    line_search = 20
+    pattern     = "^#(segments|segements|segment_meta|segmentmeta|trace_settings|tracesettings|trace_meta|trace_data_range|t0_wall_clock)="

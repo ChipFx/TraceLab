@@ -1,0 +1,49 @@
+# languages/en/_colour.toml
+# Colour sets for notice types used by the notice bar.
+# Each section defines fg (foreground), bg (background) and accent for one type.
+#
+# Colour-blindness note:
+#   The most common forms (deuteranopia / protanopia, ~8 % of males) confuse
+#   red and green.  These palettes therefore:
+#     - Distinguish types by luminance contrast, not just hue
+#     - Use amber/orange for "warning" (retained across most CB types)
+#     - Use a blue-anchored palette for "info/notice" (safe for all CB types)
+#     - Use strong value contrast for "error" (bright text on very dark red)
+#   Accent is available for a future indicator dot or border element.
+#
+# It is strongly suggested to copy this colour file to any new language
+# and only change it if any kind of cultural context absolutely demands it.
+# Not only because colour blindness was considered a moment in its dsign, but
+# also because colour context can help people who know the application in one
+# language, when looking at it in a different one, to still comprehend what
+# is happening.
+
+[user_notice]
+fg     = "#c8d8e8"
+bg     = "#1a2a36"
+accent = "#5090b8"
+
+[user_warning]
+fg     = "#ffe090"
+bg     = "#3a2800"
+accent = "#ffa020"
+
+[user_error]
+fg     = "#ffb0b0"
+bg     = "#3a0000"
+accent = "#ff4040"
+
+[program_info]
+fg     = "#90c8ff"
+bg     = "#001830"
+accent = "#3070c0"
+
+[program_warning]
+fg     = "#ffcc80"
+bg     = "#2e1c00"
+accent = "#e08000"
+
+[program_error]
+fg     = "#ff9090"
+bg     = "#300000"
+accent = "#cc2020"

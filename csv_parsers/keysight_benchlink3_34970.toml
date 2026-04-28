@@ -1,0 +1,51 @@
+# csv_parsers/keysight_benchlink3_34970.toml
+# Parser for Keysight/Agilent/HP Benchlink 3 data-logger CSVs from the 34970A.
+#
+# Typical file structure:
+#   Name:,Data Instr INSTR 4/21/2026 13:39:54           ← line 0
+#   Owner:,Robert                                         ← line 1
+#   Comments:,                                            ← line 2
+#   Acquisition Date:,4/21/2026 1:39:54 PM               ← line 3
+#   &Instrument:,34970A,Address:,…                        ← line 4
+#   Total Channels:,32                                    ← line 5
+#   Channel,Name,Function,…                              ← line 6: channel config header
+#   101,,Temp (Type J),…                                  ← channel config rows
+#   …
+#   Scan  Control:,Start Action:,…                        ← scan control line
+#   Scan,Time,101 (C),Alarm 101,102 (C),Alarm 102,…      ← data column header
+#   1,4/21/2026 13:39:54:460,22.696,0,…                  ← data rows
+#
+# The time column format is MM/DD/YYYY HH:MM:SS:mmm  (last field = milliseconds).
+# Invalid readings from the instrument appear as -9.9E+37; these become NaN.
+
+name     = "Keysight Benchlink 3 — 34970A"
+brands   = ["Agilent", "Keysight", "HP"]
+parser   = "keysight_benchlink3_34970.py"
+priority = 20
+
+# Detection requires BOTH: "Name:" in field 0 of line 0,
+# AND "&Instrument:" somewhere in the first 30 lines.
+[[detection]]
+strategy = "all"
+
+    [[detection.rules]]
+    line  = 0
+    field = 0
+    equals = "Name:"
+
+    [[detection.rules]]
+    line_search = 30
+    contains    = "&Instrument:"
+
+# A second, slightly weaker detection group for files where line 0 differs
+# but the instrument line is still present with 34970 in its body.
+[[detection]]
+strategy = "all"
+
+    [[detection.rules]]
+    line_search = 10
+    contains    = "Acquisition Date:"
+
+    [[detection.rules]]
+    line_search = 30
+    contains    = "34970"

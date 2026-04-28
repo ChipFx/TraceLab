@@ -1,0 +1,16 @@
+# languages/en/_menu.toml
+# Metadata for the English (Application English) language pack.
+# This file must exist and have enabled = true for the language to be selectable.
+
+# Linguistic indicators for the menu:
+name_short   = "EN"
+name_long    = "English (Original)"
+tooltip_short = "Switch to English"
+tooltip_long  = "Switch the interface language to English (Original Application English)"
+# Fallback english name, in case of troubles showing the above: 
+name_long_en    = "English (Original)"
+tooltip_long_en = "Switch the interface language to English (Original Application English)"
+
+# Set to false to prevent this language from appearing in the language menu
+# (e.g. during active translation work on a branch).
+enabled = true

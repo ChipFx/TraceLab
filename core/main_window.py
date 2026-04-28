@@ -299,7 +299,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ChipFX TraceLab")
-        self.resize(1400, 800)
+        self.resize(1100, 680)
 
         self.theme = ThemeManager()
         self._traces: List[TraceModel] = []
@@ -4026,5 +4026,27 @@ class MainWindow(QMainWindow):
         return False
 
     def closeEvent(self, event):
+        # ── Stop all pending/repeating timers ─────────────────────────────────
+        # Parentless timers (_status_bar_refresh_timer, plot's _rebuild_timer
+        # and _range_timer) are not stopped by Qt's parent-child teardown.
+        # If they fire during window destruction they callback into half-dead
+        # C++ objects → segfault.
+        self._status_bar_refresh_timer.stop()
+        self._plot._rebuild_timer.stop()
+        self._plot._range_timer.stop()
+
+        # ── Wait for background period-estimation threads ──────────────────────
+        # Workers are QThread children of this window (parent=self).  Qt's
+        # destructor calls ~QThread() on every child object; calling that on a
+        # *running* thread is undefined behaviour → segfault.
+        # estimate_period() is pure computation with no Qt event loop, so
+        # quit() has no effect — we must wait() / terminate().
+        for worker in self.findChildren(_PeriodEstimateWorker):
+            if worker.isRunning():
+                worker.wait(2000)          # give the computation up to 2 s
+                if worker.isRunning():     # still going — force-stop
+                    worker.terminate()
+                    worker.wait(500)
+
         self._save_settings()
         event.accept()

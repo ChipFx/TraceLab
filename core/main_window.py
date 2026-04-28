@@ -654,7 +654,14 @@ class MainWindow(QMainWindow):
         _QApp.instance().installEventFilter(self)
 
     def _build_menus(self):
+        from PyQt6.QtWidgets import QStyleFactory
         mb = self.menuBar()
+        # Use Fusion style for the menu bar so font-size is always respected.
+        # The native Windows style draws resting-state items via GDI and ignores
+        # Qt font settings; Fusion is fully Qt-drawn and scales correctly.
+        fusion = QStyleFactory.create("Fusion")
+        if fusion:
+            mb.setStyle(fusion)
 
         # ── File ──────────────────────────────────────────────────────
         file_menu = mb.addMenu("File")
@@ -2626,7 +2633,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _apply_font_scale(self, scale: float):
-        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtWidgets import QApplication, QStyleFactory
         from PyQt6.QtGui import QFont
         app = QApplication.instance()
         base_size = 10  # pt
@@ -2635,9 +2642,18 @@ class MainWindow(QMainWindow):
         app.setFont(f)
         # Re-apply stylesheet with scaled font-size
         app.setStyleSheet(self.theme.get_stylesheet(font_scale=scale))
-        # Force the native menu bar to use the scaled font — on Windows the
-        # native renderer ignores the app font and needs an explicit setFont.
-        self.menuBar().setFont(f)
+        # On Windows, QWindowsVistaStyle draws QMenuBar resting-state items via
+        # GDI/uxtheme which completely ignores Qt font settings and stylesheets
+        # (hover states happen to be Qt-drawn, so those scale — that's the
+        # asymmetry the user sees). The only reliable fix is to make the menu bar
+        # use the Fusion style, which is fully Qt-drawn and respects all Qt fonts.
+        # We do this once; subsequent scale changes are handled by setFont alone.
+        mb = self.menuBar()
+        if mb.style().objectName().lower() != "fusion":
+            fusion = QStyleFactory.create("Fusion")
+            if fusion:
+                mb.setStyle(fusion)
+        mb.setFont(f)
         # Propagate to panels that use inline stylesheets
         if hasattr(self, '_channel_panel'):
             self._channel_panel.set_font_scale(scale)

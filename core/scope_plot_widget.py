@@ -1712,6 +1712,7 @@ class ScopePlotWidget(QWidget):
         # Scroll / min-height settings (updated via set_scroll_settings / set_min_lane_height)
         self._scroll_settings: dict = {}
         self._min_lane_height: int = 80
+        self._y_axis_label_w: int = 60   # updated by set_y_axis_label_width
         # Persistence / retrigger state — reapplied after every rebuild
         self._persist_state: Dict[str, tuple] = {}       # name->(layers, t_ref)
         self._retrigger_curve_state: Dict[str, tuple] = {}  # name->(t_abs, data)
@@ -2148,6 +2149,8 @@ class ScopePlotWidget(QWidget):
                 lambda _: self._range_timer.start())
             self._lanes[trace.name] = lane
             self._lanes_layout.addWidget(lane)
+            # Apply current Y-axis label width (overrides TraceLane's hardcoded 60)
+            lane.getPlotItem().getAxis("left").setWidth(self._y_axis_label_w)
             # Defer refresh to next event loop tick — widget now has proper
             # geometry and view range set via layout, avoiding zombie curves
             # that would result from calling refresh_curve() before addWidget.
@@ -2169,7 +2172,9 @@ class ScopePlotWidget(QWidget):
         self._range_timer.start()
 
     def set_y_axis_label_width(self, width: int):
-        """Set the Y-axis label area width for all lanes and the overlay."""
+        """Set the Y-axis label area width for all lanes and the overlay.
+        Stored so that lanes created after this call (on data load) also pick it up."""
+        self._y_axis_label_w = width
         for lane in self._lanes.values():
             lane.getPlotItem().getAxis("left").setWidth(width)
         if self._overlay_widget is not None:

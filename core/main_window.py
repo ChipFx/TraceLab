@@ -2467,6 +2467,10 @@ class MainWindow(QMainWindow):
 
         self._plot.zoom_x_range(shifted_x0, shifted_x1)
         self._plot._update_range_bar()
+        # Push updated wall-clock anchor into the axis and cursor panel so the
+        # real-time date display doesn't jump (the axis caches _t0_wall_clock_dt
+        # and won't pick up the new value from _refresh_status_bar alone).
+        self._apply_time_scale()
         self._refresh_status_bar()
         self._status_lbl.setText(f"t=0 set to trigger at {t_pos:.6g} s")
 
@@ -2494,8 +2498,12 @@ class MainWindow(QMainWindow):
             else:
                 trace.time_data = trace.time_axis - total_shift
             trace._computed_time = None
-            # Keep wall-clock anchor in sync with the restored time position
-            self._shift_trace_wall_clock(trace, -total_shift)
+            # Wall-clock must shift by total_shift (which is negative when traces
+            # have been shifted forward), so that real times stay invariant.
+            # Note: NOT -total_shift — the time-data shift is (data - total_shift)
+            # which moves data forward by -total_shift; to compensate, t0_wall_clock
+            # moves backward by total_shift (i.e. += total_shift, which is negative).
+            self._shift_trace_wall_clock(trace, total_shift)
 
         self._plot.refresh_all()
 
@@ -2505,6 +2513,7 @@ class MainWindow(QMainWindow):
 
         self._plot.zoom_x_range(x0 - total_shift, x1 - total_shift)
         self._plot._update_range_bar()
+        self._apply_time_scale()
         self._refresh_status_bar()
         self._status_lbl.setText("t=0 restored to original import position")
 

@@ -753,6 +753,24 @@ def _windowed_render_points(
     return t_points, y_points
 
 
+def _interpolated_trace_value(
+        t_points: np.ndarray,
+        y_points: np.ndarray,
+        t_pos: float,
+) -> Optional[float]:
+    """Return the interpolated trace value at t_pos, clamping to endpoints."""
+    if len(t_points) < 2:
+        return None
+    if t_pos < float(t_points[0]) or t_pos > float(t_points[-1]):
+        return None
+    idx = int(np.searchsorted(t_points, t_pos))
+    idx = max(1, min(idx, len(t_points) - 1))
+    t0, t1 = float(t_points[idx - 1]), float(t_points[idx])
+    y0, y1 = float(y_points[idx - 1]), float(y_points[idx])
+    value = y0 if t1 == t0 else y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0)
+    return None if math.isnan(value) else value
+
+
 class RangeBar(QWidget):
     """Compact X/Y range input bar shown below the plot area."""
     range_changed      = pyqtSignal(float, float, float, float)  # x0,x1,y0,y1
@@ -1254,20 +1272,11 @@ class TraceLane(pg.PlotWidget):
             self._cursors[cursor_id].blockSignals(False)
 
     def get_value_at(self, t_pos):
-        t = self.trace.time_axis
-        y = self.trace.processed_data
-        if len(t) < 2:
-            return None
-        # Outside the trace's time range → no data at this cursor position
-        if t_pos < float(t[0]) or t_pos > float(t[-1]):
-            return None
-        idx = np.searchsorted(t, t_pos)
-        idx = max(1, min(idx, len(t) - 1))
-        t0, t1 = float(t[idx-1]), float(t[idx])
-        y0, y1 = float(y[idx-1]), float(y[idx])
-        v = y0 if t1 == t0 else y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0)
-        import math
-        return None if math.isnan(v) else v
+        return _interpolated_trace_value(
+            self.trace.time_axis,
+            self.trace.processed_data,
+            t_pos,
+        )
 
     # ── Persistence / retrigger overlay ───────────────────────────────────────
 
@@ -2724,15 +2733,13 @@ class ScopePlotWidget(QWidget):
                     if v is not None:
                         vals[trace.name] = v
                 else:
-                    t = trace.time_axis; y = trace.processed_data
-                    if len(t) > 0:
-                        idx = np.searchsorted(t, t_pos)
-                        if 0 < idx < len(t):
-                            t0, t1 = t[idx-1], t[idx]
-                            y0, y1 = y[idx-1], y[idx]
-                            if t1 != t0:
-                                vals[trace.name] = float(
-                                    y0 + (y1-y0)*(t_pos-t0)/(t1-t0))
+                    v = _interpolated_trace_value(
+                        trace.time_axis,
+                        trace.processed_data,
+                        t_pos,
+                    )
+                    if v is not None:
+                        vals[trace.name] = v
             result[cid] = vals
         self.cursor_values_changed.emit(result)
 

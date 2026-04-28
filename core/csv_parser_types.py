@@ -34,6 +34,11 @@ class ColumnInfo:
     bwlimit: str = ""                 # bandwidth limit: "200M", "full", …
     sample_rate: Optional[float] = None  # Hz; None → use file-level default
     t0_wall_clock: str = ""           # ISO 8601 trigger/anchor time; "" → use file-level default
+    time_format: str = ""             # per-column override for ParsedMetadata.time_format:
+                                      #   ""                  → use file-level time_format
+                                      #   "seconds_relative"  → column already has float seconds
+                                      #   "unix_epoch"        → column contains Unix timestamps
+                                      #   "datetime:<fmt>"    → strptime format string
 
     def __post_init__(self):
         if not self.display_name:

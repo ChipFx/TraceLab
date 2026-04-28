@@ -148,6 +148,12 @@ class TraceModel:
     period_confidence:  float = 0.0
     period_estimation_attempted: bool = False
 
+    # ── Original time-zero anchor ─────────────────────────────────────
+    # Set once at import time to time_axis[0] and never changed.
+    # Used by the "Restore original t=0" button to undo any t=0 shifts.
+    # None means the trace was created before this field existed (safe to skip).
+    original_time_zero: Optional[float] = None
+
     # Non-destructive filter result (None = no filter active)
     _filter_data: Optional[np.ndarray] = field(default=None, repr=False)
     _filter_desc: str = field(default="", repr=False)  # e.g. "LP 1kHz"

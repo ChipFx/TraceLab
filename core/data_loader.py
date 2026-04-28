@@ -241,7 +241,8 @@ class LoadResult:
 
 def load_csv(filepath: str, delimiter: str = None,
              rejection_enabled: bool = False,
-             rejection_max_lines: int = 10) -> LoadResult:
+             rejection_max_lines: int = 10,
+             honor_skip_rows: bool = True) -> LoadResult:
     result = LoadResult()
     result.filename = os.path.basename(filepath)
     try:
@@ -342,7 +343,8 @@ def load_csv(filepath: str, delimiter: str = None,
         # Plugins may mark specific data rows for removal (e.g. repeat headers
         # between segments).  0-based indices relative to the first data row
         # (i.e. data_lines[1] = index 0).  None / empty → no filtering.
-        if parsed_meta is not None and getattr(parsed_meta, 'skip_rows', None):
+        # honor_skip_rows=False disables this (controlled via import dialog setting).
+        if honor_skip_rows and parsed_meta is not None and getattr(parsed_meta, 'skip_rows', None):
             _skip = set(parsed_meta.skip_rows)
             data_lines = [data_lines[0]] + [
                 ln for i, ln in enumerate(data_lines[1:]) if i not in _skip
@@ -441,7 +443,9 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
 
     if time_col_clean:
         result.suggested_time_col = time_col_clean
-        time_format = parsed_meta.time_format
+        # Per-column ColumnInfo.time_format takes precedence over the file-level value.
+        _ci_time = result.column_infos.get(time_col_clean)
+        time_format = (getattr(_ci_time, "time_format", "") or "") or parsed_meta.time_format
 
         if time_format.startswith("datetime:"):
             fmt = time_format[len("datetime:"):]
@@ -453,8 +457,9 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
             # If it somehow parsed as numeric already, leave it
         elif time_format == "unix_epoch":
             arr = result.columns[time_col_clean]
-            if arr.dtype.kind == "f":
-                float_arr, t0_iso = _unix_epoch_to_relative(arr)
+            # Accept float, signed int, and unsigned int — all can carry epoch values.
+            if arr.dtype.kind in ("f", "i", "u"):
+                float_arr, t0_iso = _unix_epoch_to_relative(arr.astype(np.float64))
                 result.columns[time_col_clean] = float_arr
                 result.t0_wall_clock = t0_iso
         # "seconds_relative" — already floats, no conversion needed

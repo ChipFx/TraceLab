@@ -247,12 +247,14 @@ class ThemeManager(QObject):
             background-color: {c.get('toolbar_bg','#181818')};
             color: {c.get('text','#e0e0e0')};
             border-bottom: 1px solid {c.get('border','#2a2a2a')};
+            font-size: {_fs}px;
         }}
         QMenuBar::item:selected {{ background-color: {c.get('accent','#1e88e5')}; }}
         QMenu {{
             background-color: {c.get('bg_panel','#141414')};
             color: {c.get('text','#e0e0e0')};
             border: 1px solid {c.get('border','#2a2a2a')};
+            font-size: {_fs}px;
         }}
         QMenu::item:selected {{ background-color: {c.get('accent','#1e88e5')}; }}
         QToolBar {{
@@ -329,6 +331,19 @@ class ThemeManager(QObject):
         }}
         QSplitter::handle {{ background: {c.get('border','#2a2a2a')}; }}
         QRadioButton {{ color: {c.get('text','#e0e0e0')}; }}
+        QRadioButton::indicator {{
+            width: 12px; height: 12px;
+            border: 1px solid {c.get('border','#2a2a2a')};
+            border-radius: 7px;
+            background: {c.get('bg','#0d0d0d')};
+        }}
+        QRadioButton::indicator:checked {{
+            background: {c.get('accent','#1e88e5')};
+            border-color: {c.get('accent','#1e88e5')};
+        }}
+        QRadioButton::indicator:hover {{
+            border-color: {c.get('accent','#1e88e5')};
+        }}
         QDockWidget {{
             background-color: {c.get('bg_panel','#141414')};
             color: {c.get('text','#e0e0e0')};

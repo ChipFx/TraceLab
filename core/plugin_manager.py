@@ -24,11 +24,24 @@ For "analyzer" plugins:
 """
 
 import os
+import re
 import sys
 import importlib.util
 import traceback
 from typing import List, Dict, Callable, Optional, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+def _normalise_group(raw: str) -> str:
+    """Normalise a group name: collapse separator chars, then Title Case each word.
+    e.g. "my_GROUP-name" → "My Group Name"."""
+    s = re.sub(r'[-_\t /\\]+', ' ', raw).strip()
+    return ' '.join(w.capitalize() for w in s.split()) if s else ""
+
+
+def _group_canonical(display: str) -> str:
+    """Lowercase canonical key for case-insensitive group deduplication."""
+    return re.sub(r'\s+', ' ', display).strip().lower()
 
 
 @dataclass
@@ -40,6 +53,7 @@ class PluginInfo:
     filepath: str
     module: Any
     run_fn: Callable
+    group: str = ""   # normalised display group name; "" means Ungrouped
 
 
 class PluginManager:
@@ -52,20 +66,31 @@ class PluginManager:
         self._load_errors: List[str] = []
 
     def discover(self):
-        """Scan plugin directory and load all valid plugins."""
+        """Scan plugin directory (and one level of sub-folders) for plugins.
+        Sub-folder name is used as the fallback group for plugins inside it."""
         self._plugins.clear()
         self._load_errors.clear()
 
         if not os.path.isdir(self.PLUGIN_DIR):
             os.makedirs(self.PLUGIN_DIR, exist_ok=True)
 
+        # Top-level .py files — no folder group
         for fname in sorted(os.listdir(self.PLUGIN_DIR)):
-            if not fname.endswith(".py") or fname.startswith("_"):
-                continue
             fpath = os.path.join(self.PLUGIN_DIR, fname)
-            self._load_plugin(fpath)
+            if os.path.isfile(fpath) and fname.endswith(".py") and not fname.startswith("_"):
+                self._load_plugin(fpath, folder_group="")
 
-    def _load_plugin(self, filepath: str):
+        # One level of sub-directories — folder name is fallback group
+        for entry in sorted(os.listdir(self.PLUGIN_DIR)):
+            entry_path = os.path.join(self.PLUGIN_DIR, entry)
+            if os.path.isdir(entry_path) and not entry.startswith("_"):
+                for fname in sorted(os.listdir(entry_path)):
+                    fpath = os.path.join(entry_path, fname)
+                    if (os.path.isfile(fpath) and
+                            fname.endswith(".py") and not fname.startswith("_")):
+                        self._load_plugin(fpath, folder_group=entry)
+
+    def _load_plugin(self, filepath: str, folder_group: str = ""):
         module_name = os.path.splitext(os.path.basename(filepath))[0]
         try:
             spec = importlib.util.spec_from_file_location(
@@ -81,6 +106,14 @@ class PluginManager:
                         f"{filepath}: missing '{attr}'")
                     return
 
+            # Group: module attribute beats folder name.
+            # Accepts either 'group' or 'PLUGIN_GROUP' attribute.
+            raw_group = (getattr(mod, "PLUGIN_GROUP", None)
+                         or getattr(mod, "group", None)
+                         or folder_group
+                         or "")
+            normalised_group = _normalise_group(str(raw_group)) if raw_group else ""
+
             plugin = PluginInfo(
                 name=getattr(mod, "PLUGIN_NAME", module_name),
                 description=getattr(mod, "PLUGIN_DESCRIPTION", ""),
@@ -89,6 +122,7 @@ class PluginManager:
                 filepath=filepath,
                 module=mod,
                 run_fn=mod.run,
+                group=normalised_group,
             )
             self._plugins[plugin.name] = plugin
 

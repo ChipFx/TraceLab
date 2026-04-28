@@ -333,7 +333,7 @@ class ThemeManager(QObject):
         QRadioButton {{ color: {c.get('text','#e0e0e0')}; }}
         QRadioButton::indicator {{
             width: 12px; height: 12px;
-            border: 1px solid {c.get('border','#2a2a2a')};
+            border: 1px solid {c.get('text_dim','#666666')};
             border-radius: 7px;
             background: {c.get('bg','#0d0d0d')};
         }}

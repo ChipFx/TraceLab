@@ -298,6 +298,17 @@ def _build_segmented_csv(traces):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._shutting_down = False
+        self._deferred_ui_timers = []
+        # Let Qt own the C++ destruction: when the user closes the window,
+        # Qt calls deleteLater() inside the still-running event loop so the
+        # full widget hierarchy (QMenuBar event filters, child widgets, etc.)
+        # is torn down in the correct order before app.exec() returns.
+        # Without this, Python GC drops the last ref to the window after
+        # app.exec() exits, triggering QWidget::~QWidget at a point where
+        # Qt's internal state (e.g. QMenuBar::d_ptr) is already invalid
+        # → segfault in QMenuBar::eventFilter.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("ChipFX TraceLab")
         self.resize(1100, 680)
 
@@ -568,7 +579,7 @@ class MainWindow(QMainWindow):
 
         # 0-ms single-shot timer coalesces rapid back-to-back _refresh_status_bar
         # calls (e.g. hiding all 32 channels) into one actual redraw.
-        self._status_bar_refresh_timer = QTimer()
+        self._status_bar_refresh_timer = QTimer(self)
         self._status_bar_refresh_timer.setSingleShot(True)
         self._status_bar_refresh_timer.setInterval(0)
         self._status_bar_refresh_timer.timeout.connect(self._do_refresh_status_bar)
@@ -1384,9 +1395,10 @@ class MainWindow(QMainWindow):
             meta = result.metadata
             if (meta.view_time_start is not None or
                     meta.view_sample_start is not None):
-                QTimer.singleShot(80, lambda: self._apply_viewport_from_metadata(meta))
+                self._schedule_ui_call(
+                    80, lambda meta=meta: self._apply_viewport_from_metadata(meta))
             else:
-                QTimer.singleShot(50, self._zoom_full_safe)
+                self._schedule_ui_call(50, self._zoom_full_safe)
 
         self._update_status()
 
@@ -2033,10 +2045,38 @@ class MainWindow(QMainWindow):
     def _refresh_status_bar(self):
         """Schedule a status-bar refresh on the next event loop tick.
         Multiple calls within the same synchronous call stack coalesce into one."""
+        if self._shutting_down:
+            return
         if hasattr(self, '_status_bar_refresh_timer'):
             self._status_bar_refresh_timer.start()
 
+    def _schedule_ui_call(self, delay_ms: int, callback) -> None:
+        """Run a UI callback later, tied to this window's lifetime."""
+        if self._shutting_down:
+            return
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(int(delay_ms))
+
+        def _fire():
+            try:
+                self._deferred_ui_timers.remove(timer)
+            except ValueError:
+                pass
+            if self._shutting_down:
+                return
+            try:
+                callback()
+            except RuntimeError:
+                pass
+
+        timer.timeout.connect(_fire)
+        self._deferred_ui_timers.append(timer)
+        timer.start()
+
     def _do_refresh_status_bar(self):
+        if self._shutting_down:
+            return
         if not hasattr(self, '_scope_status'):
             return
         x0, x1 = self._plot.get_current_view_range()
@@ -2044,11 +2084,16 @@ class MainWindow(QMainWindow):
         # Get actual major tick spacing for time axis and each Y lane
         x_major_div = self._get_x_major_tick()
         y_major_divs = {}
+        overlay_y_major_div = None
+        if self._plot._mode == "overlay":
+            overlay_y_major_div = self._get_overlay_y_major_tick()
         for trace in self._traces:
             if trace.visible:
                 lane = self._plot._lanes.get(trace.name)
                 if lane:
                     y_major_divs[trace.name] = self._get_y_major_tick(lane)
+                elif overlay_y_major_div is not None:
+                    y_major_divs[trace.name] = overlay_y_major_div
 
         trig_info = getattr(self, '_last_trigger_info', "")
         sinc_active = self._plot.get_sinc_active()
@@ -2090,14 +2135,22 @@ class MainWindow(QMainWindow):
         always agrees with what was actually drawn (no size mismatch).
         Falls back to span/10 before the first render — never calls tickSpacing
         directly so the cache is never poisoned by the wrong axis size."""
+        return self._get_plot_item_y_major_tick(lane.getPlotItem())
+
+    def _get_overlay_y_major_tick(self) -> float:
+        return self._get_plot_item_y_major_tick(
+            self._plot._overlay_widget.getPlotItem())
+
+    def _get_plot_item_y_major_tick(self, plot_item) -> float:
+        """Return cached Y-axis spacing for any plot item in the UI."""
         subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
-            ax = lane.getPlotItem().getAxis('left')
+            ax = plot_item.getAxis('left')
             cached = getattr(ax, '_last_tick_result', None)
             if cached:
                 return float(cached[-1][0] if subdiv_label else cached[0][0])
             # Pre-render fallback: rough estimate, no tickSpacing call
-            vr = lane.getPlotItem().viewRange()[1]
+            vr = plot_item.viewRange()[1]
             span = abs(vr[1] - vr[0])
             return span / 10.0 if span > 0 else 0.0
         except Exception:
@@ -2111,6 +2164,8 @@ class MainWindow(QMainWindow):
         """Zoom to fit all data — forces a range reset even after manual zoom.
         Suppresses intermediate per-lane redraws and issues one clean refresh
         after all ranges are applied, avoiding N × M redundant draw calls."""
+        if self._shutting_down:
+            return
         if not self._traces:
             return
         # Find global data extents
@@ -2211,8 +2266,9 @@ class MainWindow(QMainWindow):
                          fft_min_freq=self._fft_min_freq,
                          settings=self._settings, parent=self)
         dlg.exec()
-        self._fft_min_freq = dlg.spin_min_freq.value()
+        self._fft_min_freq = dlg.min_freq_hz
         self._settings["fft_min_freq"] = self._fft_min_freq
+        self._settings["fft_max_freq"] = dlg.max_freq_hz
 
     def _show_filter(self):
         if not self._traces:
@@ -2459,6 +2515,9 @@ class MainWindow(QMainWindow):
             # Keep wall-clock anchor in sync: new t=0 is the old t_pos instant
             self._shift_trace_wall_clock(trace, t_pos)
 
+        if self._last_trigger_t_pos is not None:
+            self._last_trigger_t_pos -= t_pos
+
         self._plot.refresh_all()
 
         for cid, pos in cursor_positions.items():
@@ -2472,6 +2531,8 @@ class MainWindow(QMainWindow):
         # and won't pick up the new value from _refresh_status_bar alone).
         self._apply_time_scale()
         self._refresh_status_bar()
+        if self._retrigger_mode != MODE_OFF and self._last_trigger_t_pos is not None:
+            self._reapply_retrigger()
         self._status_lbl.setText(f"t=0 set to trigger at {t_pos:.6g} s")
 
     def _on_restore_original_t0(self):
@@ -2505,6 +2566,9 @@ class MainWindow(QMainWindow):
             # moves backward by total_shift (i.e. += total_shift, which is negative).
             self._shift_trace_wall_clock(trace, total_shift)
 
+        if self._last_trigger_t_pos is not None:
+            self._last_trigger_t_pos -= total_shift
+
         self._plot.refresh_all()
 
         for cid, pos in cursor_positions.items():
@@ -2515,6 +2579,8 @@ class MainWindow(QMainWindow):
         self._plot._update_range_bar()
         self._apply_time_scale()
         self._refresh_status_bar()
+        if self._retrigger_mode != MODE_OFF and self._last_trigger_t_pos is not None:
+            self._reapply_retrigger()
         self._status_lbl.setText("t=0 restored to original import position")
 
     def _refresh_trigger_channels(self):
@@ -2739,10 +2805,12 @@ class MainWindow(QMainWindow):
 
     def _apply_viewport_from_metadata(self, meta):
         """After import, zoom to viewport hints if present in CSV headers."""
-        from PyQt6.QtCore import QTimer as _QTimer
+        if self._shutting_down:
+            return
         if meta.view_time_start is not None and meta.view_time_stop is not None:
             t0, t1 = meta.view_time_start, meta.view_time_stop
-            _QTimer.singleShot(80, lambda: self._plot.zoom_x_range(t0, t1))
+            self._schedule_ui_call(
+                80, lambda t0=t0, t1=t1: self._plot.zoom_x_range(t0, t1))
         elif (meta.view_sample_start is not None
               and meta.view_sample_stop is not None
               and self._traces):
@@ -2752,7 +2820,8 @@ class MainWindow(QMainWindow):
             i0 = max(0, min(meta.view_sample_start, n-1))
             i1 = max(0, min(meta.view_sample_stop, n-1))
             t0, t1 = float(ta[i0]), float(ta[i1])
-            _QTimer.singleShot(80, lambda: self._plot.zoom_x_range(t0, t1))
+            self._schedule_ui_call(
+                80, lambda t0=t0, t1=t1: self._plot.zoom_x_range(t0, t1))
 
     def _toggle_remember_folder(self, checked: bool):
         self._settings["remember_folder"] = checked
@@ -4026,14 +4095,20 @@ class MainWindow(QMainWindow):
         return False
 
     def closeEvent(self, event):
+        self._shutting_down = True
         # ── Stop all pending/repeating timers ─────────────────────────────────
         # Parentless timers (_status_bar_refresh_timer, plot's _rebuild_timer
         # and _range_timer) are not stopped by Qt's parent-child teardown.
         # If they fire during window destruction they callback into half-dead
         # C++ objects → segfault.
         self._status_bar_refresh_timer.stop()
-        self._plot._rebuild_timer.stop()
-        self._plot._range_timer.stop()
+        for timer in list(self._deferred_ui_timers):
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        self._deferred_ui_timers.clear()
+        self._plot.begin_shutdown()
 
         # ── Wait for background period-estimation threads ──────────────────────
         # Workers are QThread children of this window (parent=self).  Qt's
@@ -4047,6 +4122,18 @@ class MainWindow(QMainWindow):
                 if worker.isRunning():     # still going — force-stop
                     worker.terminate()
                     worker.wait(500)
+
+        # Stop every QTimer child that is still running.  The per-worker timeout
+        # timers (created in _estimate_period with parent=self) are NOT in
+        # _deferred_ui_timers and their cleanup slot (worker.finished → timer.stop)
+        # was never delivered because worker.wait() blocked the event loop.
+        # Any still-active timer that fires after closeEvent returns can call
+        # into a partially-destroyed main window → segfault.
+        for t in self.findChildren(QTimer):
+            try:
+                t.stop()
+            except Exception:
+                pass
 
         self._save_settings()
         event.accept()

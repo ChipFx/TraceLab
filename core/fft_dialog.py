@@ -13,9 +13,10 @@ Features:
 import numpy as np
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QLabel,
-    QPushButton, QRadioButton, QDoubleSpinBox,
+    QPushButton, QRadioButton, QDoubleSpinBox, QLineEdit,
     QFrame, QCheckBox, QSizePolicy
 )
+from core.filter_dialog import _parse_si_freq, _format_si_freq
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
@@ -189,13 +190,37 @@ class FFTDialog(QDialog):
         ctrl.addWidget(self.radio_win)
         ctrl.addSpacing(8)
 
-        ctrl.addWidget(QLabel("Min freq (Hz):"))
-        self.spin_min_freq = QDoubleSpinBox()
-        self.spin_min_freq.setRange(0.0, 1e12)
-        self.spin_min_freq.setDecimals(3)
-        self.spin_min_freq.setValue(self.fft_min_freq)
-        self.spin_min_freq.setFixedWidth(90)
-        ctrl.addWidget(self.spin_min_freq)
+        ctrl.addWidget(QLabel("Min:"))
+        self.edit_min_freq = QLineEdit()
+        self.edit_min_freq.setFixedWidth(72)
+        self.edit_min_freq.setPlaceholderText("e.g. 1Hz")
+        self.edit_min_freq.setText(
+            _format_si_freq(self.fft_min_freq) if self.fft_min_freq > 0 else "1 Hz")
+        self._lbl_min_freq_fb = QLabel()
+        self._lbl_min_freq_fb.setFixedWidth(80)
+        ctrl.addWidget(self.edit_min_freq)
+        ctrl.addWidget(self._lbl_min_freq_fb)
+        ctrl.addSpacing(4)
+
+        ctrl.addWidget(QLabel("Max:"))
+        self.edit_max_freq = QLineEdit()
+        self.edit_max_freq.setFixedWidth(72)
+        self.edit_max_freq.setPlaceholderText("Nyquist")
+        _max_init = float(self._settings.get("fft_max_freq", 0.0))
+        self.edit_max_freq.setText(
+            _format_si_freq(_max_init) if _max_init > 0 else "")
+        self._lbl_max_freq_fb = QLabel()
+        self._lbl_max_freq_fb.setFixedWidth(80)
+        ctrl.addWidget(self.edit_max_freq)
+        ctrl.addWidget(self._lbl_max_freq_fb)
+        ctrl.addSpacing(4)
+
+        btn_suggest = QPushButton("Suggest")
+        btn_suggest.setToolTip(
+            "Fill Min/Max from the selected trace's data limits\n"
+            "(1 / total_duration and Nyquist), based on the current compute setting.")
+        btn_suggest.clicked.connect(self._suggest_freq_limits)
+        ctrl.addWidget(btn_suggest)
         ctrl.addSpacing(8)
 
         ctrl.addWidget(QLabel("Min prominence (dB):"))
@@ -363,12 +388,82 @@ class FFTDialog(QDialog):
         self._lbl_hidden_peaks.setVisible(False)
         root.addWidget(self._lbl_hidden_peaks)
 
+        # Wire up SI freq input feedback
+        self.edit_min_freq.textChanged.connect(
+            lambda: self._update_freq_fb(
+                self.edit_min_freq, self._lbl_min_freq_fb, allow_empty=False))
+        self.edit_max_freq.textChanged.connect(
+            lambda: self._update_freq_fb(
+                self.edit_max_freq, self._lbl_max_freq_fb, allow_empty=True))
+        self._update_freq_fb(self.edit_min_freq, self._lbl_min_freq_fb, allow_empty=False)
+        self._update_freq_fb(self.edit_max_freq, self._lbl_max_freq_fb, allow_empty=True)
+
     @staticmethod
     def _vsep() -> QFrame:
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setFrameShadow(QFrame.Shadow.Sunken)
         return sep
+
+    # ── Freq input helpers ────────────────────────────────────────────────────
+
+    def _update_freq_fb(self, edit: QLineEdit, label: QLabel,
+                        allow_empty: bool = False):
+        """Colour the feedback label next to a SI frequency input."""
+        text = edit.text().strip()
+        if not text:
+            if allow_empty:
+                label.setText("= Nyquist")
+                label.setStyleSheet("color: #888888;")
+                edit.setStyleSheet("")
+            else:
+                label.setText("invalid")
+                label.setStyleSheet("color: #e05050;")
+                edit.setStyleSheet("border: 1px solid #e05050;")
+            return
+        hz = _parse_si_freq(text)
+        if hz is None or hz < 0:
+            label.setText("invalid")
+            label.setStyleSheet("color: #e05050;")
+            edit.setStyleSheet("border: 1px solid #e05050;")
+        else:
+            label.setText(f"= {_format_si_freq(hz)}")
+            label.setStyleSheet("color: #60c060;")
+            edit.setStyleSheet("")
+
+    def _suggest_freq_limits(self):
+        """Fill Min/Max from trace data limits matching the current compute setting."""
+        trace_name = self.combo_trace.currentData()
+        use_window = self.radio_win.isChecked() and self.view_range is not None
+        for trace in self.traces:
+            if trace.name != trace_name:
+                continue
+            sps = trace.sample_rate
+            if not sps or sps <= 0:
+                return
+            if use_window and self.view_range:
+                _, y = trace.windowed_data(*self.view_range)
+            else:
+                y = trace.processed_data
+            n = len(y) if y is not None else 0
+            if n < 2:
+                return
+            nyq = sps / 2.0
+            min_f = sps / n          # = 1 / duration
+            self.edit_min_freq.setText(_format_si_freq(min_f))
+            self.edit_max_freq.setText(_format_si_freq(nyq))
+            break
+
+    @property
+    def min_freq_hz(self) -> float:
+        v = _parse_si_freq(self.edit_min_freq.text())
+        return max(v, 1e-10) if (v is not None and v > 0) else 1e-10
+
+    @property
+    def max_freq_hz(self) -> float:
+        """Returns 0.0 when the field is empty (meaning 'up to Nyquist')."""
+        v = _parse_si_freq(self.edit_max_freq.text())
+        return v if (v is not None and v > 0) else 0.0
 
     # ── FFT computation ───────────────────────────────────────────────────────
 
@@ -387,7 +482,10 @@ class FFTDialog(QDialog):
         trace_name = self.combo_trace.currentData()
         window_name = self.combo_window.currentText()
         use_window = self.radio_win.isChecked() and self.view_range is not None
-        min_freq = max(self.spin_min_freq.value(), 1e-10)
+        _min_v = _parse_si_freq(self.edit_min_freq.text())
+        min_freq = max(_min_v, 1e-10) if (_min_v is not None and _min_v > 0) else 1e-10
+        _max_v = _parse_si_freq(self.edit_max_freq.text())
+        max_freq = _max_v if (_max_v is not None and _max_v > 0) else None
 
         self._freqs = None
         self._mag_db = None
@@ -403,6 +501,8 @@ class FFTDialog(QDialog):
                 continue
             freqs, mag_db = compute_fft(y, trace.sample_rate, window_name)
             mask = freqs >= min_freq
+            if max_freq is not None:
+                mask &= (freqs <= max_freq)
             freqs, mag_db = freqs[mask], mag_db[mask]
             if not len(freqs):
                 continue

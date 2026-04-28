@@ -2,3 +2,4 @@ __pycache__
 *.log
 *.csv
 *.swp
+settings.json

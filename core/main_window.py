@@ -2044,11 +2044,16 @@ class MainWindow(QMainWindow):
         # Get actual major tick spacing for time axis and each Y lane
         x_major_div = self._get_x_major_tick()
         y_major_divs = {}
+        overlay_y_major_div = None
+        if self._plot._mode == "overlay":
+            overlay_y_major_div = self._get_overlay_y_major_tick()
         for trace in self._traces:
             if trace.visible:
                 lane = self._plot._lanes.get(trace.name)
                 if lane:
                     y_major_divs[trace.name] = self._get_y_major_tick(lane)
+                elif overlay_y_major_div is not None:
+                    y_major_divs[trace.name] = overlay_y_major_div
 
         trig_info = getattr(self, '_last_trigger_info', "")
         sinc_active = self._plot.get_sinc_active()
@@ -2090,14 +2095,22 @@ class MainWindow(QMainWindow):
         always agrees with what was actually drawn (no size mismatch).
         Falls back to span/10 before the first render — never calls tickSpacing
         directly so the cache is never poisoned by the wrong axis size."""
+        return self._get_plot_item_y_major_tick(lane.getPlotItem())
+
+    def _get_overlay_y_major_tick(self) -> float:
+        return self._get_plot_item_y_major_tick(
+            self._plot._overlay_widget.getPlotItem())
+
+    def _get_plot_item_y_major_tick(self, plot_item) -> float:
+        """Return cached Y-axis spacing for any plot item in the UI."""
         subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
-            ax = lane.getPlotItem().getAxis('left')
+            ax = plot_item.getAxis('left')
             cached = getattr(ax, '_last_tick_result', None)
             if cached:
                 return float(cached[-1][0] if subdiv_label else cached[0][0])
             # Pre-render fallback: rough estimate, no tickSpacing call
-            vr = lane.getPlotItem().viewRange()[1]
+            vr = plot_item.viewRange()[1]
             span = abs(vr[1] - vr[0])
             return span / 10.0 if span > 0 else 0.0
         except Exception:

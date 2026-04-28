@@ -2019,6 +2019,7 @@ class ScopePlotWidget(QWidget):
         for visual in self._overlay_visuals.values():
             visual.interp_mode = mode
             visual.refresh_curve(vr)
+        self._sync_sinc_state()
 
     def add_trace(self, trace: TraceModel):
         # Allow overwrite if name already exists
@@ -2086,9 +2087,18 @@ class ScopePlotWidget(QWidget):
             visual.refresh_curve(self.get_current_view_range())
 
     def get_sinc_active(self) -> bool:
-        """True if any visible lane is currently sinc-interpolating."""
+        """True if the active view currently uses viewport interpolation."""
+        if self._mode == "overlay":
+            return any(getattr(v, '_interpolated_view', False)
+                       for v in self._overlay_visuals.values())
         return any(getattr(l, '_sinc_active', False)
                    for l in self._lanes.values())
+
+    def _sync_sinc_state(self) -> None:
+        sinc_now = self.get_sinc_active()
+        if sinc_now != self._last_sinc_active:
+            self._last_sinc_active = sinc_now
+            self.sinc_active_changed.emit(sinc_now)
 
     def refresh_all(self):
         if self._mode == "split":
@@ -2096,13 +2106,9 @@ class ScopePlotWidget(QWidget):
                 lane.refresh_curve()
                 if self.y_lock_auto:
                     lane.getPlotItem().enableAutoRange(axis="y")
-            # Signal sinc status change
-            sinc_now = self.get_sinc_active()
-            if sinc_now != self._last_sinc_active:
-                self._last_sinc_active = sinc_now
-                self.sinc_active_changed.emit(sinc_now)
         else:
             self._refresh_overlay_visuals()
+        self._sync_sinc_state()
 
     def set_scroll_settings(self, settings: dict):
         """Update modifier-key scroll behaviour from Advanced UI settings."""
@@ -2373,6 +2379,21 @@ class ScopePlotWidget(QWidget):
             self._overlay_legend_items.append(item)
         self._reposition_overlay_legend()
 
+    def _normalized_overlay_z_order(self, visible_names: List[str]) -> List[str]:
+        """Preserve existing overlay stacking for visible traces and append new ones."""
+        ordered = [name for name in self._overlay_z_order if name in visible_names]
+        for name in visible_names:
+            if name not in ordered:
+                ordered.append(name)
+        return ordered
+
+    def _apply_overlay_z_order(self) -> None:
+        """Apply the current overlay z-order to all visible overlay curves."""
+        for i, name in enumerate(self._overlay_z_order):
+            visual = self._overlay_visuals.get(name)
+            if visual and visual.curve is not None:
+                visual.curve.setZValue(float(i))
+
     def _reposition_overlay_legend(self):
         """Restack legend items in the top-right corner using screen-pixel spacing."""
         if not self._overlay_legend_items:
@@ -2434,7 +2455,7 @@ class ScopePlotWidget(QWidget):
             return
 
         view_range = self.get_current_view_range()
-        self._overlay_z_order = visible_names
+        self._overlay_z_order = self._normalized_overlay_z_order(visible_names)
         unit = next((t.unit for t in visible
                      if t.unit and t.unit != 'raw'), '')
         self._ov_y_axis.set_unit(unit)
@@ -2449,6 +2470,7 @@ class ScopePlotWidget(QWidget):
                                          self.interp_mode)
             visual.refresh_curve(view_range)
 
+        self._apply_overlay_z_order()
         if self.y_lock_auto:
             self._overlay_widget.getPlotItem().enableAutoRange(axis="y")
         self._update_overlay_legend_items()
@@ -2463,7 +2485,8 @@ class ScopePlotWidget(QWidget):
         self._overlay_visuals.clear()
 
         visible = [t for t in self.traces if t.visible]
-        self._overlay_z_order = [t.name for t in visible]
+        self._overlay_z_order = self._normalized_overlay_z_order(
+            [t.name for t in visible])
 
         # Decide the x range to use for initial curve renders.
         # inherit_x (from a mode switch) takes priority; fall back to the
@@ -2492,6 +2515,8 @@ class ScopePlotWidget(QWidget):
             visual._segment_dash_pattern = self._seg_dash_pattern
             visual.refresh_curve((x0, x1))
             self._overlay_visuals[trace.name] = visual
+
+        self._apply_overlay_z_order()
 
         if inherit_x is not None and inherit_x[1] > inherit_x[0]:
             pi.setXRange(inherit_x[0], inherit_x[1], padding=0)
@@ -2522,6 +2547,7 @@ class ScopePlotWidget(QWidget):
 
         self._rebuild_overlay_legend()
         self._range_timer.start()
+        self._sync_sinc_state()
 
     # ── Persistence / retrigger public API ────────────────────────────────────
 
@@ -2600,11 +2626,7 @@ class ScopePlotWidget(QWidget):
         # Move to end of z-order list (highest z = drawn on top)
         self._overlay_z_order.remove(trace_name)
         self._overlay_z_order.append(trace_name)
-        # Re-assign z-values by position — avoids remove/re-add which crashes pyqtgraph
-        for i, name in enumerate(self._overlay_z_order):
-            visual = self._overlay_visuals.get(name)
-            if visual and visual.curve is not None:
-                visual.curve.setZValue(float(i))
+        self._apply_overlay_z_order()
         # Rebuild legend so the front trace appears at the top of the label stack
         self._rebuild_overlay_legend()
 
@@ -2665,30 +2687,33 @@ class ScopePlotWidget(QWidget):
         self._cursors[cursor_id] = x_pos
         if x_pos is not None:
             self._place_cursors(cursor_id, x_pos)
+        else:
+            self._remove_cursor_visuals(cursor_id)
         self._emit_cursor_values()
 
     def clear_cursors(self):
         """Remove both cursors from the plot and reset their positions."""
         for cid in (0, 1):
             self._cursors[cid] = None
-            if self._mode == "split":
-                for lane in self._lanes.values():
-                    if cid in lane._cursors:
-                        try:
-                            lane.removeItem(lane._cursors[cid])
-                        except Exception:
-                            pass
-                        lane._cursors.pop(cid, None)
-            else:
-                attr = f"_overlay_cursor_{cid}"
-                if hasattr(self, attr):
-                    try:
-                        self._overlay_widget.getPlotItem().removeItem(
-                            getattr(self, attr))
-                    except Exception:
-                        pass
-                    delattr(self, attr)
+            self._remove_cursor_visuals(cid)
         self._emit_cursor_values()
+
+    def _remove_cursor_visuals(self, cursor_id: int) -> None:
+        """Remove one cursor's graphics from both split and overlay views."""
+        for lane in self._lanes.values():
+            if cursor_id in lane._cursors:
+                try:
+                    lane.removeItem(lane._cursors[cursor_id])
+                except Exception:
+                    pass
+                lane._cursors.pop(cursor_id, None)
+        attr = f"_overlay_cursor_{cursor_id}"
+        if hasattr(self, attr):
+            try:
+                self._overlay_widget.getPlotItem().removeItem(getattr(self, attr))
+            except Exception:
+                pass
+            delattr(self, attr)
 
     def _place_cursors(self, cursor_id, x_pos):
         color = self._cursor_colors[cursor_id]

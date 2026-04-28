@@ -1894,6 +1894,23 @@ class ScopePlotWidget(QWidget):
             self._rebuild_timer.stop()
         except Exception:
             pass
+        # Disconnect pyqtgraph overlay sigRangeChanged — pyqtgraph emits this
+        # internally during its own C++ teardown.  The connected lambdas call
+        # self._range_timer.start() which crashes if the timer's C++ object is
+        # already gone (destroyed earlier in the same parent-child sweep).
+        # This is the primary cause of segfaults when closing with no data loaded.
+        try:
+            pi = self._overlay_widget.getPlotItem()
+            pi.sigRangeChanged.disconnect()
+        except Exception:
+            pass
+        # Disconnect per-lane view_range_changed → _range_timer.start() for the
+        # same reason.
+        for lane in list(self._lanes.values()):
+            try:
+                lane.view_range_changed.disconnect()
+            except Exception:
+                pass
         try:
             self._theme_manager.themeChanged.disconnect(self._on_theme_changed)
         except Exception:

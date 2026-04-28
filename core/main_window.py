@@ -300,6 +300,15 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._shutting_down = False
         self._deferred_ui_timers = []
+        # Let Qt own the C++ destruction: when the user closes the window,
+        # Qt calls deleteLater() inside the still-running event loop so the
+        # full widget hierarchy (QMenuBar event filters, child widgets, etc.)
+        # is torn down in the correct order before app.exec() returns.
+        # Without this, Python GC drops the last ref to the window after
+        # app.exec() exits, triggering QWidget::~QWidget at a point where
+        # Qt's internal state (e.g. QMenuBar::d_ptr) is already invalid
+        # → segfault in QMenuBar::eventFilter.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("ChipFX TraceLab")
         self.resize(1100, 680)
 
@@ -4112,6 +4121,18 @@ class MainWindow(QMainWindow):
                 if worker.isRunning():     # still going — force-stop
                     worker.terminate()
                     worker.wait(500)
+
+        # Stop every QTimer child that is still running.  The per-worker timeout
+        # timers (created in _estimate_period with parent=self) are NOT in
+        # _deferred_ui_timers and their cleanup slot (worker.finished → timer.stop)
+        # was never delivered because worker.wait() blocked the event loop.
+        # Any still-active timer that fires after closeEvent returns can call
+        # into a partially-destroyed main window → segfault.
+        for t in self.findChildren(QTimer):
+            try:
+                t.stop()
+            except Exception:
+                pass
 
         self._save_settings()
         event.accept()

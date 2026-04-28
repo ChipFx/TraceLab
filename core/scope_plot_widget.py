@@ -871,7 +871,7 @@ class TraceLane(pg.PlotWidget):
         self._lane_label_size: int = lane_label_size
         self._show_lane_labels: bool = show_lane_labels
         self._allow_theme_force_labels: bool = allow_theme_force_labels
-        self._curve = None
+        self._curve = None               # replaced by plot() call after _setup_plot()
         self._persist_curves: list = []   # ghost curves for persistence layers
         self._retrigger_curve = None      # averaged / interpolated override curve
         self._original_display_mode: Optional[str] = None  # "dimmed"|"dashed"|"hide"
@@ -894,6 +894,13 @@ class TraceLane(pg.PlotWidget):
         self._last_style_key = None
 
         self._setup_plot()
+        # Create the primary curve item once and reuse it across all redraws.
+        # _add_trace_curve() updates it in-place via setData() — avoids
+        # PlotCurveItem allocation/deallocation on every pan, zoom, or
+        # interp-mode change.  Mirrors the OverlayVisual pattern.
+        self._curve = self.plot([], [], pen=pg.mkPen(width=1.5), antialias=False)
+        self._curve.setDownsampling(auto=True, method="peak")
+        self._curve.setClipToView(True)
         self._add_trace_curve()
 
         # Re-render when view range changes (viewport-aware interp)
@@ -1117,8 +1124,6 @@ class TraceLane(pg.PlotWidget):
         self._apply_resolved_style()
 
     def _add_trace_curve(self):
-        if self._curve is not None:
-            self.removeItem(self._curve)
         # Clean up non-primary segment curves from previous render
         for sc in self._segment_curves:
             try:
@@ -1169,12 +1174,7 @@ class TraceLane(pg.PlotWidget):
         self._render_t = t
         self._render_y = y
         self._last_style_key = None
-        color = self._display_color()
-        pen = pg.mkPen(color=color, width=resolve_pen_width(
-            0.0, self._style_context.density_pen_mapping))
-        self._curve = self.plot(t, y, pen=pen, antialias=False)
-        self._curve.setDownsampling(auto=True, method="peak")
-        self._curve.setClipToView(True)
+        self._curve.setData(t, y)   # update in-place — no widget churn
         self._apply_resolved_style()
         self._reapply_original_style()   # restore dimmed/dashed/hidden if active
         if self._persist_curves:

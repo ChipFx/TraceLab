@@ -333,6 +333,8 @@ class ChannelPanel(QWidget):
         super().__init__(parent)
         self.setMinimumWidth(170)
         self.setMaximumWidth(405)
+        self._pv: dict = {}          # plotview palette — set via set_palette()
+        self._font_scale: float = 1.0
         self._rows: Dict[str, ChannelRow] = {}   # name -> ChannelRow
         self._trace_order: List[str] = []        # names in display order
         self._group_rows: Dict[str, List[str]] = {}     # group -> [trace names]
@@ -344,12 +346,12 @@ class ChannelPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        header = QLabel("CHANNELS")
-        header.setStyleSheet(
+        self._header = QLabel("CHANNELS")
+        self._header.setStyleSheet(
             "background: #1a1a1a; color: #888; padding: 5px 8px; "
             "font-size: 10px; font-weight: bold; letter-spacing: 1px;")
-        header.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(header)
+        self._header.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self._header)
 
         # QListWidget provides built-in drag reorder
         self._list = QListWidget()
@@ -434,12 +436,32 @@ class ChannelPanel(QWidget):
                 last = i
         return last + 1 if last >= 0 else self._list.count()
 
+    def set_palette(self, pv: dict):
+        """Apply the plotview palette to the header and interp buttons."""
+        self._pv = dict(pv)
+        bg = pv.get("bg_panel", "#141414")
+        fg = pv.get("text",     "#e0e0e0")
+        self._header.setStyleSheet(
+            f"background: {bg}; color: {fg}; padding: 5px 8px; "
+            f"font-size: 10px; font-weight: bold; letter-spacing: 1px;")
+        self._apply_button_styles()
+
     def set_font_scale(self, scale: float):
-        """Apply 90%-of-global font size to the secondary/small buttons."""
-        fs = max(8, int(round(11 * scale * 0.9)))
-        self._btn_lin.setStyleSheet(f"font-size: {fs}px;")
-        self._btn_cub.setStyleSheet(f"font-size: {fs}px; color: #cc88ff;")
-        self._btn_sinc.setStyleSheet(f"font-size: {fs}px; color: #ff8888;")
+        """Store scale and rebuild button styles."""
+        self._font_scale = scale
+        self._apply_button_styles()
+
+    def _apply_button_styles(self):
+        """Rebuild interp-button inline styles from stored palette and scale."""
+        fs         = max(8, int(round(11 * self._font_scale * 0.9)))
+        sinc_color = self._pv.get("interp_sinc_color", "#ff8888")
+        cub_color  = self._pv.get("interp_cub_color",  "#cc88ff")
+        self._btn_lin.setStyleSheet(
+            f"font-size: {fs}px; font-weight: bold;")
+        self._btn_cub.setStyleSheet(
+            f"font-size: {fs}px; font-weight: bold; color: {cub_color};")
+        self._btn_sinc.setStyleSheet(
+            f"font-size: {fs}px; font-weight: bold; color: {sinc_color};")
         self._btn_group.setStyleSheet(f"font-size: {fs}px;")
         self._update_minimum_width()
 

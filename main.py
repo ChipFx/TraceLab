@@ -32,8 +32,17 @@ def main():
     window = MainWindow()
     window.show()
 
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    # sys.exit() raises SystemExit, whose traceback captures the calling
+    # frame.  Calling it *inside* main() would pin window/app/theme in that
+    # frame; Python then GC's them during SystemExit cleanup while Qt's own
+    # teardown (QMenuBar event filters etc.) is partially done → segfault.
+    # Instead, let main() return normally so its locals are refcount-dropped
+    # cleanly before SystemExit is ever raised.
+    import gc
+    _exit_code = main()
+    gc.collect()          # flush any lingering Python refs to Qt objects
+    sys.exit(_exit_code)

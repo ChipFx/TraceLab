@@ -719,6 +719,58 @@ def _effective_color(color: str, theme_name: str) -> str:
     return color
 
 
+def _trace_primary_segment_points(
+        trace: TraceModel,
+        process_segments: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return the base source arrays for the trace's active render segment."""
+    t_points = trace.time_axis
+    y_points = trace.processed_data
+    segs = getattr(trace, "segments", None)
+    primary = getattr(trace, "primary_segment", None)
+    process_segs = (
+        process_segments
+        and segs is not None and len(segs) > 1
+        and primary is not None and 0 <= primary < len(segs)
+    )
+    if process_segs:
+        start, end = segs[primary][0], segs[primary][1]
+        t_points = t_points[start:end]
+        y_points = y_points[start:end]
+    return t_points, y_points
+
+
+def _windowed_render_points(
+        t_points: np.ndarray,
+        y_points: np.ndarray,
+        x0: float,
+        x1: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Clip to the current X window when enough samples are visible."""
+    mask = (t_points >= x0) & (t_points <= x1)
+    if int(mask.sum()) >= 2:
+        return t_points[mask], y_points[mask]
+    return t_points, y_points
+
+
+def _interpolated_trace_value(
+        t_points: np.ndarray,
+        y_points: np.ndarray,
+        t_pos: float,
+) -> Optional[float]:
+    """Return the interpolated trace value at t_pos, clamping to endpoints."""
+    if len(t_points) < 2:
+        return None
+    if t_pos < float(t_points[0]) or t_pos > float(t_points[-1]):
+        return None
+    idx = int(np.searchsorted(t_points, t_pos))
+    idx = max(1, min(idx, len(t_points) - 1))
+    t0, t1 = float(t_points[idx - 1]), float(t_points[idx])
+    y0, y1 = float(y_points[idx - 1]), float(y_points[idx])
+    value = y0 if t1 == t0 else y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0)
+    return None if math.isnan(value) else value
+
+
 class RangeBar(QWidget):
     """Compact X/Y range input bar shown below the plot area."""
     range_changed      = pyqtSignal(float, float, float, float)  # x0,x1,y0,y1
@@ -819,7 +871,7 @@ class TraceLane(pg.PlotWidget):
         self._lane_label_size: int = lane_label_size
         self._show_lane_labels: bool = show_lane_labels
         self._allow_theme_force_labels: bool = allow_theme_force_labels
-        self._curve = None
+        self._curve = None               # replaced by plot() call after _setup_plot()
         self._persist_curves: list = []   # ghost curves for persistence layers
         self._retrigger_curve = None      # averaged / interpolated override curve
         self._original_display_mode: Optional[str] = None  # "dimmed"|"dashed"|"hide"
@@ -842,6 +894,13 @@ class TraceLane(pg.PlotWidget):
         self._last_style_key = None
 
         self._setup_plot()
+        # Create the primary curve item once and reuse it across all redraws.
+        # _add_trace_curve() updates it in-place via setData() — avoids
+        # PlotCurveItem allocation/deallocation on every pan, zoom, or
+        # interp-mode change.  Mirrors the OverlayVisual pattern.
+        self._curve = self.plot([], [], pen=pg.mkPen(width=1.5), antialias=False)
+        self._curve.setDownsampling(auto=True, method="peak")
+        self._curve.setClipToView(True)
         self._add_trace_curve()
 
         # Re-render when view range changes (viewport-aware interp)
@@ -988,8 +1047,9 @@ class TraceLane(pg.PlotWidget):
     def _update_visible_samples(self, viewport: Optional[RenderViewport] = None):
         viewport = viewport or self._current_viewport()
         x0, x1 = viewport.x_range
-        visible_mask = (self.trace.time_axis >= x0) & (self.trace.time_axis <= x1)
-        self._visible_samples = int(visible_mask.sum()) or len(self.trace.time_axis)
+        t_points, _ = _trace_primary_segment_points(self.trace, self._process_segments)
+        visible_mask = (t_points >= x0) & (t_points <= x1)
+        self._visible_samples = int(visible_mask.sum()) or len(t_points)
 
     def _density_source_points(self, viewport: RenderViewport) -> Tuple[np.ndarray, np.ndarray]:
         x0, x1 = viewport.x_range
@@ -997,10 +1057,9 @@ class TraceLane(pg.PlotWidget):
             t_points = self._render_t
             y_points = self._render_y
         else:
-            t_points, y_points = self.trace.windowed_data(x0, x1)
-            if len(t_points) < 2:
-                t_points = self.trace.time_axis
-                y_points = self.trace.processed_data
+            t_points, y_points = _trace_primary_segment_points(
+                self.trace, self._process_segments)
+            t_points, y_points = _windowed_render_points(t_points, y_points, x0, x1)
 
         max_points = self._density_estimator.max_segments + 1
         if len(t_points) > max_points:
@@ -1024,6 +1083,13 @@ class TraceLane(pg.PlotWidget):
     def _resolved_pen_width(self) -> float:
         viewport = self._current_viewport()
         self._update_visible_samples(viewport)
+        viewport = RenderViewport(
+            width_px=viewport.width_px,
+            height_px=viewport.height_px,
+            x_range=viewport.x_range,
+            y_range=viewport.y_range,
+            visible_samples=int(self._visible_samples),
+        )
         style_key = (
             round(viewport.width_px, 2),
             round(viewport.height_px, 2),
@@ -1058,8 +1124,6 @@ class TraceLane(pg.PlotWidget):
         self._apply_resolved_style()
 
     def _add_trace_curve(self):
-        if self._curve is not None:
-            self.removeItem(self._curve)
         # Clean up non-primary segment curves from previous render
         for sc in self._segment_curves:
             try:
@@ -1068,8 +1132,8 @@ class TraceLane(pg.PlotWidget):
                 pass
         self._segment_curves = []
 
-        t_full = self.trace.time_axis
-        y_full = self.trace.processed_data
+        t_full, y_full = _trace_primary_segment_points(
+            self.trace, self._process_segments)
         self._sinc_active = False
 
         # Determine segment processing state.
@@ -1081,21 +1145,13 @@ class TraceLane(pg.PlotWidget):
         process_segs = (self._process_segments
                         and segs is not None and len(segs) > 1
                         and primary is not None and 0 <= primary < len(segs))
-        if process_segs:
-            p_start, p_end = segs[primary][0], segs[primary][1]
-            t_full = t_full[p_start:p_end]
-            y_full = y_full[p_start:p_end]
-
         # Window to the currently visible x-range FIRST — for all interp modes.
         # Downsampling must operate on visible samples only; applying it to the
         # full dataset then clipping wastes resolution when zoomed in.
         vr = self.getPlotItem().viewRange()
         x0, x1 = vr[0]
-        mask = (t_full >= x0) & (t_full <= x1)
-        n_vis = int(mask.sum())
-        if n_vis >= 2:
-            t_full = t_full[mask]
-            y_full = y_full[mask]
+        t_full, y_full = _windowed_render_points(t_full, y_full, x0, x1)
+        n_vis = len(t_full)
         # n_vis < 2: widget created before the view range is set — keep full
         # data as fallback; the first real sigRangeChanged redraws correctly.
 
@@ -1118,12 +1174,7 @@ class TraceLane(pg.PlotWidget):
         self._render_t = t
         self._render_y = y
         self._last_style_key = None
-        color = self._display_color()
-        pen = pg.mkPen(color=color, width=resolve_pen_width(
-            0.0, self._style_context.density_pen_mapping))
-        self._curve = self.plot(t, y, pen=pen, antialias=False)
-        self._curve.setDownsampling(auto=True, method="peak")
-        self._curve.setClipToView(True)
+        self._curve.setData(t, y)   # update in-place — no widget churn
         self._apply_resolved_style()
         self._reapply_original_style()   # restore dimmed/dashed/hidden if active
         if self._persist_curves:
@@ -1221,20 +1272,11 @@ class TraceLane(pg.PlotWidget):
             self._cursors[cursor_id].blockSignals(False)
 
     def get_value_at(self, t_pos):
-        t = self.trace.time_axis
-        y = self.trace.processed_data
-        if len(t) < 2:
-            return None
-        # Outside the trace's time range → no data at this cursor position
-        if t_pos < float(t[0]) or t_pos > float(t[-1]):
-            return None
-        idx = np.searchsorted(t, t_pos)
-        idx = max(1, min(idx, len(t) - 1))
-        t0, t1 = float(t[idx-1]), float(t[idx])
-        y0, y1 = float(y[idx-1]), float(y[idx])
-        v = y0 if t1 == t0 else y0 + (y1 - y0) * (t_pos - t0) / (t1 - t0)
-        import math
-        return None if math.isnan(v) else v
+        return _interpolated_trace_value(
+            self.trace.time_axis,
+            self.trace.processed_data,
+            t_pos,
+        )
 
     # ── Persistence / retrigger overlay ───────────────────────────────────────
 
@@ -1463,8 +1505,9 @@ class OverlayTraceVisual:
     def _update_visible_samples(self, viewport: Optional[RenderViewport] = None):
         viewport = viewport or self._current_viewport()
         x0, x1 = viewport.x_range
-        visible_mask = (self.trace.time_axis >= x0) & (self.trace.time_axis <= x1)
-        self._visible_samples = int(visible_mask.sum()) or len(self.trace.time_axis)
+        t_points, _ = _trace_primary_segment_points(self.trace, self._process_segments)
+        visible_mask = (t_points >= x0) & (t_points <= x1)
+        self._visible_samples = int(visible_mask.sum()) or len(t_points)
 
     def _density_source_points(self, viewport: RenderViewport) -> Tuple[np.ndarray, np.ndarray]:
         x0, x1 = viewport.x_range
@@ -1472,10 +1515,9 @@ class OverlayTraceVisual:
             t_points = self._render_t
             y_points = self._render_y
         else:
-            t_points, y_points = self.trace.windowed_data(x0, x1)
-            if len(t_points) < 2:
-                t_points = self.trace.time_axis
-                y_points = self.trace.processed_data
+            t_points, y_points = _trace_primary_segment_points(
+                self.trace, self._process_segments)
+            t_points, y_points = _windowed_render_points(t_points, y_points, x0, x1)
 
         max_points = self._density_estimator.max_segments + 1
         if len(t_points) > max_points:
@@ -1499,6 +1541,13 @@ class OverlayTraceVisual:
     def _resolved_pen_width(self) -> float:
         viewport = self._current_viewport()
         self._update_visible_samples(viewport)
+        viewport = RenderViewport(
+            width_px=viewport.width_px,
+            height_px=viewport.height_px,
+            x_range=viewport.x_range,
+            y_range=viewport.y_range,
+            visible_samples=int(self._visible_samples),
+        )
         style_key = (
             round(viewport.width_px, 2),
             round(viewport.height_px, 2),
@@ -1539,8 +1588,8 @@ class OverlayTraceVisual:
                 pass
         self._segment_curves = []
 
-        t_full = self.trace.time_axis
-        y_full = self.trace.processed_data
+        t_full, y_full = _trace_primary_segment_points(
+            self.trace, self._process_segments)
         x0, x1 = view_range
 
         # Segment slicing — mirrors TraceLane._add_trace_curve logic
@@ -1550,11 +1599,6 @@ class OverlayTraceVisual:
         process_segs = (self._process_segments
                         and segs is not None and len(segs) > 1
                         and primary is not None and 0 <= primary < len(segs))
-        if process_segs:
-            p_start, p_end = segs[primary][0], segs[primary][1]
-            t_full = t_full[p_start:p_end]
-            y_full = y_full[p_start:p_end]
-
         self._interpolated_view = False
         self._update_visible_samples(RenderViewport(
             width_px=max(1.0, float(self.plot_item.vb.width())),
@@ -1565,11 +1609,8 @@ class OverlayTraceVisual:
         ))
 
         # Window to visible range first — for all modes.
-        mask = (t_full >= x0) & (t_full <= x1)
-        n_vis = int(mask.sum())
-        if n_vis >= 2:
-            t_full = t_full[mask]
-            y_full = y_full[mask]
+        t_full, y_full = _windowed_render_points(t_full, y_full, x0, x1)
+        n_vis = len(t_full)
         # n_vis < 2: widget not yet laid out — keep full data as fallback
 
         if self.interp_mode in ("sinc", "cubic"):
@@ -1749,6 +1790,7 @@ class ScopePlotWidget(QWidget):
                  limits_config: Optional[dict] = None,
                  parent=None):
         super().__init__(parent)
+        self._shutting_down = False
         self._theme_manager = theme_manager
         self._active_theme = theme_manager.active_theme
         self._draw_mode = draw_mode or DEFAULT_DRAW_MODE
@@ -1826,7 +1868,7 @@ class ScopePlotWidget(QWidget):
         layout.addWidget(self._range_bar)
 
         # Timer to update range bar AND status bar (throttled to 100ms)
-        self._range_timer = QTimer()
+        self._range_timer = QTimer(self)
         self._range_timer.setSingleShot(True)
         self._range_timer.setInterval(100)
         self._range_timer.timeout.connect(self._update_range_bar)
@@ -1835,12 +1877,53 @@ class ScopePlotWidget(QWidget):
         # Debounce timer for visibility-driven rebuilds (0 ms = next event tick).
         # Coalesces rapid back-to-back set_trace_visible calls (e.g. "None" with
         # 32 channels) into a single _rebuild, preventing O(n²) widget churn.
-        self._rebuild_timer = QTimer()
+        self._rebuild_timer = QTimer(self)
         self._rebuild_timer.setSingleShot(True)
         self._rebuild_timer.setInterval(0)
         self._rebuild_timer.timeout.connect(self._rebuild)
 
         self._theme_manager.themeChanged.connect(self._on_theme_changed)
+
+    def begin_shutdown(self) -> None:
+        """Stop timers/signals so late callbacks cannot hit torn-down widgets."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        try:
+            self._range_timer.stop()
+            self._rebuild_timer.stop()
+        except Exception:
+            pass
+        # Disconnect pyqtgraph overlay sigRangeChanged — pyqtgraph emits this
+        # internally during its own C++ teardown.  The connected lambdas call
+        # self._range_timer.start() which crashes if the timer's C++ object is
+        # already gone (destroyed earlier in the same parent-child sweep).
+        # This is the primary cause of segfaults when closing with no data loaded.
+        try:
+            pi = self._overlay_widget.getPlotItem()
+            pi.sigRangeChanged.disconnect()
+        except Exception:
+            pass
+        # Disconnect per-lane view_range_changed → _range_timer.start() for the
+        # same reason.
+        for lane in list(self._lanes.values()):
+            try:
+                lane.view_range_changed.disconnect()
+            except Exception:
+                pass
+        try:
+            self._theme_manager.themeChanged.disconnect(self._on_theme_changed)
+        except Exception:
+            pass
+        try:
+            self._overlay_widget.viewport().removeEventFilter(self)
+        except Exception:
+            pass
+        for lane in list(self._lanes.values()):
+            try:
+                lane.viewport().removeEventFilter(self)
+            except Exception:
+                pass
 
     def _setup_overlay(self):
         # Replace default axes with engineering-unit axes
@@ -1889,6 +1972,8 @@ class ScopePlotWidget(QWidget):
                 self._place_cursors(cid, x_pos)
 
     def _on_theme_changed(self, theme):
+        if self._shutting_down:
+            return
         self._apply_plot_theme(theme)
         rt_enabled = bool(self._real_time_settings.get("enabled"))
         for lane in self._lanes.values():
@@ -1928,6 +2013,8 @@ class ScopePlotWidget(QWidget):
 
     def _on_overlay_range_changed(self):
         """Re-render overlay curves on every pan/zoom so viewport windowing stays correct."""
+        if self._shutting_down:
+            return
         self._refresh_overlay_visuals()
 
     def set_mode(self, mode: str):
@@ -1978,6 +2065,7 @@ class ScopePlotWidget(QWidget):
         for visual in self._overlay_visuals.values():
             visual.interp_mode = mode
             visual.refresh_curve(vr)
+        self._sync_sinc_state()
 
     def add_trace(self, trace: TraceModel):
         # Allow overwrite if name already exists
@@ -2045,23 +2133,30 @@ class ScopePlotWidget(QWidget):
             visual.refresh_curve(self.get_current_view_range())
 
     def get_sinc_active(self) -> bool:
-        """True if any visible lane is currently sinc-interpolating."""
+        """True if the active view currently uses viewport interpolation."""
+        if self._mode == "overlay":
+            return any(getattr(v, '_interpolated_view', False)
+                       for v in self._overlay_visuals.values())
         return any(getattr(l, '_sinc_active', False)
                    for l in self._lanes.values())
 
+    def _sync_sinc_state(self) -> None:
+        sinc_now = self.get_sinc_active()
+        if sinc_now != self._last_sinc_active:
+            self._last_sinc_active = sinc_now
+            self.sinc_active_changed.emit(sinc_now)
+
     def refresh_all(self):
+        if self._shutting_down:
+            return
         if self._mode == "split":
             for lane in self._lanes.values():
                 lane.refresh_curve()
                 if self.y_lock_auto:
                     lane.getPlotItem().enableAutoRange(axis="y")
-            # Signal sinc status change
-            sinc_now = self.get_sinc_active()
-            if sinc_now != self._last_sinc_active:
-                self._last_sinc_active = sinc_now
-                self.sinc_active_changed.emit(sinc_now)
         else:
             self._refresh_overlay_visuals()
+        self._sync_sinc_state()
 
     def set_scroll_settings(self, settings: dict):
         """Update modifier-key scroll behaviour from Advanced UI settings."""
@@ -2183,10 +2278,40 @@ class ScopePlotWidget(QWidget):
             lane._suppress_view_redraws = suppress
 
     def _rebuild(self):
+        if self._shutting_down:
+            return
         if self._mode == "split":
             self._rebuild_split()
         else:
             self._rebuild_overlay()
+
+    def _defer_lane_refresh(self, lane: TraceLane) -> None:
+        """Queue a lane refresh on the next tick, owned by the lane itself."""
+        if self._shutting_down:
+            return
+        timers = getattr(lane, "_deferred_refresh_timers", None)
+        if timers is None:
+            timers = []
+            lane._deferred_refresh_timers = timers
+        timer = QTimer(lane)
+        timer.setSingleShot(True)
+        timer.setInterval(0)
+
+        def _fire():
+            try:
+                timers.remove(timer)
+            except ValueError:
+                pass
+            if self._shutting_down:
+                return
+            try:
+                lane.refresh_curve()
+            except RuntimeError:
+                pass
+
+        timer.timeout.connect(_fire)
+        timers.append(timer)
+        timer.start()
 
     def _rebuild_split(self, inherit_x=None):
         for lane in self._lanes.values():
@@ -2237,7 +2362,7 @@ class ScopePlotWidget(QWidget):
             # Defer refresh to next event loop tick — widget now has proper
             # geometry and view range set via layout, avoiding zombie curves
             # that would result from calling refresh_curve() before addWidget.
-            QTimer.singleShot(0, lane.refresh_curve)
+            self._defer_lane_refresh(lane)
 
         # Apply inherited x range to the x-link master; all linked lanes follow.
         # setXRange is synchronous so it takes effect before the deferred
@@ -2332,6 +2457,21 @@ class ScopePlotWidget(QWidget):
             self._overlay_legend_items.append(item)
         self._reposition_overlay_legend()
 
+    def _normalized_overlay_z_order(self, visible_names: List[str]) -> List[str]:
+        """Preserve existing overlay stacking for visible traces and append new ones."""
+        ordered = [name for name in self._overlay_z_order if name in visible_names]
+        for name in visible_names:
+            if name not in ordered:
+                ordered.append(name)
+        return ordered
+
+    def _apply_overlay_z_order(self) -> None:
+        """Apply the current overlay z-order to all visible overlay curves."""
+        for i, name in enumerate(self._overlay_z_order):
+            visual = self._overlay_visuals.get(name)
+            if visual and visual.curve is not None:
+                visual.curve.setZValue(float(i))
+
     def _reposition_overlay_legend(self):
         """Restack legend items in the top-right corner using screen-pixel spacing."""
         if not self._overlay_legend_items:
@@ -2393,7 +2533,7 @@ class ScopePlotWidget(QWidget):
             return
 
         view_range = self.get_current_view_range()
-        self._overlay_z_order = visible_names
+        self._overlay_z_order = self._normalized_overlay_z_order(visible_names)
         unit = next((t.unit for t in visible
                      if t.unit and t.unit != 'raw'), '')
         self._ov_y_axis.set_unit(unit)
@@ -2408,6 +2548,7 @@ class ScopePlotWidget(QWidget):
                                          self.interp_mode)
             visual.refresh_curve(view_range)
 
+        self._apply_overlay_z_order()
         if self.y_lock_auto:
             self._overlay_widget.getPlotItem().enableAutoRange(axis="y")
         self._update_overlay_legend_items()
@@ -2422,7 +2563,8 @@ class ScopePlotWidget(QWidget):
         self._overlay_visuals.clear()
 
         visible = [t for t in self.traces if t.visible]
-        self._overlay_z_order = [t.name for t in visible]
+        self._overlay_z_order = self._normalized_overlay_z_order(
+            [t.name for t in visible])
 
         # Decide the x range to use for initial curve renders.
         # inherit_x (from a mode switch) takes priority; fall back to the
@@ -2451,6 +2593,8 @@ class ScopePlotWidget(QWidget):
             visual._segment_dash_pattern = self._seg_dash_pattern
             visual.refresh_curve((x0, x1))
             self._overlay_visuals[trace.name] = visual
+
+        self._apply_overlay_z_order()
 
         if inherit_x is not None and inherit_x[1] > inherit_x[0]:
             pi.setXRange(inherit_x[0], inherit_x[1], padding=0)
@@ -2481,6 +2625,7 @@ class ScopePlotWidget(QWidget):
 
         self._rebuild_overlay_legend()
         self._range_timer.start()
+        self._sync_sinc_state()
 
     # ── Persistence / retrigger public API ────────────────────────────────────
 
@@ -2559,11 +2704,7 @@ class ScopePlotWidget(QWidget):
         # Move to end of z-order list (highest z = drawn on top)
         self._overlay_z_order.remove(trace_name)
         self._overlay_z_order.append(trace_name)
-        # Re-assign z-values by position — avoids remove/re-add which crashes pyqtgraph
-        for i, name in enumerate(self._overlay_z_order):
-            visual = self._overlay_visuals.get(name)
-            if visual and visual.curve is not None:
-                visual.curve.setZValue(float(i))
+        self._apply_overlay_z_order()
         # Rebuild legend so the front trace appears at the top of the label stack
         self._rebuild_overlay_legend()
 
@@ -2624,30 +2765,33 @@ class ScopePlotWidget(QWidget):
         self._cursors[cursor_id] = x_pos
         if x_pos is not None:
             self._place_cursors(cursor_id, x_pos)
+        else:
+            self._remove_cursor_visuals(cursor_id)
         self._emit_cursor_values()
 
     def clear_cursors(self):
         """Remove both cursors from the plot and reset their positions."""
         for cid in (0, 1):
             self._cursors[cid] = None
-            if self._mode == "split":
-                for lane in self._lanes.values():
-                    if cid in lane._cursors:
-                        try:
-                            lane.removeItem(lane._cursors[cid])
-                        except Exception:
-                            pass
-                        lane._cursors.pop(cid, None)
-            else:
-                attr = f"_overlay_cursor_{cid}"
-                if hasattr(self, attr):
-                    try:
-                        self._overlay_widget.getPlotItem().removeItem(
-                            getattr(self, attr))
-                    except Exception:
-                        pass
-                    delattr(self, attr)
+            self._remove_cursor_visuals(cid)
         self._emit_cursor_values()
+
+    def _remove_cursor_visuals(self, cursor_id: int) -> None:
+        """Remove one cursor's graphics from both split and overlay views."""
+        for lane in self._lanes.values():
+            if cursor_id in lane._cursors:
+                try:
+                    lane.removeItem(lane._cursors[cursor_id])
+                except Exception:
+                    pass
+                lane._cursors.pop(cursor_id, None)
+        attr = f"_overlay_cursor_{cursor_id}"
+        if hasattr(self, attr):
+            try:
+                self._overlay_widget.getPlotItem().removeItem(getattr(self, attr))
+            except Exception:
+                pass
+            delattr(self, attr)
 
     def _place_cursors(self, cursor_id, x_pos):
         color = self._cursor_colors[cursor_id]
@@ -2692,15 +2836,13 @@ class ScopePlotWidget(QWidget):
                     if v is not None:
                         vals[trace.name] = v
                 else:
-                    t = trace.time_axis; y = trace.processed_data
-                    if len(t) > 0:
-                        idx = np.searchsorted(t, t_pos)
-                        if 0 < idx < len(t):
-                            t0, t1 = t[idx-1], t[idx]
-                            y0, y1 = y[idx-1], y[idx]
-                            if t1 != t0:
-                                vals[trace.name] = float(
-                                    y0 + (y1-y0)*(t_pos-t0)/(t1-t0))
+                    v = _interpolated_trace_value(
+                        trace.time_axis,
+                        trace.processed_data,
+                        t_pos,
+                    )
+                    if v is not None:
+                        vals[trace.name] = v
             result[cid] = vals
         self.cursor_values_changed.emit(result)
 
@@ -2727,6 +2869,8 @@ class ScopePlotWidget(QWidget):
         return -1.0, 1.0
 
     def _update_range_bar(self):
+        if self._shutting_down:
+            return
         x0, x1 = self.get_current_view_range()
         y0, y1 = self.get_current_y_range()
         self._range_bar.update_display(x0, x1, y0, y1)

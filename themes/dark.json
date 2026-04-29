@@ -28,7 +28,11 @@
     "logo_bg": "#060610",
     "logo_text": "#F0C040",
     "logo_sub": "#555577",
-    "filt_text": "#ffcc66"
+    "filt_text": "#ffcc66",
+    "badge_sinc_bg": "#cc2222",
+    "badge_sinc_fg": "#ffffff",
+    "badge_cub_bg":  "#8822cc",
+    "badge_cub_fg":  "#ffffff"
   },
   "trace_colors": [
     "#F0C040",

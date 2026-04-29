@@ -24,7 +24,7 @@ Consumers call:
 
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List
 from PyQt6.QtCore import QObject, pyqtSignal
 
 THEMES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "themes")
@@ -38,11 +38,17 @@ _FALLBACK_PLOTVIEW = {
     "border": "#2a2a2a", "cursor_a": "#ffcc00", "cursor_b": "#00ccff",
     "toolbar_bg": "#181818", "statusbar_bg": "#0d0d0d",
     "scope_bg": "#050508", "scope_grid": "#1a2a1a",
+    # "All Sinc" / "All Cub" button text in the channel panel
+    "interp_sinc_color": "#ff8888",
+    "interp_cub_color":  "#cc88ff",
 }
 _FALLBACK_STATUSBAR = {
     "bar_bg": "#0a0a14", "info_bg": "#141428", "info_text": "#d0d0e8",
     "info_dim": "#555577", "trig_text": "#44ee66", "sep": "#1e1e38",
     "logo_bg": "#060610", "logo_text": "#F0C040", "logo_sub": "#555577",
+    # Interpolation badge colours (SINC / CUB blocks in channel status bar)
+    "badge_sinc_bg": "#cc2222", "badge_sinc_fg": "#ffffff",
+    "badge_cub_bg":  "#8822cc", "badge_cub_fg":  "#ffffff",
 }
 _FALLBACK_TRACES = [
     "#F0C040", "#40C0F0", "#F04080", "#40F080", "#F08040",
@@ -230,8 +236,11 @@ class ThemeManager(QObject):
 
     def statusbar_palette(self) -> dict:
         """Return the full statusbar palette dict (all keys from theme file)."""
-        # Return ALL statusbar keys, not just a hardcoded subset
         return dict(self._active._statusbar)
+
+    def plotview_palette(self) -> dict:
+        """Return the full plotview palette dict (all keys from theme file)."""
+        return dict(self._active._plotview)
 
     def get_stylesheet(self, font_scale: float = 1.0) -> str:
         c = self._active._plotview
@@ -333,7 +342,7 @@ class ThemeManager(QObject):
         QRadioButton {{ color: {c.get('text','#e0e0e0')}; }}
         QRadioButton::indicator {{
             width: 12px; height: 12px;
-            border: 1px solid {c.get('border','#2a2a2a')};
+            border: 1px solid {c.get('text_dim','#666666')};
             border-radius: 7px;
             background: {c.get('bg','#0d0d0d')};
         }}

@@ -7,6 +7,21 @@ not a simple view_range/10 approximation.
 
 Text is drawn larger (font size × 1.3) with a thinner outline (0.8× previous)
 so text dominates over its own outline.
+
+──────────────────────────────────────────────────────────────────────────────
+Background-aware text contrast
+──────────────────────────────────────────────────────────────────────────────
+ALL text inside a channel block uses _contrast_colors() to pick fill/outline.
+The only public tuning knob is _LUM_THRESHOLD: raise it to prefer dark text
+on more backgrounds, lower it to prefer light text.  Every row — channel name,
+V/div, filter/coupling info — reads from this one function, so the behaviour
+is consistent and a new row just calls _contrast_colors() without needing to
+reimplement the decision.
+
+Palette override path (phosphor / print themes):
+  If the palette supplies 'ch_text', that colour is used as fill and the
+  outline is derived from *its own* luminance so it always contrasts with the
+  text itself (not the background).  This path is unchanged from before.
 """
 
 from PyQt6.QtWidgets import QWidget
@@ -19,6 +34,47 @@ from core.trace_model import TraceModel
 
 BLOCK_W = 120
 BLOCK_H = 110
+
+# ── Text-contrast helpers ──────────────────────────────────────────────────────
+
+# W3C perceived-brightness formula weights (R, G, B × 1000).
+# Threshold: above → dark text on light bg; at-or-below → light text on dark bg.
+# Tune this single constant to shift the crossover point for the entire block.
+_LUM_THRESHOLD = 128
+
+
+def _luma(c: "QColor") -> float:
+    """Perceived brightness 0–255 using the W3C formula."""
+    return (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000
+
+
+def _contrast_colors(bg: "QColor", palette: dict = None):
+    """Return *(fill_color, outline_color)* for text painted over *bg*.
+
+    Normal path — bg luminance decides:
+        bright bg  → black fill, white outline
+        dark bg    → white fill, black outline
+
+    Palette override (phosphor / print themes):
+        If palette has 'ch_text', that is used as fill.
+        Outline is then derived from the fill's own luminance so it always
+        contrasts with the text itself, not the background.
+
+    All rows in the channel block share this function so the contrast
+    crossover threshold (_LUM_THRESHOLD) lives in exactly one place.
+    """
+    if palette and "ch_text" in palette:
+        fill_c = QColor(palette["ch_text"])
+        outline_c = (QColor("#000000") if _luma(fill_c) > _LUM_THRESHOLD
+                     else QColor("#ffffff"))
+    else:
+        if _luma(bg) > _LUM_THRESHOLD:
+            fill_c    = QColor("#000000")
+            outline_c = QColor("#ffffff")
+        else:
+            fill_c    = QColor("#ffffff")
+            outline_c = QColor("#000000")
+    return fill_c, outline_c
 
 
 def _eng(value: float, unit: str) -> str:
@@ -113,28 +169,18 @@ class ChannelStatusBlock(QWidget):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         w, h = self.width(), self.height()
 
-        # ── Background and text colours from palette ──────────────────────
-        # palette may supply "ch_bg" and "ch_text" overrides (phosphor/print)
-        # otherwise fall back to the trace colour with auto text contrast
+        # ── Background and text colours ───────────────────────────────────
+        # palette may supply "ch_bg" override (phosphor/print themes),
+        # otherwise the trace colour is used directly as the block background.
         if "ch_bg" in self._pal:
             bg = QColor(self._pal["ch_bg"])
         else:
             bg = QColor(self._trace.color)
         painter.fillRect(0, 0, w, h, bg)
 
-        if "ch_text" in self._pal:
-            fill_c    = QColor(self._pal["ch_text"])
-            # Outline: complement of fill
-            lum_fill = (fill_c.red()*299 + fill_c.green()*587 + fill_c.blue()*114)/1000
-            outline_c = QColor("#000000") if lum_fill > 128 else QColor("#ffffff")
-        else:
-            lum = (bg.red() * 299 + bg.green() * 587 + bg.blue() * 114) / 1000
-            if lum > 128:
-                fill_c    = QColor("#000000")
-                outline_c = QColor("#ffffff")
-            else:
-                fill_c    = QColor("#ffffff")
-                outline_c = QColor("#000000")
+        # fill_c / outline_c are reused by every text row below so that all
+        # text in the block shares the same contrast decision.
+        fill_c, outline_c = _contrast_colors(bg, self._pal)
 
         s = self._scale
 
@@ -145,11 +191,19 @@ class ChannelStatusBlock(QWidget):
                         f_name, fill_c, outline_c, 1.2)
 
         # ── SINC/LIN/CUB badge (top-right corner) ────────────────────────
-        badge_map = {"sinc": ("SINC", "#cc2222"), "cubic": ("CUB", "#8822cc")}
-        badge_txt, badge_col = badge_map.get(
-            self._interp_mode, ("LIN", None))
-        badge_bg = QColor(badge_col) if badge_col else QColor(0, 0, 0, 70)
-        badge_fg = QColor("#ffffff")
+        # SINC and CUB colours come from the statusbar palette so themes can
+        # override them.  LIN is intentionally subtle: semi-transparent bg,
+        # same fill colour as the block text so it reads as a dim label.
+        _sinc_bg = QColor(self._pal.get("badge_sinc_bg", "#cc2222"))
+        _sinc_fg = QColor(self._pal.get("badge_sinc_fg", "#ffffff"))
+        _cub_bg  = QColor(self._pal.get("badge_cub_bg",  "#8822cc"))
+        _cub_fg  = QColor(self._pal.get("badge_cub_fg",  "#ffffff"))
+        _badge_data = {
+            "sinc":  ("SINC", _sinc_bg, _sinc_fg),
+            "cubic": ("CUB",  _cub_bg,  _cub_fg),
+        }
+        badge_txt, badge_bg, badge_fg = _badge_data.get(
+            self._interp_mode, ("LIN", QColor(0, 0, 0, 70), fill_c))
         f_badge  = QFont("Courier New", max(5, int(7 * s)))
         f_badge.setBold(True)
         fm = QFontMetrics(f_badge)
@@ -210,17 +264,18 @@ class ChannelStatusBlock(QWidget):
         _outlined_text(painter, int(5*s), int(58*s), vdiv_txt,
                         f_vdiv, fill_c, outline_c, 1.0)
 
-        # ── Row 3: filter / coupling info (larger, outlined) ─────────────
+        # ── Row 3: filter / coupling info ────────────────────────────────
+        # Inherits fill_c / outline_c from the block's background-aware pair
+        # so this row is always readable regardless of channel colour.
         filt     = getattr(self._trace, '_filter_desc', '') or ''
         coupling = getattr(self._trace, 'coupling', '') or ''
         imp      = getattr(self._trace, 'impedance', '') or ''
         extra    = "  ".join(p for p in [coupling, imp, filt] if p)
         if extra:
-            filt_c = QColor(self._pal.get("filt_text", "#ffcc66"))
             f_extra = QFont("Courier New", max(6, int(10 * s)))
             f_extra.setBold(True)
             _outlined_text(painter, int(5*s), int(84*s), extra,
-                            f_extra, filt_c, outline_c, 0.8)
+                            f_extra, fill_c, outline_c, 0.8)
 
         # ── Left colour bar ───────────────────────────────────────────────
         bar_c = QColor(self._pal.get("ch_bar", self._trace.color))

@@ -21,3 +21,4 @@ The FFT Window needs work.
 	* The labels will keep the theme_background+alpha background setting to avoid text-to-trace blending.
 	* Label placement probably needs to be refined for multi-trace view, but we'll run into that bridge when the cows come home.
  8. Add tooltips to things like the min prominance label and spin box saying "Top 10 MArkers and cursors will only apply to peaks that are at least this much above the surrounding levels to suppress noise snaps" and such "Noob introduction tooltipping"
+ 9. Add more meaningful Y-scale options to the FFT read-out than just dBFS. If we know we're looking at volts, we can calculate that into dBV and with an additional setting for the load also as dBm. With current we can do similar tricks, in case we are looking at a mirror-coupled I-DAC output for example.

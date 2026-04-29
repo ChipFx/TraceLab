@@ -11,12 +11,14 @@
     "text_dim": "#664400",
     "accent": "#cc8800",
     "border": "#332200",
-    "cursor_a": "#ffffff",
-    "cursor_b": "#00ffff",
+    "cursor_a": "#ff5f29",
+    "cursor_b": "#c17802",
     "toolbar_bg": "#120800",
     "statusbar_bg": "#100600",
     "scope_bg": "#080400",
-    "scope_grid": "#332200"
+    "scope_grid": "#332200",
+    "interp_sinc_color": "#ff5500",
+    "interp_cub_color":  "#ffee44"
   },
   "statusbar": {
     "bar_bg": "#0a0500",
@@ -28,6 +30,10 @@
     "logo_bg": "#060300",
     "logo_text": "#ffaa00",
     "logo_sub": "#664400",
+    "badge_sinc_bg": "#cc3300",
+    "badge_sinc_fg": "#ffdd88",
+    "badge_cub_bg": "#664400",
+    "badge_cub_fg": "#ffcc44",
     "ch_bg": "#180c00",
     "ch_text": "#ffaa00",
     "ch_bar": "#ffaa00",

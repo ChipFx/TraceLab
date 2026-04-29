@@ -44,6 +44,8 @@ class TriggerPanel(QWidget):
         super().__init__(parent)
         self._traces: List[TraceModel] = []
         self._last_trigger_t: Optional[float] = None
+        self._pv: dict = {}          # plotview palette — set via set_palette()
+        self._font_scale: float = 1.0
         self._build_ui()
 
     def _build_ui(self):
@@ -52,11 +54,11 @@ class TriggerPanel(QWidget):
         layout.setSpacing(6)
 
         # Header
-        hdr = QLabel("TRIGGER")
-        hdr.setStyleSheet(
+        self._hdr = QLabel("TRIGGER")
+        self._hdr.setStyleSheet(
             "color: #888; font-size: 10px; font-weight: bold; "
             "letter-spacing: 1px;")
-        layout.addWidget(hdr)
+        layout.addWidget(self._hdr)
 
         grp = QGroupBox("Trigger Settings")
         gl = QGridLayout(grp)
@@ -83,21 +85,12 @@ class TriggerPanel(QWidget):
 
         # Row 2: Direction × Origin — two independent radio pairs
         gl.addWidget(QLabel("Search:"), 2, 0)
-        _radio_style = (
-            "QRadioButton::indicator {"
-            "  width: 11px; height: 11px; border-radius: 6px;"
-            "  border: 2px solid #666; background: #222; }"
-            "QRadioButton::indicator:checked {"
-            "  background: #60e060; border-color: #40a040; }"
-        )
-        # Direction pair
+        # Direction pair — styles applied/updated via _apply_styles()
         self.radio_dir_forward  = QRadioButton("Fwd")
         self.radio_dir_backward = QRadioButton("Bwd")
         self.radio_dir_forward.setChecked(True)
         self.radio_dir_forward.setToolTip("Search forward (→) from the origin point")
         self.radio_dir_backward.setToolTip("Search backward (←) from the origin point")
-        self.radio_dir_forward.setStyleSheet(_radio_style)
-        self.radio_dir_backward.setStyleSheet(_radio_style)
         _bg_dir = QButtonGroup(grp)
         _bg_dir.addButton(self.radio_dir_forward)
         _bg_dir.addButton(self.radio_dir_backward)
@@ -113,8 +106,7 @@ class TriggerPanel(QWidget):
         self.radio_from_edge.setToolTip(
             "Start search from the waveform edge\n"
             "Fwd→ searches from the start of data; Bwd← searches from the end of data")
-        self.radio_from_t0.setStyleSheet(_radio_style)
-        self.radio_from_edge.setStyleSheet(_radio_style)
+        # Origin pair — styles applied/updated via _apply_styles()
         _bg_from = QButtonGroup(grp)
         _bg_from.addButton(self.radio_from_t0)
         _bg_from.addButton(self.radio_from_edge)
@@ -123,12 +115,11 @@ class TriggerPanel(QWidget):
         search_row.setSpacing(4)
         search_row.addWidget(self.radio_dir_forward)
         search_row.addWidget(self.radio_dir_backward)
-        sep_s = QFrame()
-        sep_s.setFrameShape(QFrame.Shape.VLine)
-        sep_s.setStyleSheet("color: #444;")
-        sep_s.setFixedWidth(1)
+        self._sep_s = QFrame()
+        self._sep_s.setFrameShape(QFrame.Shape.VLine)
+        self._sep_s.setFixedWidth(1)
         search_row.addSpacing(4)
-        search_row.addWidget(sep_s)
+        search_row.addWidget(self._sep_s)
         search_row.addSpacing(4)
         search_row.addWidget(self.radio_from_t0)
         search_row.addWidget(self.radio_from_edge)
@@ -171,9 +162,6 @@ class TriggerPanel(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
         self.btn_trigger = QPushButton("Find Trigger")
-        self.btn_trigger.setStyleSheet(
-            "background: #1a4a1a; color: #60e060; font-weight: bold; "
-            "padding: 6px; border: 1px solid #40a040; border-radius: 3px;")
         self.btn_trigger.clicked.connect(lambda: self._find_trigger())
         btn_row.addWidget(self.btn_trigger, 3)
 
@@ -189,8 +177,7 @@ class TriggerPanel(QWidget):
         self.btn_retrigger_update.setToolTip(
             "Manually recalculate persistence / averaging / interpolation\n"
             "using the current view window and trigger settings.")
-        self.btn_retrigger_update.setStyleSheet(
-            "padding: 4px; border: 1px solid #555; border-radius: 3px;")
+        # Style applied via _apply_styles()
         self.btn_retrigger_update.clicked.connect(
             self.retrigger_update_requested)
         layout.addWidget(self.btn_retrigger_update)
@@ -241,30 +228,81 @@ class TriggerPanel(QWidget):
 
         self.set_font_scale(1.0)  # apply default inline styles
 
+    def set_palette(self, pv: dict):
+        """Apply the plotview palette; rebuilds all palette-dependent styles."""
+        self._pv = dict(pv)
+        self._apply_styles()
+
     def set_font_scale(self, scale: float):
-        """Apply 90%-of-global font size to secondary labels and t=0 buttons."""
-        fs     = max(8, int(round(11 * scale * 0.9)))   # 90% rule
-        fs_btn = max(8, int(round(11 * scale)))          # same as global for t=0 buttons
+        """Store scale and rebuild all inline styles."""
+        self._font_scale = scale
+        self._apply_styles()
 
+    def _apply_styles(self):
+        """Rebuild every inline stylesheet using the stored palette and scale."""
+        pv       = self._pv
+        scale    = self._font_scale
+        fs       = max(8, int(round(11 * scale * 0.9)))   # 90% for secondary text
+        fs_btn   = max(8, int(round(11 * scale)))
+
+        bg_panel = pv.get("bg_panel", "#141414")
+        text_dim = pv.get("text_dim", "#666666")
+        border   = pv.get("border",   "#2a2a2a")
+        accent   = pv.get("accent",   "#1e88e5")
+        bg       = pv.get("bg",       "#0d0d0d")
+
+        # Panel header
+        self._hdr.setStyleSheet(
+            f"color: {text_dim}; font-size: 10px; font-weight: bold; "
+            f"letter-spacing: 1px;")
+
+        # Status label + t=0 row label
         self.lbl_status.setStyleSheet(
-            f"color: #888; font-size: {fs}px; padding: 2px;")
+            f"color: {text_dim}; font-size: {fs}px; padding: 2px;")
         self._t0_lbl.setStyleSheet(
-            f"color: #888; font-size: {fs}px; font-weight: bold;")
+            f"color: {text_dim}; font-size: {fs}px; font-weight: bold;")
 
+        # Find Trigger — accent-coloured so it stands out as the primary action
+        self.btn_trigger.setStyleSheet(
+            f"background: {bg_panel}; color: {accent}; font-weight: bold; "
+            f"padding: 6px; border: 1px solid {accent}; border-radius: 3px;")
+
+        # Update Retrigger — normal bordered button
+        self.btn_retrigger_update.setStyleSheet(
+            f"padding: 4px; border: 1px solid {border}; border-radius: 3px;")
+
+        # t=0 navigation buttons (→ | ←)
         _btn = (
-            f"QPushButton {{ padding: 2px 5px; border: 1px solid #555; "
+            f"QPushButton {{ padding: 2px 5px; border: 1px solid {border}; "
             f"border-radius: 3px; font-size: {fs_btn}px; }} "
-            f"QPushButton:hover {{ border-color: #888; }} "
-            f"QPushButton:disabled {{ color: #444; border-color: #333; }}")
+            f"QPushButton:hover {{ border-color: {text_dim}; }} "
+            f"QPushButton:disabled {{ color: {border}; border-color: {bg_panel}; }}")
+
+        # Restore button — accent text to distinguish it as a "undo" action
         _btn_restore = (
-            f"QPushButton {{ padding: 2px 5px; border: 1px solid #446; "
-            f"border-radius: 3px; font-size: {fs_btn}px; color: #aac; }} "
-            f"QPushButton:hover {{ border-color: #88c; color: #ccf; }} "
-            f"QPushButton:disabled {{ color: #333; border-color: #333; }}")
+            f"QPushButton {{ padding: 2px 5px; border: 1px solid {border}; "
+            f"border-radius: 3px; font-size: {fs_btn}px; color: {accent}; }} "
+            f"QPushButton:hover {{ border-color: {accent}; }} "
+            f"QPushButton:disabled {{ color: {border}; border-color: {bg_panel}; }}")
 
         for b in (self.btn_t0_first, self.btn_t0_mid, self.btn_t0_last):
             b.setStyleSheet(_btn)
         self.btn_t0_restore.setStyleSheet(_btn_restore)
+
+        # Search radio buttons — indicator styled to match theme accent
+        _radio_style = (
+            f"QRadioButton::indicator {{"
+            f"  width: 11px; height: 11px; border-radius: 6px;"
+            f"  border: 2px solid {text_dim}; background: {bg}; }}"
+            f"QRadioButton::indicator:checked {{"
+            f"  background: {accent}; border-color: {accent}; }}"
+        )
+        for rb in (self.radio_dir_forward, self.radio_dir_backward,
+                   self.radio_from_t0, self.radio_from_edge):
+            rb.setStyleSheet(_radio_style)
+
+        # Search-row vertical separator
+        self._sep_s.setStyleSheet(f"color: {border};")
 
     def _on_search_direction_changed(self, is_forward: bool):
         if is_forward:

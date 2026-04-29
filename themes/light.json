@@ -16,7 +16,9 @@
     "toolbar_bg": "#e0e0e0",
     "statusbar_bg": "#d8d8d8",
     "scope_bg": "#ffffff",
-    "scope_grid": "#ccddcc"
+    "scope_grid": "#ccddcc",
+    "interp_sinc_color": "#cc0000",
+    "interp_cub_color":  "#8800cc"
   },
   "statusbar": {
     "bar_bg": "#d8d8ec",
@@ -28,7 +30,11 @@
     "logo_bg": "#d0d0ec",
     "logo_text": "#2244aa",
     "logo_sub": "#8888aa",
-    "filt_text": "#884400"
+    "filt_text": "#884400",
+    "badge_sinc_bg": "#cc2222",
+    "badge_sinc_fg": "#ffffff",
+    "badge_cub_bg":  "#7711bb",
+    "badge_cub_fg":  "#ffffff"
   },
   "trace_colors": [
     "#C07000",

@@ -191,11 +191,19 @@ class ChannelStatusBlock(QWidget):
                         f_name, fill_c, outline_c, 1.2)
 
         # ── SINC/LIN/CUB badge (top-right corner) ────────────────────────
-        badge_map = {"sinc": ("SINC", "#cc2222"), "cubic": ("CUB", "#8822cc")}
-        badge_txt, badge_col = badge_map.get(
-            self._interp_mode, ("LIN", None))
-        badge_bg = QColor(badge_col) if badge_col else QColor(0, 0, 0, 70)
-        badge_fg = QColor("#ffffff")
+        # SINC and CUB colours come from the statusbar palette so themes can
+        # override them.  LIN is intentionally subtle: semi-transparent bg,
+        # same fill colour as the block text so it reads as a dim label.
+        _sinc_bg = QColor(self._pal.get("badge_sinc_bg", "#cc2222"))
+        _sinc_fg = QColor(self._pal.get("badge_sinc_fg", "#ffffff"))
+        _cub_bg  = QColor(self._pal.get("badge_cub_bg",  "#8822cc"))
+        _cub_fg  = QColor(self._pal.get("badge_cub_fg",  "#ffffff"))
+        _badge_data = {
+            "sinc":  ("SINC", _sinc_bg, _sinc_fg),
+            "cubic": ("CUB",  _cub_bg,  _cub_fg),
+        }
+        badge_txt, badge_bg, badge_fg = _badge_data.get(
+            self._interp_mode, ("LIN", QColor(0, 0, 0, 70), fill_c))
         f_badge  = QFont("Courier New", max(5, int(7 * s)))
         f_badge.setBold(True)
         fm = QFontMetrics(f_badge)

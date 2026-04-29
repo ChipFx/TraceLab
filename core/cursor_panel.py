@@ -161,6 +161,7 @@ class CursorPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(160)
+        self._pv: dict = {}              # plotview palette — set via set_palette()
         self._cursor_times = {0: None, 1: None}
         self._trace_values: Dict[int, Dict] = {}  # cursor_id -> {name: value}
         self._trace_display_order: List[str] = []  # set by main window
@@ -207,36 +208,38 @@ class CursorPanel(QWidget):
         layout.addLayout(row2)
 
         # ── Separator ──────────────────────────────────────────────────
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.Shape.HLine)
-        sep1.setStyleSheet("color: #444;")
-        layout.addWidget(sep1)
+        self._sep1 = QFrame()
+        self._sep1.setFrameShape(QFrame.Shape.HLine)
+        self._sep1.setStyleSheet("color: #444;")
+        layout.addWidget(self._sep1)
 
         # ── Time + delta readout (2×2: A|B on row 0, Δt|1/Δt on row 1) ──
         grid = QGridLayout()
         grid.setSpacing(2)
         grid.setContentsMargins(2, 2, 2, 2)
 
-        lbl_a_key = QLabel("A:")
-        lbl_a_key.setStyleSheet("color: #ffcc00; font-weight: bold;")
-        grid.addWidget(lbl_a_key, 0, 0)
+        self._lbl_a_key = QLabel("A:")
+        self._lbl_a_key.setStyleSheet("color: #ffcc00; font-weight: bold;")
+        grid.addWidget(self._lbl_a_key, 0, 0)
         self.lbl_a_time = QLabel("---")
         self.lbl_a_time.setFont(QFont("Courier New", 9))
         grid.addWidget(self.lbl_a_time, 0, 1)
 
-        lbl_b_key = QLabel("B:")
-        lbl_b_key.setStyleSheet("color: #00ccff; font-weight: bold;")
-        grid.addWidget(lbl_b_key, 0, 2)
+        self._lbl_b_key = QLabel("B:")
+        self._lbl_b_key.setStyleSheet("color: #00ccff; font-weight: bold;")
+        grid.addWidget(self._lbl_b_key, 0, 2)
         self.lbl_b_time = QLabel("---")
         self.lbl_b_time.setFont(QFont("Courier New", 9))
         grid.addWidget(self.lbl_b_time, 0, 3)
 
-        grid.addWidget(QLabel("Δt:"), 1, 0)
+        self._lbl_dt_key = QLabel("Δt:")   # Δt — lowercase t, not ΔT (temperature)
+        grid.addWidget(self._lbl_dt_key, 1, 0)
         self.lbl_dt = QLabel("---")
         self.lbl_dt.setFont(QFont("Courier New", 9))
         grid.addWidget(self.lbl_dt, 1, 1)
 
-        grid.addWidget(QLabel("1/Δt:"), 1, 2)
+        self._lbl_freq_key = QLabel("1/Δt:")
+        grid.addWidget(self._lbl_freq_key, 1, 2)
         self.lbl_freq = QLabel("---")
         self.lbl_freq.setFont(QFont("Courier New", 9))
         grid.addWidget(self.lbl_freq, 1, 3)
@@ -246,10 +249,10 @@ class CursorPanel(QWidget):
         layout.addLayout(grid)
 
         # ── Separator ──────────────────────────────────────────────────
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color: #444;")
-        layout.addWidget(sep2)
+        self._sep2 = QFrame()
+        self._sep2.setFrameShape(QFrame.Shape.HLine)
+        self._sep2.setStyleSheet("color: #444;")
+        layout.addWidget(self._sep2)
 
         # ── Values table ───────────────────────────────────────────────
         self.table = QTableWidget()
@@ -263,6 +266,20 @@ class CursorPanel(QWidget):
         btn_export = QPushButton("Export CSV")
         btn_export.clicked.connect(self._export_csv)
         layout.addWidget(btn_export)
+
+    def set_palette(self, pv: dict):
+        """Apply the plotview palette to all colour-sensitive elements."""
+        self._pv = dict(pv)
+        ca     = pv.get("cursor_a", "#ffcc00")
+        cb     = pv.get("cursor_b", "#00ccff")
+        border = pv.get("border",   "#444444")
+        text   = pv.get("text",     "#e0e0e0")
+        self._lbl_a_key.setStyleSheet(f"color: {ca}; font-weight: bold;")
+        self._lbl_b_key.setStyleSheet(f"color: {cb}; font-weight: bold;")
+        self._lbl_dt_key.setStyleSheet(f"color: {text};")
+        self._lbl_freq_key.setStyleSheet(f"color: {text};")
+        self._sep1.setStyleSheet(f"color: {border};")
+        self._sep2.setStyleSheet(f"color: {border};")
 
     def update_cursors(self, cursor_data: dict):
         """Called when cursor positions/values change."""

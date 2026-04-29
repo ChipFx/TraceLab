@@ -1708,6 +1708,12 @@ class MainWindow(QMainWindow):
         QApplication.instance().setStyleSheet(
             self.theme.get_stylesheet(font_scale=scale))
         self._channel_panel.refresh_all()
+        _pv = self.theme.plotview_palette()
+        self._channel_panel.set_palette(_pv)
+        if hasattr(self, '_cursor_panel'):
+            self._cursor_panel.set_palette(_pv)
+        if hasattr(self, '_trigger_panel'):
+            self._trigger_panel.set_palette(_pv)
         if hasattr(self, '_scope_status'):
             self._scope_status.set_palette(self.theme.statusbar_palette())
             self._scope_status.set_branding(self._get_branding_path())

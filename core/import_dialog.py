@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QMimeData, QPoint, QTimer, QObject
 from PyQt6.QtGui import QFont, QDrag, QPixmap, QPainter, QColor, QCursor
-from core.grouping_dialog import GroupingDialog
+from pytraceview.grouping_dialog import GroupingDialog
 import numpy as np
 from typing import Dict, List, Optional
 from core.data_loader import LoadResult, is_numeric_column, CsvMetadata, parse_value
@@ -1070,7 +1070,8 @@ class ImportDialog(QDialog):
     def _open_grouping_dialog(self):
         existing = {row.col_group for row in self._col_rows.values() if row.col_group}
         dlg = GroupingDialog(existing_group_names=existing,
-                             theme=self._theme, parent=self)
+                             accent_color=self._theme.pv("accent"),
+                             parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         method, pattern, create_inside, custom_name = dlg.get_config()

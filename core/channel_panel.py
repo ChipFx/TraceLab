@@ -17,7 +17,7 @@ from typing import Dict, List, Set
 from pytraceview.trace_model import TraceModel
 
 
-from core.grouping_dialog import GroupingDialog
+from pytraceview.grouping_dialog import GroupingDialog
 
 
 class _LabelClickFilter(QObject):

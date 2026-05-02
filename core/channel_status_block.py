@@ -30,7 +30,7 @@ from PyQt6.QtGui import (
     QPainter, QColor, QFont, QPen, QBrush,
     QPainterPath, QFontMetrics, QCursor
 )
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 
 BLOCK_W = 120
 BLOCK_H = 110

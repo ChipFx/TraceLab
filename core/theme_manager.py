@@ -101,6 +101,25 @@ class ThemeData:
     def trace_colors(self) -> List[str]:
         return list(self._traces)
 
+    def to_plot_theme(self):
+        """Return a PlotTheme with the plotview colours for this theme.
+
+        Imported lazily so that pytraceview is not required at module level
+        (useful if theme_manager is ever loaded in a non-plotting context).
+        """
+        from pytraceview.plot_theme import PlotTheme
+        return PlotTheme(
+            background   = self.pv("scope_bg"),
+            grid         = self.pv("scope_grid"),
+            text         = self.pv("text"),
+            cursor_a     = self.pv("cursor_a"),
+            cursor_b     = self.pv("cursor_b"),
+            accent       = self.pv("accent"),
+            force_labels = self.force_labels,
+            theme_id     = self.file_id,
+            trace_colors = list(self._traces),
+        )
+
     def to_json(self) -> dict:
         return {
             "name":         self.name,

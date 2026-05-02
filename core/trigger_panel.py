@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from typing import List, Optional
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 from core.import_dialog import SciLineEdit
 
 

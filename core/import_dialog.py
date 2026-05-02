@@ -15,7 +15,7 @@ from core.grouping_dialog import GroupingDialog
 import numpy as np
 from typing import Dict, List, Optional
 from core.data_loader import LoadResult, is_numeric_column, CsvMetadata, parse_value
-from core.trace_model import TraceModel, ScalingConfig
+from pytraceview.trace_model import TraceModel, ScalingConfig
 
 
 # ── Locale-safe number input ──────────────────────────────────────────────────

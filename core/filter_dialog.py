@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from typing import List, Optional
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 
 
 # ── SI frequency helpers ──────────────────────────────────────────────────────

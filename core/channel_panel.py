@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QMimeData, QObject, QEvent, QPoint
 from PyQt6.QtGui import QColor, QFont, QDrag, QPixmap, QPainter, QCursor
 from typing import Dict, List, Set
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 
 
 from core.grouping_dialog import GroupingDialog

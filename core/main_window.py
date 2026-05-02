@@ -14,11 +14,12 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QIcon, QPixmap, QColor
 from typing import List, Optional
 
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 from core.theme_manager import ThemeManager
 from core.data_loader import load_csv
 from core.import_dialog import ImportDialog
-from core.scope_plot_widget import ScopePlotWidget, DEFAULT_LIMITS_CONFIG
+from pytraceview import TraceView
+from pytraceview.render_utils import DEFAULT_LIMITS_CONFIG
 from core.channel_panel import ChannelPanel
 from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
@@ -27,7 +28,7 @@ from core.scope_status_bar import ScopeStatusBar
 from core.language_manager import get_language_manager
 from core.notice_manager import get_notice_manager
 from core.notice_bar_widget import NoticeBarWidget
-from core.draw_mode import (
+from pytraceview.draw_mode import (
     DEFAULT_DENSITY_PEN_MAPPING,
     DEFAULT_DRAW_MODE,
     DRAW_MODE_ADVANCED,
@@ -561,10 +562,13 @@ class MainWindow(QMainWindow):
                                                         DEFAULT_LIMITS_CONFIG["preset_max"])),
             }.items()},
         }
-        self._plot = ScopePlotWidget(
-            self.theme, self._y_lock_auto,
-            self._interp_mode, self._viewport_min_pts,
-            self._draw_mode, self._density_pen_mapping,
+        self._plot = TraceView(
+            theme=self.theme.active_theme.to_plot_theme(),
+            y_lock_auto=self._y_lock_auto,
+            interp_mode=self._interp_mode,
+            viewport_min_pts=self._viewport_min_pts,
+            draw_mode=self._draw_mode,
+            density_pen_mapping=self._density_pen_mapping,
             lane_label_size=self._lane_label_size,
             show_lane_labels=self._show_lane_labels,
             allow_theme_force_labels=self._allow_theme_force_labels,
@@ -1722,6 +1726,7 @@ class MainWindow(QMainWindow):
             self._rebuild_theme_menu()
         # Re-evaluate force_labels in case the new theme has a different value
         if hasattr(self, '_plot'):
+            self._plot.apply_theme(self.theme.active_theme.to_plot_theme())
             self._plot.apply_lane_label_settings(
                 self._lane_label_size,
                 self._show_lane_labels,

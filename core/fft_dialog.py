@@ -22,7 +22,7 @@ from PyQt6.QtGui import QColor
 import pyqtgraph as pg
 from pyqtgraph import InfiniteLine
 from typing import List, Optional, Tuple
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 
 # ── Scipy optional ────────────────────────────────────────────────────────────
 try:

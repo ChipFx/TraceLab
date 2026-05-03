@@ -438,13 +438,13 @@ class FFTDialog(QDialog):
         for trace in self.traces:
             if trace.name != trace_name:
                 continue
-            sps = trace.sample_rate
+            sps = trace.primary().sample_rate
             if not sps or sps <= 0:
                 return
             if use_window and self.view_range:
                 _, y = trace.windowed_data(*self.view_range)
             else:
-                y = trace.processed_data
+                y = trace.segment_processed(trace.primary())
             n = len(y) if y is not None else 0
             if n < 2:
                 return
@@ -496,10 +496,10 @@ class FFTDialog(QDialog):
             if use_window and self.view_range:
                 _, y = trace.windowed_data(*self.view_range)
             else:
-                y = trace.processed_data
+                y = trace.segment_processed(trace.primary())
             if len(y) < 4:
                 continue
-            freqs, mag_db = compute_fft(y, trace.sample_rate, window_name)
+            freqs, mag_db = compute_fft(y, trace.primary().sample_rate, window_name)
             mask = freqs >= min_freq
             if max_freq is not None:
                 mask &= (freqs <= max_freq)

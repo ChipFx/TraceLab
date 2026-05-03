@@ -341,8 +341,9 @@ class TriggerPanel(QWidget):
         level    = self.edit_level.get_value(0.0)
         edge_idx = self.combo_edge.currentIndex()  # 0=rise, 1=fall, 2=either
 
-        t = trace.time_axis
-        y = trace.processed_data
+        seg = trace.primary()
+        t = seg.time + trace.time_offset
+        y = trace.segment_processed(seg)
 
         backward  = self.radio_dir_backward.isChecked()
         from_edge = self.radio_from_edge.isChecked()   # False = from t=0
@@ -482,13 +483,14 @@ class TriggerPanel(QWidget):
         t_min: Optional[float] = None
         t_max: Optional[float] = None
         for trace in self._traces:
-            ta = trace.time_axis
-            if ta is not None and len(ta) > 0:
-                lo, hi = float(ta[0]), float(ta[-1])
-                if t_min is None or lo < t_min:
-                    t_min = lo
-                if t_max is None or hi > t_max:
-                    t_max = hi
+            for seg in trace.segments:
+                ta = seg.time + trace.time_offset
+                if len(ta) > 0:
+                    lo, hi = float(ta[0]), float(ta[-1])
+                    if t_min is None or lo < t_min:
+                        t_min = lo
+                    if t_max is None or hi > t_max:
+                        t_max = hi
         if t_min is None:
             return None
         return t_min, t_max

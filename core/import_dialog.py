@@ -15,7 +15,7 @@ from pytraceview.grouping_dialog import GroupingDialog
 import numpy as np
 from typing import Dict, List, Optional
 from core.data_loader import LoadResult, is_numeric_column, CsvMetadata, parse_value
-from pytraceview.trace_model import TraceModel, ScalingConfig
+from pytraceview.trace_model import TraceModel, ScalingConfig, Segment
 
 
 # ── Locale-safe number input ──────────────────────────────────────────────────
@@ -1293,12 +1293,55 @@ class ImportDialog(QDialog):
                                 if self.load_result.primary_segment is not None
                                 else (0 if _has_multi_segs else None))
             _default_viewmode = "dimmed" if _has_multi_segs else ""
+
+            # ── Build Segment objects ──────────────────────────────────────────
+            # t0_absolute = Unix epoch at display t=0 for each segment.
+            # Multi-segment: each tuple carries its own t0_abs (trigger epoch).
+            # Single-segment: derive from wall-clock override or file-level anchor.
+            from datetime import datetime as _dt
+            _wc_str = _wc_override if _wc_override else _trace_t0wc
+            _t0_epoch = 0.0
+            if _wc_str:
+                try:
+                    _t0_epoch = _dt.fromisoformat(_wc_str).timestamp()
+                except Exception:
+                    pass
+
+            if _trace_segs and len(_trace_segs) >= 1:
+                # Multi-segment: slice raw/time arrays per segment tuple
+                _segments = []
+                for (start, end, t0_abs, t0_rel) in _trace_segs:
+                    seg_data = raw[start:end]
+                    if td is not None:
+                        seg_time = td[start:end]
+                    else:
+                        n = end - start
+                        seg_time = (np.arange(n) - t0_sample) * _trace_dt if t0_sample > 0 else np.arange(n) * _trace_dt
+                    _segments.append(Segment(
+                        data=seg_data,
+                        time=seg_time,
+                        t0_absolute=t0_abs,   # epoch of trigger for this segment
+                        t0_relative=t0_rel,
+                        sample_rate=_trace_sps,
+                    ))
+            else:
+                # Single segment
+                if td is not None:
+                    seg_time = td
+                else:
+                    n = len(raw)
+                    seg_time = (np.arange(n) - t0_sample) * _trace_dt if t0_sample > 0 else np.arange(n) * _trace_dt
+                _segments = [Segment(
+                    data=raw,
+                    time=seg_time,
+                    t0_absolute=_t0_epoch,
+                    t0_relative=0.0,
+                    sample_rate=_trace_sps,
+                )]
+
             trace = TraceModel(
                 name=_trace_name,
-                raw_data=raw,
-                time_data=td,
-                sample_rate=_trace_sps,
-                dt=_trace_dt,
+                segments=_segments,
                 label=row.edit_label.text().strip() or col_name,
                 unit=scaling.unit,
                 scaling=scaling,
@@ -1310,18 +1353,11 @@ class ImportDialog(QDialog):
                 source_file=self.load_result.filename,
                 original_col_name=col_name,
                 col_group=_col_group,
-                # Wall-clock time anchor: dialog override beats per-trace, beats file-level
-                t0_wall_clock=(_wc_override if _wc_override else _trace_t0wc),
                 source_time_format=self.load_result.source_time_format,
-                # Segment metadata — per-trace if available, file-level fallback
-                segments=_trace_segs,
+                # Segment display control
                 primary_segment=_ts_seg.get("primary_segment", _default_primary),
                 non_primary_viewmode=_ts_seg.get("non_primary_viewmode", _default_viewmode),
             )
-
-            # For sample-based time, apply t0 offset via dt-based shift
-            if time_data is None and t0_sample > 0:
-                trace._t0_sample_offset = t0_sample  # store for time_axis calc
 
             traces.append(trace)
 

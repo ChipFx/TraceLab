@@ -398,6 +398,11 @@ class ChannelPanel(QWidget):
 
         ctrl3 = QHBoxLayout()
         ctrl3.setContentsMargins(4, 0, 4, 4)
+        ctrl3.setSpacing(3)
+        self._btn_new_group = QPushButton("New Group")
+        self._btn_new_group.setToolTip("Create a new empty group (then drag channels into it)")
+        self._btn_new_group.clicked.connect(self._open_new_group_dialog)
+        ctrl3.addWidget(self._btn_new_group)
         self._btn_group = QPushButton("Group…")
         self._btn_group.setToolTip("Group channels by unit or name pattern")
         self._btn_group.clicked.connect(self._open_grouping_dialog)
@@ -463,6 +468,7 @@ class ChannelPanel(QWidget):
         self._btn_sinc.setStyleSheet(
             f"font-size: {fs}px; font-weight: bold; color: {sinc_color};")
         self._btn_group.setStyleSheet(f"font-size: {fs}px;")
+        self._btn_new_group.setStyleSheet(f"font-size: {fs}px;")
         self._update_minimum_width()
 
     def _update_minimum_width(self):
@@ -588,7 +594,89 @@ class ChannelPanel(QWidget):
     def _on_rows_moved(self, *args):
         new_order = self.get_ordered_names()
         self._trace_order = new_order
+
+        # Walk the list top-to-bottom.  Each group header sets the "current
+        # group"; channel items that no longer match their trace.col_group
+        # have been dragged across a group boundary.
+        current_group = ""
+        membership_changes: List[tuple] = []  # (trace_name, old_group, new_group)
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item is None:
+                continue
+            grp = item.data(_GROUP_HEADER_ROLE)
+            if grp is not None:
+                current_group = grp
+                continue
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if name is None:
+                continue
+            row = self._rows.get(name)
+            if row is None:
+                continue
+            old_group = row.trace.col_group or ""
+            if old_group != current_group:
+                membership_changes.append((name, old_group, current_group))
+
+        for trace_name, old_group, new_group in membership_changes:
+            row = self._rows.get(trace_name)
+            if not row:
+                continue
+            row.trace.col_group = new_group or ""
+
+            # Remove from old group (mutate in place so header _rows_ref stays valid)
+            if old_group:
+                names_list = self._group_rows.get(old_group, [])
+                if trace_name in names_list:
+                    names_list.remove(trace_name)
+                hdr_list = self._group_hdr_rows.get(old_group)
+                if hdr_list is not None:
+                    for r in [r for r in hdr_list if r.trace.name == trace_name]:
+                        hdr_list.remove(r)
+                # Remove the group header if the group is now empty
+                if not self._group_rows.get(old_group):
+                    hdr_item = self._group_items.pop(old_group, None)
+                    if hdr_item:
+                        row_idx = self._list.row(hdr_item)
+                        if row_idx >= 0:
+                            self._list.takeItem(row_idx)
+                    self._group_rows.pop(old_group, None)
+                    self._group_hdr_rows.pop(old_group, None)
+
+            # Add to new group (mutate in place)
+            if new_group:
+                if new_group not in self._group_rows:
+                    self._group_rows[new_group] = []
+                    self._group_hdr_rows[new_group] = []
+                names_list = self._group_rows[new_group]
+                if trace_name not in names_list:
+                    names_list.append(trace_name)
+                hdr_list = self._group_hdr_rows.get(new_group)
+                if hdr_list is not None and row not in hdr_list:
+                    hdr_list.append(row)
+
         self.order_changed.emit(new_order)
+
+    def _open_new_group_dialog(self):
+        from PyQt6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "New Group", "Group name:")
+        if not ok or not name.strip():
+            return
+        name = self._unique_group_name(name.strip())
+        self._create_empty_group(name)
+
+    def _create_empty_group(self, name: str):
+        """Insert an empty group header at the top of the list.
+
+        The user can then drag channels from elsewhere into it.
+        The header is removed automatically if it's still empty when
+        a drag completes (same cleanup as any other group).
+        """
+        if name in self._group_rows:
+            return
+        self._group_rows[name] = []
+        self._group_hdr_rows[name] = []
+        self._insert_group_header(name, 0)
 
     def _set_all_visible(self, visible: bool):
         for row in self._rows.values():

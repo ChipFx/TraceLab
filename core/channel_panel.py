@@ -530,11 +530,14 @@ class ChannelPanel(QWidget):
         for grp, names in list(self._group_rows.items()):
             if trace_name in names:
                 names.remove(trace_name)
-                # Also remove from hdr_rows ref list
+                # Mutate the shared list in place — _ChannelGroupHeader holds
+                # a reference to this same list object via _rows_ref, so
+                # replacing it with a new list would leave the header buttons
+                # iterating a stale copy still containing the deleted row.
                 if grp in self._group_hdr_rows:
-                    self._group_hdr_rows[grp] = [
-                        r for r in self._group_hdr_rows[grp]
-                        if r.trace.name != trace_name]
+                    hdr_list = self._group_hdr_rows[grp]
+                    for r in [r for r in hdr_list if r.trace.name == trace_name]:
+                        hdr_list.remove(r)
                 # If group is now empty, remove its header too
                 if not names:
                     hdr_item = self._group_items.pop(grp, None)

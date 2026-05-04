@@ -2408,9 +2408,9 @@ class MainWindow(QMainWindow):
                 for trace in self._traces:
                     if trace.name in name_map:
                         r = name_map[trace.name]
-                        trace.raw_data = r.raw_data
-                        trace.scaling.enabled = False
-                        trace._invalidate_cache()
+                        # Copy modified segments and scaling back from the deep-copy
+                        trace.segments = r.segments
+                        trace.scaling  = r.scaling
                 self._plot.refresh_all()
                 self._status_lbl.setText(f"Plugin '{plugin.name}' applied.")
         except Exception as e:

@@ -191,10 +191,12 @@ class _ChannelGroupHeader(QWidget):
     Double-click → toggle visibility of all channels in group
     Right-click  → context menu (Show All / Hide All / Rename / Change All Units)
     """
-    rename_requested           = pyqtSignal(str)        # group_name
-    change_all_units_requested = pyqtSignal(str, str)   # group_name, new_unit
-    move_up_requested          = pyqtSignal(str)        # group_name
-    move_down_requested        = pyqtSignal(str)        # group_name
+    rename_requested                   = pyqtSignal(str)        # group_name
+    change_all_units_requested         = pyqtSignal(str, str)   # group_name, new_unit
+    move_up_requested                  = pyqtSignal(str)        # group_name
+    move_down_requested                = pyqtSignal(str)        # group_name
+    delete_group_requested             = pyqtSignal(str)        # group_name
+    delete_group_and_channels_requested = pyqtSignal(str)       # group_name
 
     _BTN = (
         "QPushButton {{ font-size: {fs}px; color: {fg}; border: none; "
@@ -293,6 +295,11 @@ class _ChannelGroupHeader(QWidget):
         menu.addSeparator()
         menu.addAction("Change All Units…").triggered.connect(
             self._change_all_units)
+        menu.addSeparator()
+        menu.addAction("Delete Group").triggered.connect(
+            lambda: self.delete_group_requested.emit(self.group_name))
+        menu.addAction("Delete Group and Channels").triggered.connect(
+            lambda: self.delete_group_and_channels_requested.emit(self.group_name))
         menu.exec(event.globalPos())
 
     def _change_all_units(self):
@@ -432,6 +439,9 @@ class ChannelPanel(QWidget):
         hdr_widget.change_all_units_requested.connect(self._on_group_change_units)
         hdr_widget.move_up_requested.connect(lambda g: self._move_group(g, -1))
         hdr_widget.move_down_requested.connect(lambda g: self._move_group(g, +1))
+        hdr_widget.delete_group_requested.connect(self._delete_group)
+        hdr_widget.delete_group_and_channels_requested.connect(
+            self._delete_group_and_channels)
         item = QListWidgetItem()
         item.setData(_GROUP_HEADER_ROLE, group)       # marks it as a group header
         item.setSizeHint(QSize(0, 30))
@@ -658,6 +668,35 @@ class ChannelPanel(QWidget):
                     hdr_list.append(row)
 
         self.order_changed.emit(new_order)
+
+    def _delete_group(self, group_name: str):
+        """Remove the group header; orphan its channels in place (ungrouped)."""
+        # Clear col_group on every member so they float ungrouped
+        for tname in list(self._group_rows.get(group_name, [])):
+            if tname in self._rows:
+                self._rows[tname].trace.col_group = ""
+
+        # Remove the header item from the list widget
+        hdr_item = self._group_items.pop(group_name, None)
+        if hdr_item:
+            row_idx = self._list.row(hdr_item)
+            if row_idx >= 0:
+                self._list.takeItem(row_idx)
+
+        # Clean up tracking structures
+        self._group_rows.pop(group_name, None)
+        self._group_hdr_rows.pop(group_name, None)
+
+        self._trace_order = self.get_ordered_names()
+        self.order_changed.emit(self._trace_order)
+
+    def _delete_group_and_channels(self, group_name: str):
+        """Remove the group header and all channels that belong to it."""
+        members = list(self._group_rows.get(group_name, []))
+        for tname in members:
+            self.remove_trace(tname)
+            self.trace_removed.emit(tname)
+        # remove_trace cleans up the group header when the last member leaves
 
     def _open_new_group_dialog(self):
         from PyQt6.QtWidgets import QInputDialog

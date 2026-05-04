@@ -193,6 +193,8 @@ class _ChannelGroupHeader(QWidget):
     """
     rename_requested           = pyqtSignal(str)        # group_name
     change_all_units_requested = pyqtSignal(str, str)   # group_name, new_unit
+    move_up_requested          = pyqtSignal(str)        # group_name
+    move_down_requested        = pyqtSignal(str)        # group_name
 
     _BTN = (
         "QPushButton {{ font-size: {fs}px; color: {fg}; border: none; "
@@ -280,6 +282,11 @@ class _ChannelGroupHeader(QWidget):
             lambda: [r.chk_vis.setChecked(True) for r in self._rows_ref])
         menu.addAction("Hide All").triggered.connect(
             lambda: [r.chk_vis.setChecked(False) for r in self._rows_ref])
+        menu.addSeparator()
+        menu.addAction("Move Group Up").triggered.connect(
+            lambda: self.move_up_requested.emit(self.group_name))
+        menu.addAction("Move Group Down").triggered.connect(
+            lambda: self.move_down_requested.emit(self.group_name))
         menu.addSeparator()
         menu.addAction("Rename Group…").triggered.connect(
             lambda: self.rename_requested.emit(self.group_name))
@@ -423,6 +430,8 @@ class ChannelPanel(QWidget):
             on_toggle_collapse=self._on_group_collapse)
         hdr_widget.rename_requested.connect(self._on_group_rename)
         hdr_widget.change_all_units_requested.connect(self._on_group_change_units)
+        hdr_widget.move_up_requested.connect(lambda g: self._move_group(g, -1))
+        hdr_widget.move_down_requested.connect(lambda g: self._move_group(g, +1))
         item = QListWidgetItem()
         item.setData(_GROUP_HEADER_ROLE, group)       # marks it as a group header
         item.setSizeHint(QSize(0, 30))
@@ -624,7 +633,9 @@ class ChannelPanel(QWidget):
                 continue
             row.trace.col_group = new_group or ""
 
-            # Remove from old group (mutate in place so header _rows_ref stays valid)
+            # Remove from old group (mutate in place so header _rows_ref stays valid).
+            # Empty groups are intentionally kept — the user may drag channels
+            # back in.  Auto-removal only happens in remove_trace (hard delete).
             if old_group:
                 names_list = self._group_rows.get(old_group, [])
                 if trace_name in names_list:
@@ -633,15 +644,6 @@ class ChannelPanel(QWidget):
                 if hdr_list is not None:
                     for r in [r for r in hdr_list if r.trace.name == trace_name]:
                         hdr_list.remove(r)
-                # Remove the group header if the group is now empty
-                if not self._group_rows.get(old_group):
-                    hdr_item = self._group_items.pop(old_group, None)
-                    if hdr_item:
-                        row_idx = self._list.row(hdr_item)
-                        if row_idx >= 0:
-                            self._list.takeItem(row_idx)
-                    self._group_rows.pop(old_group, None)
-                    self._group_hdr_rows.pop(old_group, None)
 
             # Add to new group (mutate in place)
             if new_group:
@@ -696,7 +698,22 @@ class ChannelPanel(QWidget):
     # ── Grouping ──────────────────────────────────────────────────────────────
 
     def _full_rebuild(self):
-        """Rebuild the list widget entirely from current trace.col_group state."""
+        """Rebuild the list widget entirely from current trace.col_group state.
+
+        Empty groups (headers with no current members) are preserved in the
+        order they appeared before the rebuild, inserted at the top afterwards.
+        """
+        # Capture empty groups before clearing, in their current visual order
+        empty_groups: List[str] = []
+        seen_empty: set = set()
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item:
+                g = item.data(_GROUP_HEADER_ROLE)
+                if g is not None and not self._group_rows.get(g) and g not in seen_empty:
+                    empty_groups.append(g)
+                    seen_empty.add(g)
+
         ordered_traces = [self._rows[n].trace
                           for n in self._trace_order if n in self._rows]
         self._list.clear()
@@ -707,6 +724,64 @@ class ChannelPanel(QWidget):
         self._group_hdr_rows.clear()
         for trace in ordered_traces:
             self.add_trace(trace)
+
+        # Re-insert empty group headers at the top in their original order
+        for g in reversed(empty_groups):
+            self._group_rows[g] = []
+            self._group_hdr_rows[g] = []
+            self._insert_group_header(g, 0)
+
+    def _move_group(self, group_name: str, direction: int):
+        """Swap group_name with the adjacent group above (direction=-1) or below (+1).
+
+        Uses _trace_order reordering + _full_rebuild — safe, avoids the Qt
+        C++ lifetime issues that direct takeItem/setItemWidget swap causes.
+        Empty groups are preserved through the rebuild.
+        """
+        # Build named-group order from the current list (includes empty groups)
+        group_order: List[str] = []
+        seen: set = set()
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item is None:
+                continue
+            g = item.data(_GROUP_HEADER_ROLE)
+            if g is not None and g not in seen:
+                group_order.append(g)
+                seen.add(g)
+
+        if group_name not in group_order:
+            return
+        idx = group_order.index(group_name)
+        swap_idx = idx + direction
+        if swap_idx < 0 or swap_idx >= len(group_order):
+            return
+
+        # Swap the two groups in group_order
+        group_order[idx], group_order[swap_idx] = group_order[swap_idx], group_order[idx]
+
+        # Rebuild _trace_order to match new group order.
+        # Collect each group's trace names in their current within-group order.
+        by_group: Dict[str, List[str]] = {}
+        ungrouped: List[str] = []
+        for n in self._trace_order:
+            row = self._rows.get(n)
+            if not row:
+                continue
+            g = row.trace.col_group or ""
+            if g:
+                by_group.setdefault(g, []).append(n)
+            else:
+                ungrouped.append(n)
+
+        new_trace_order: List[str] = []
+        for g in group_order:
+            new_trace_order.extend(by_group.get(g, []))
+        new_trace_order.extend(ungrouped)
+        self._trace_order = new_trace_order
+
+        self._full_rebuild()
+        self.order_changed.emit(self._trace_order)
 
     def _open_grouping_dialog(self):
         existing = set(self._group_rows.keys())

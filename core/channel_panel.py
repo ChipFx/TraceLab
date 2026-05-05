@@ -65,8 +65,20 @@ class ChannelRow(QWidget):
         self.setCursor(Qt.CursorShape.OpenHandCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(5)
+
+        # Group membership stripe — always present; coloured when in a group,
+        # transparent otherwise.  Accent colour is updated by set_grouped()
+        # and kept in sync by the panel via set_accent_color().
+        self._group_stripe = QFrame()
+        self._group_stripe.setFixedWidth(5)
+        self._group_stripe.setFrameShape(QFrame.Shape.NoFrame)
+        self._group_stripe.setStyleSheet("background: transparent;")
+        self._stripe_color = "#1e88e5"   # default accent; overwritten by set_palette
+        layout.addWidget(self._group_stripe)
+
+        layout.addSpacing(3)   # gap between stripe and drag handle
 
         # Drag handle indicator
         grip = QLabel("⠿")
@@ -107,6 +119,8 @@ class ChannelRow(QWidget):
         btn_del.clicked.connect(lambda: self.remove_requested.emit(self.trace.name))
         layout.addWidget(btn_del)
 
+        self.set_grouped(bool(trace.col_group))
+
     def _update_color_btn(self):
         self.btn_color.setStyleSheet(
             f"background-color: {self.trace.color}; "
@@ -128,10 +142,28 @@ class ChannelRow(QWidget):
             f"color: {self.trace.color}; opacity: {alpha};")
         self.visibility_changed.emit(self.trace.name, vis)
 
+    def set_accent_color(self, color: str):
+        """Update the accent colour used for the group stripe."""
+        self._stripe_color = color or "#1e88e5"
+        if bool(self.trace.col_group):
+            self.set_grouped(True)   # repaint with new colour
+
+    def set_grouped(self, grouped: bool):
+        """Show or hide the group membership stripe in the theme accent colour.
+
+        5 px wide, same accent as buttons and highlights — immediately visible
+        on any theme.  Transparent when ungrouped; layout width is unchanged.
+        """
+        self._group_stripe.setStyleSheet(
+            f"background: {self._stripe_color};" if grouped
+            else "background: transparent;"
+        )
+
     def refresh(self):
         self.lbl.setText(self.trace.label)
         self.lbl.setStyleSheet(f"color: {self.trace.color};")
         self._update_color_btn()
+        self.set_grouped(bool(self.trace.col_group))
 
     def contextMenuEvent(self, event):
         self.context_menu_requested.emit(self.trace.name, event.globalPos())
@@ -469,6 +501,11 @@ class ChannelPanel(QWidget):
             f"background: {bg}; color: {fg}; padding: 5px 8px; "
             f"font-size: 10px; font-weight: bold; letter-spacing: 1px;")
         self._apply_button_styles()
+        # Propagate accent colour to all existing rows so their group stripes
+        # update to the new theme's accent immediately.
+        accent = pv.get("accent", "#1e88e5")
+        for row in self._rows.values():
+            row.set_accent_color(accent)
 
     def set_font_scale(self, scale: float):
         """Store scale and rebuild button styles."""
@@ -506,6 +543,7 @@ class ChannelPanel(QWidget):
             self._rows[trace.name].refresh()
             return
         row = ChannelRow(trace)
+        row.set_accent_color(self._pv.get("accent", "#1e88e5"))
         row.scroll_primaries = self._scroll_primaries
         row.visibility_changed.connect(self.visibility_changed)
         row.color_changed.connect(self.color_changed)
@@ -642,6 +680,7 @@ class ChannelPanel(QWidget):
             if not row:
                 continue
             row.trace.col_group = new_group or ""
+            row.set_grouped(bool(new_group))   # update stripe immediately on drop
 
             # Remove from old group (mutate in place so header _rows_ref stays valid).
             # Empty groups are intentionally kept — the user may drag channels
@@ -671,10 +710,12 @@ class ChannelPanel(QWidget):
 
     def _delete_group(self, group_name: str):
         """Remove the group header; orphan its channels in place (ungrouped)."""
-        # Clear col_group on every member so they float ungrouped
+        # Clear col_group on every member so they float ungrouped,
+        # and refresh the row so the indentation reverts immediately.
         for tname in list(self._group_rows.get(group_name, [])):
             if tname in self._rows:
                 self._rows[tname].trace.col_group = ""
+                self._rows[tname].refresh()
 
         # Remove the header item from the list widget
         hdr_item = self._group_items.pop(group_name, None)

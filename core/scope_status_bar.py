@@ -255,6 +255,8 @@ class ScopeStatusBar(QWidget):
         if self._svg_path:
             self._logo.set_svg(self._svg_path)
         self._timetrig.set_palette(self._pal)
+        for block in self._ch_blocks:
+            block.set_palette(self._pal)
 
     # Keep old name for compatibility
     def set_theme(self, theme_name_ignored: str):

@@ -357,6 +357,11 @@ class ThemeManager(QObject):
             color: {c.get('text','#e0e0e0')};
             gridline-color: {c.get('border','#2a2a2a')};
         }}
+        QToolTip {{
+            color: {c.get('text','#e0e0e0')};
+            background-color: {c.get('bg','#0d0d0d')};
+            border: 1px solid {c.get('border','#2a2a2a')};
+        }}
         QSplitter::handle {{ background: {c.get('border','#2a2a2a')}; }}
         QRadioButton {{ color: {c.get('text','#e0e0e0')}; }}
         QRadioButton::indicator {{

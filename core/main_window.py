@@ -1715,11 +1715,29 @@ class MainWindow(QMainWindow):
             self._settings["display_mode"] = mode
 
     def _set_theme(self, file_id: str, save: bool = True):
-        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtWidgets import QApplication, QToolTip, QStyleFactory
+        from PyQt6.QtGui import QPalette, QColor
+        _app = QApplication.instance()
+        # Force Fusion style once — QTBUG-134497 on Windows 11 means the
+        # native style ignores hover/interactive stylesheet rules.  Do this
+        # only on the first call so subsequent theme switches don't reset the
+        # application font (which setStyle() does as a side-effect).
+        if not getattr(_app, '_fusion_applied', False):
+            if _fusion := QStyleFactory.create("Fusion"):
+                _app.setStyle(_fusion)
+            _app._fusion_applied = True
         self.theme.set_theme(file_id)
         scale = self._settings.get("font_scale", 1.0)
-        QApplication.instance().setStyleSheet(
+        _app.setStyleSheet(
             self.theme.get_stylesheet(font_scale=scale))
+        # Belt-and-suspenders: set the QToolTip palette explicitly after the
+        # app stylesheet, so platform-native overrides can't revert it.
+        _tp = QPalette()
+        _tp.setColor(QPalette.ColorRole.ToolTipBase,
+                     QColor(self.theme.pv("bg")))
+        _tp.setColor(QPalette.ColorRole.ToolTipText,
+                     QColor(self.theme.pv("text")))
+        QToolTip.setPalette(_tp)
         self._channel_panel.refresh_all()
         _pv = self.theme.plotview_palette()
         self._channel_panel.set_palette(_pv)
@@ -2740,6 +2758,14 @@ class MainWindow(QMainWindow):
         app.setFont(f, "QMenuBar")
         # Re-apply stylesheet with scaled font-size
         app.setStyleSheet(self.theme.get_stylesheet(font_scale=scale))
+        from PyQt6.QtWidgets import QToolTip
+        from PyQt6.QtGui import QPalette, QColor
+        _tp = QPalette()
+        _tp.setColor(QPalette.ColorRole.ToolTipBase,
+                     QColor(self.theme.pv("bg")))
+        _tp.setColor(QPalette.ColorRole.ToolTipText,
+                     QColor(self.theme.pv("text")))
+        QToolTip.setPalette(_tp)
         # On Windows, QWindowsVistaStyle draws QMenuBar resting-state items via
         # GDI/uxtheme which ignores Qt font settings. Force Fusion style (fully
         # Qt-drawn) every scale change, then set both font and inline stylesheet

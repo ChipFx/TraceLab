@@ -2160,16 +2160,18 @@ class MainWindow(QMainWindow):
         # Get actual major tick spacing for time axis and each Y lane
         x_major_div = self._get_x_major_tick()
         y_major_divs = {}
+        display_mode = self._plot.display_mode()
         overlay_y_major_div = None
-        if self._plot.display_mode() == "overlay":
+        if display_mode == "overlay":
             overlay_y_major_div = self._get_overlay_y_major_tick()
         for trace in self._traces:
             if trace.visible:
+                if display_mode == "overlay" and overlay_y_major_div is not None:
+                    y_major_divs[trace.name] = overlay_y_major_div
+                    continue
                 lane = self._plot.get_lane(trace.name)
                 if lane:
                     y_major_divs[trace.name] = self._get_y_major_tick(lane)
-                elif overlay_y_major_div is not None:
-                    y_major_divs[trace.name] = overlay_y_major_div
 
         trig_info = getattr(self, '_last_trigger_info', "")
         sinc_active = self._plot.get_sinc_active()

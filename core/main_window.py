@@ -232,12 +232,12 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
     return lines
 
 
-def _build_segmented_csv(traces):
+def _build_segmented_csv(traces, x0: float, x1: float):
     """
-    Full-data segmented TraceLab native export.
+    Viewport-clipped segmented TraceLab native export.
     Segmented traces expand into .SEG0, .SEG1, … columns with segment
     headers; non-segmented traces export as a single column.
-    All data is written without viewport clipping.
+    The exported rows are clipped to the current visible time window.
     """
     import numpy as np
 
@@ -258,6 +258,8 @@ def _build_segmented_csv(traces):
     if ref_time is None:
         seg = traces[0].primary()
         ref_time = seg.time + traces[0].time_offset
+    ref_mask = (ref_time >= x0) & (ref_time <= x1)
+    ref_time = ref_time[ref_mask]
     col_arrays["Time"] = ref_time
     n_rows = len(ref_time)
 
@@ -275,6 +277,9 @@ def _build_segmented_csv(traces):
             # #segment_meta= and per-segment column data
             for i, seg in enumerate(trace.segments):
                 seg_data = trace.segment_processed(seg)
+                seg_time = seg.time + trace.time_offset
+                seg_mask = (seg_time >= x0) & (seg_time <= x1)
+                seg_data = seg_data[seg_mask]
                 header_comments.append(
                     f'#segment_meta={{"{trace.label}",{i},1,'
                     f'{len(seg_data)},{seg.t0_absolute:.6f},{seg.t0_relative:.10g}}}')
@@ -290,7 +295,10 @@ def _build_segmented_csv(traces):
                 f'"{vm}"}}')
         else:
             col_order.append(trace.label)
-            col_arrays[trace.label] = trace.segment_processed(trace.primary())
+            seg = trace.primary()
+            seg_time = seg.time + trace.time_offset
+            seg_mask = (seg_time >= x0) & (seg_time <= x1)
+            col_arrays[trace.label] = trace.segment_processed(seg)[seg_mask]
 
     lines = _meta_header_comments(traces) + header_comments
     lines.append(",".join(col_order))
@@ -620,10 +628,10 @@ class MainWindow(QMainWindow):
         # the status bar after _plot in the outer container so visually:
         # [plot+range_bar] [status_bar] -- but range_bar is inside _plot.
         # Better: hide range_bar from _plot and add it here after status bar.
-        self._plot._range_bar.setParent(None)  # detach from plot's layout
-        self._plot._range_bar.t0_date_requested.connect(self._show_t0_date_dialog)
+        range_bar = self._plot.take_range_bar()
+        range_bar.t0_date_requested.connect(self._show_t0_date_dialog)
         pcl.addWidget(self._scope_status)
-        pcl.addWidget(self._plot._range_bar)
+        pcl.addWidget(range_bar)
 
         # Propagate advanced-UI settings to plot and status bar
         self._plot.set_scroll_settings(self._adv_ui)
@@ -1555,11 +1563,11 @@ class MainWindow(QMainWindow):
         if not visible:
             return
 
-        any_segmented = any(t.segments is not None for t in visible)
+        any_segmented = any(len(t.segments) > 1 for t in visible)
         primary_only  = (self._export_segments_mode == "primary_only")
 
         if any_segmented and not primary_only:
-            lines = _build_segmented_csv(visible)
+            lines = _build_segmented_csv(visible, x0, x1)
         else:
             lines = _build_flat_csv(visible, x0, x1, primary_only=primary_only)
 
@@ -1589,10 +1597,7 @@ class MainWindow(QMainWindow):
 
         # Grab the plot widget (scroll/overlay + range bar excluded since
         # range_bar was re-parented out of _plot)
-        if self._plot._mode == "split":
-            plot_px = self._plot._scroll.grab()
-        else:
-            plot_px = self._plot._overlay_widget.grab()
+        plot_px = self._plot.grab_active_plot_area()
 
         # Grab the scope status bar
         status_px = self._scope_status.grab()
@@ -1925,7 +1930,7 @@ class MainWindow(QMainWindow):
     def _refresh_t0_date_indicator(self):
         """Update the RangeBar button checked state to reflect whether a date is set."""
         has_date = bool(self._get_active_t0_wall_clock())
-        self._plot._range_bar.set_date_indicator(has_date)
+        self._plot.set_range_bar_date_indicator(has_date)
 
     def _show_t0_date_dialog(self):
         """Open the themed t=0 wall-clock date editor popup."""
@@ -2156,11 +2161,11 @@ class MainWindow(QMainWindow):
         x_major_div = self._get_x_major_tick()
         y_major_divs = {}
         overlay_y_major_div = None
-        if self._plot._mode == "overlay":
+        if self._plot.display_mode() == "overlay":
             overlay_y_major_div = self._get_overlay_y_major_tick()
         for trace in self._traces:
             if trace.visible:
-                lane = self._plot._lanes.get(trace.name)
+                lane = self._plot.get_lane(trace.name)
                 if lane:
                     y_major_divs[trace.name] = self._get_y_major_tick(lane)
                 elif overlay_y_major_div is not None:
@@ -2185,12 +2190,7 @@ class MainWindow(QMainWindow):
         always agrees with what was actually drawn (no size mismatch)."""
         subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
-            if self._plot._lanes:
-                ax = next(iter(self._plot._lanes.values())).getPlotItem().getAxis('bottom')
-            elif self._plot._mode == "overlay":
-                ax = self._plot._overlay_widget.getPlotItem().getAxis('bottom')
-            else:
-                ax = None
+            ax = self._plot.get_x_axis_item()
             if ax is not None:
                 cached = getattr(ax, '_last_tick_result', None)
                 if cached:
@@ -2209,8 +2209,7 @@ class MainWindow(QMainWindow):
         return self._get_plot_item_y_major_tick(lane.getPlotItem())
 
     def _get_overlay_y_major_tick(self) -> float:
-        return self._get_plot_item_y_major_tick(
-            self._plot._overlay_widget.getPlotItem())
+        return self._get_plot_item_y_major_tick(self._plot.overlay_plot_item())
 
     def _get_plot_item_y_major_tick(self, plot_item) -> float:
         """Return cached Y-axis spacing for any plot item in the UI."""
@@ -2263,10 +2262,10 @@ class MainWindow(QMainWindow):
             return
         t0, t1 = min(t_mins), max(t_maxs)
         # Suppress per-lane redraws while setting ranges — one clean refresh at end
-        self._plot._set_lanes_suppress(True)
+        self._plot.set_split_redraw_suppressed(True)
         try:
-            if self._plot._mode == "split":
-                for lane in self._plot._lanes.values():
+            if self._plot.display_mode() == "split":
+                for lane in self._plot.lane_items():
                     pi = lane.getPlotItem()
                     pi.disableAutoRange()
                     pi.setXRange(t0, t1, padding=0.02)
@@ -2280,7 +2279,7 @@ class MainWindow(QMainWindow):
                         pad_y = (y1 - y0) * 0.05 or 0.1
                         pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
             else:
-                pi = self._plot._overlay_widget.getPlotItem()
+                pi = self._plot.overlay_plot_item()
                 pi.disableAutoRange()
                 pi.setXRange(t0, t1, padding=0.02)
                 if y_mins:
@@ -2288,7 +2287,7 @@ class MainWindow(QMainWindow):
                     pad_y = (y1 - y0) * 0.05 or 0.1
                     pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
         finally:
-            self._plot._set_lanes_suppress(False)
+            self._plot.set_split_redraw_suppressed(False)
             self._plot.refresh_all()
         self._refresh_status_bar()
 
@@ -2309,18 +2308,11 @@ class MainWindow(QMainWindow):
 
     def _on_segment_changed(self, trace_name: str):
         """Refresh the lane/visual for a trace whose primary_segment or viewmode changed."""
-        if self._plot._mode == "split":
-            lane = self._plot._lanes.get(trace_name)
-            if lane:
-                lane.refresh_curve()
-        else:
-            visual = self._plot._overlay_visuals.get(trace_name)
-            if visual:
-                visual.refresh_curve(self._plot.get_current_view_range())
+        self._plot.refresh_trace_render(trace_name)
 
     def _on_unit_changed(self, trace_name: str, *_):
         """Refresh the y-axis label when a channel's unit is changed by the user."""
-        lane = self._plot._lanes.get(trace_name)
+        lane = self._plot.get_lane(trace_name)
         if lane:
             lane.refresh_curve()   # _add_trace_curve already calls _y_axis.set_unit
         else:
@@ -2520,7 +2512,7 @@ class MainWindow(QMainWindow):
 
     def _cursor_set_t0_at_a(self):
         """Called from cursor panel Set t=0 button — shift to cursor A."""
-        t_pos = self._plot._cursors.get(0)
+        t_pos = self._plot.get_cursor_position(0)
         if t_pos is None:
             return
         self._on_trigger_set_t0(t_pos)
@@ -2560,7 +2552,7 @@ class MainWindow(QMainWindow):
         x0, x1 = self._plot.get_current_view_range()
         shifted_x0 = x0 - t_pos
         shifted_x1 = x1 - t_pos
-        cursor_positions = dict(self._plot._cursors)
+        cursor_positions = self._plot.get_cursor_positions()
 
         for trace in self._traces:
             trace.time_offset -= t_pos
@@ -2575,7 +2567,7 @@ class MainWindow(QMainWindow):
                 self._plot.set_cursor(cid, pos - t_pos)
 
         self._plot.zoom_x_range(shifted_x0, shifted_x1)
-        self._plot._update_range_bar()
+        self._plot.update_range_bar()
         # _get_active_t0_wall_clock() derives the new wall-clock anchor
         # from Segment.t0_absolute + time_offset automatically.
         self._apply_time_scale()
@@ -2593,7 +2585,7 @@ class MainWindow(QMainWindow):
             (t.time_offset for t in self._traces if t.time_offset != 0.0), 0.0)
 
         x0, x1 = self._plot.get_current_view_range()
-        cursor_positions = dict(self._plot._cursors)
+        cursor_positions = self._plot.get_cursor_positions()
 
         for trace in self._traces:
             trace.time_offset = 0.0
@@ -2608,7 +2600,7 @@ class MainWindow(QMainWindow):
                 self._plot.set_cursor(cid, pos - total_shift)
 
         self._plot.zoom_x_range(x0 - total_shift, x1 - total_shift)
-        self._plot._update_range_bar()
+        self._plot.update_range_bar()
         self._apply_time_scale()
         self._refresh_status_bar()
         if self._retrigger_mode != MODE_OFF and self._last_trigger_t_pos is not None:
@@ -4033,7 +4025,7 @@ class MainWindow(QMainWindow):
         """Add a text label to one trace at the current Cursor A position."""
         if not self._traces:
             return
-        t_pos = self._plot._cursors.get(0)
+        t_pos = self._plot.get_cursor_position(0)
         if t_pos is None:
             QMessageBox.information(self, "Add Label",
                 "Place Cursor A first, then add a label.")
@@ -4124,11 +4116,9 @@ class MainWindow(QMainWindow):
             if key == Qt.Key.Key_Right:
                 self._plot.pan_x(0.1);  return True
             if key == Qt.Key.Key_Up:
-                sb = self._plot._scroll.verticalScrollBar()
-                sb.setValue(sb.value() - 80); return True
+                self._plot.scroll_trace_list(-80); return True
             if key == Qt.Key.Key_Down:
-                sb = self._plot._scroll.verticalScrollBar()
-                sb.setValue(sb.value() + 80); return True
+                self._plot.scroll_trace_list(80); return True
 
         elif mode == "scroll_statusbar":
             if key == Qt.Key.Key_Left:

@@ -1736,9 +1736,12 @@ class MainWindow(QMainWindow):
         # Re-evaluate force_labels in case the new theme has a different value
         if hasattr(self, '_plot'):
             self._plot.apply_theme(self.theme.active_theme.to_plot_theme())
-            # apply_theme calls sync_theme_color on every trace, updating
-            # trace.color — refresh the channel panel now so labels pick up
-            # the new colours (the earlier refresh_all ran before this).
+            # apply_theme syncs colours only for visible/active traces (those
+            # with a lane or overlay visual).  Explicitly sync ALL traces so
+            # hidden and ungrouped/orphaned ones also get the new palette.
+            td = self.theme.active_theme
+            for trace in self._traces:
+                trace.sync_theme_color(td)
             self._channel_panel.refresh_all()
             self._plot.apply_lane_label_settings(
                 self._lane_label_size,

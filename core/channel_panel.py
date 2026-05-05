@@ -63,26 +63,33 @@ class ChannelRow(QWidget):
         self.scroll_primaries: bool = False  # set by ChannelPanel
         self.setFixedHeight(32)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+        # Let the QListWidgetItem's background brush show through the entire
+        # row — including behind the drag handle and label — rather than only
+        # leaking through gaps between child widgets.
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
 
-        # Group membership stripe — always present; coloured when in a group,
-        # transparent otherwise.  Accent colour is updated by set_grouped()
-        # and kept in sync by the panel via set_accent_color().
-        self._group_stripe = QFrame()
-        self._group_stripe.setFixedWidth(5)
+        # ── Group membership visuals ───────────────────────────────────────────
+        # Left rail + right rail + background tint together create a "U-channel"
+        # shape: the group header's bottom border is the lid, the two rails are
+        # the sides, and the tint fills the interior.  All three elements are
+        # transparent/neutral when the row is ungrouped.
+        self._stripe_color = "#1e88e5"   # default accent; overwritten by set_palette
+
+        self._group_stripe = QFrame()    # left rail
+        self._group_stripe.setFixedWidth(4)
         self._group_stripe.setFrameShape(QFrame.Shape.NoFrame)
         self._group_stripe.setStyleSheet("background: transparent;")
-        self._stripe_color = "#1e88e5"   # default accent; overwritten by set_palette
         layout.addWidget(self._group_stripe)
 
-        layout.addSpacing(3)   # gap between stripe and drag handle
+        layout.addSpacing(3)   # gap between left rail and drag handle
 
         # Drag handle indicator
         grip = QLabel("⠿")
-        grip.setStyleSheet("color: #555; font-size: 13px;")
+        grip.setStyleSheet("color: #555; font-size: 13px; background: transparent;")
         grip.setFixedWidth(12)
         layout.addWidget(grip)
 
@@ -100,7 +107,7 @@ class ChannelRow(QWidget):
 
         self.lbl = QLabel(trace.label)
         self.lbl.setFont(QFont("Courier New", 9))
-        self.lbl.setStyleSheet(f"color: {trace.color};")
+        self.lbl.setStyleSheet(f"color: {trace.color}; background: transparent;")
         self.lbl.setSizePolicy(QSizePolicy.Policy.Expanding,
                                 QSizePolicy.Policy.Preferred)
         self.lbl.setToolTip("Click to toggle visibility")
@@ -118,6 +125,14 @@ class ChannelRow(QWidget):
             "QPushButton:hover { color: #ff6666; }")
         btn_del.clicked.connect(lambda: self.remove_requested.emit(self.trace.name))
         layout.addWidget(btn_del)
+
+        layout.addSpacing(3)   # gap between delete button and right rail
+
+        self._group_stripe_r = QFrame()  # right rail
+        self._group_stripe_r.setFixedWidth(4)
+        self._group_stripe_r.setFrameShape(QFrame.Shape.NoFrame)
+        self._group_stripe_r.setStyleSheet("background: transparent;")
+        layout.addWidget(self._group_stripe_r)
 
         self.set_grouped(bool(trace.col_group))
 
@@ -139,7 +154,7 @@ class ChannelRow(QWidget):
         self.trace.visible = vis
         alpha = "1.0" if vis else "0.35"
         self.lbl.setStyleSheet(
-            f"color: {self.trace.color}; opacity: {alpha};")
+            f"color: {self.trace.color}; opacity: {alpha}; background: transparent;")
         self.visibility_changed.emit(self.trace.name, vis)
 
     def set_accent_color(self, color: str):
@@ -149,19 +164,24 @@ class ChannelRow(QWidget):
             self.set_grouped(True)   # repaint with new colour
 
     def set_grouped(self, grouped: bool):
-        """Show or hide the group membership stripe in the theme accent colour.
+        """Apply or remove the group membership visual: left rail, right rail,
+        and background tint.
 
-        5 px wide, same accent as buttons and highlights — immediately visible
-        on any theme.  Transparent when ungrouped; layout width is unchanged.
+        Together they create a U-channel shape framing the channel row.  The
+        group header's bottom border serves as the lid.  All three elements are
+        transparent / neutral when the row is ungrouped so layout is stable.
         """
-        self._group_stripe.setStyleSheet(
-            f"background: {self._stripe_color};" if grouped
-            else "background: transparent;"
-        )
+        rail_css = (f"background: {self._stripe_color};"
+                    if grouped else "background: transparent;")
+        self._group_stripe.setStyleSheet(rail_css)
+        self._group_stripe_r.setStyleSheet(rail_css)
+        # Row background tint is handled at the QListWidgetItem level by the
+        # panel via _update_item_backgrounds() — item.setBackground() is the
+        # only painting that Qt's list widget doesn't overpaint.
 
     def refresh(self):
         self.lbl.setText(self.trace.label)
-        self.lbl.setStyleSheet(f"color: {self.trace.color};")
+        self.lbl.setStyleSheet(f"color: {self.trace.color}; background: transparent;")
         self._update_color_btn()
         self.set_grouped(bool(self.trace.col_group))
 
@@ -243,8 +263,6 @@ class _ChannelGroupHeader(QWidget):
         self._collapsed   = False
         self._on_toggle   = on_toggle_collapse
         self.setFixedHeight(30)
-        self.setStyleSheet(
-            "background: #161630; border-bottom: 1px solid #3a3a6a;")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         hl = QHBoxLayout(self)
@@ -254,33 +272,63 @@ class _ChannelGroupHeader(QWidget):
         # Fold indicator — non-interactive, part of the click-to-fold area
         self._lbl_arrow = QLabel("▼")
         self._lbl_arrow.setFixedWidth(14)
-        self._lbl_arrow.setStyleSheet(
-            "color: #8080c0; font-size: 11px; "
-            "background: transparent; border: none;")
         hl.addWidget(self._lbl_arrow)
 
         self._lbl_name = QLabel(group_name)
         self._lbl_name.setFont(QFont("Courier New", 9))
-        self._lbl_name.setStyleSheet(
-            "color: #8080c0; font-weight: bold; "
-            "background: transparent; border: none;")
         hl.addWidget(self._lbl_name, 1)
 
-        btn_all = QPushButton("✓")
-        btn_all.setFixedSize(22, 22)
-        btn_all.setToolTip("Enable all in group  (right-click for more options)")
-        btn_all.setStyleSheet(self._BTN.format(fs=13, fg="#60a060", hfg="#90e090"))
-        btn_all.clicked.connect(
+        self._btn_all = QPushButton("✓")
+        self._btn_all.setFixedSize(22, 22)
+        self._btn_all.setToolTip("Enable all in group  (right-click for more options)")
+        self._btn_all.clicked.connect(
             lambda: [r.chk_vis.setChecked(True) for r in self._rows_ref])
-        hl.addWidget(btn_all)
+        hl.addWidget(self._btn_all)
 
-        btn_none = QPushButton("✕")
-        btn_none.setFixedSize(22, 22)
-        btn_none.setToolTip("Disable all in group  (right-click for more options)")
-        btn_none.setStyleSheet(self._BTN.format(fs=13, fg="#a06060", hfg="#e08080"))
-        btn_none.clicked.connect(
+        self._btn_none = QPushButton("✕")
+        self._btn_none.setFixedSize(22, 22)
+        self._btn_none.setToolTip("Disable all in group  (right-click for more options)")
+        self._btn_none.clicked.connect(
             lambda: [r.chk_vis.setChecked(False) for r in self._rows_ref])
-        hl.addWidget(btn_none)
+        hl.addWidget(self._btn_none)
+
+        # Let the QListWidgetItem's background brush show through — Qt's stylesheet
+        # cascade on QListWidget overrides widget-level palette painting, so the
+        # header background is handled via item.setBackground() in the panel.
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+
+        # Apply default accent (overwritten by panel's set_palette immediately)
+        self.set_accent_color("#1e88e5")
+
+    # ── Theme ─────────────────────────────────────────────────────────────────
+
+    def set_accent_color(self, accent: str, bg: str = "#0d0d0d"):
+        """Repaint the header using theme colours — no hardcoded values.
+
+        Background = theme accent colour, painted at the QListWidgetItem level
+        by the panel via item.setBackground() — that is the only layer Qt does
+        not overpaint when a QListWidget has a stylesheet active.  This widget
+        itself is transparent; text and border use the theme colours directly.
+
+        Text/arrow = theme background colour (natural contrast on the accent).
+        Bottom border = slightly darker accent (visual floor between header
+        and the first member row below it).
+        """
+        darker = QColor(accent).darker(150)
+        # Widget is transparent — item-level brush provides the background.
+        self.setStyleSheet(
+            f"background: transparent; border-bottom: 2px solid {darker.name()};")
+        # Text = theme bg colour so it contrasts with the accent background.
+        text_css = (f"color: {bg}; font-weight: bold; "
+                    "background: transparent; border: none;")
+        arrow_css = (f"color: {bg}; font-size: 11px; "
+                     "background: transparent; border: none;")
+        self._lbl_arrow.setStyleSheet(arrow_css)
+        self._lbl_name.setStyleSheet(text_css)
+        self._btn_all.setStyleSheet(
+            self._BTN.format(fs=13, fg=bg, hfg=accent))
+        self._btn_none.setStyleSheet(
+            self._BTN.format(fs=13, fg=bg, hfg=accent))
 
     # ── Click handling ────────────────────────────────────────────────────────
 
@@ -352,6 +400,7 @@ class _ChannelGroupHeader(QWidget):
 
 # ── Channel-panel sentinel for group-header list items ─────────────────────────
 _GROUP_HEADER_ROLE = Qt.ItemDataRole.UserRole + 1   # item.data(this) == group name for headers
+_GROUP_SEP_ROLE    = Qt.ItemDataRole.UserRole + 2   # thin floor bar after each group's last member
 
 
 class ChannelPanel(QWidget):
@@ -409,9 +458,11 @@ class ChannelPanel(QWidget):
         self._list.setSpacing(1)
         self._list.setStyleSheet(
             "QListWidget { background: transparent; border: none; }"
-            "QListWidget::item { padding: 0px; }"
-            "QListWidget::item:selected { background: #2a2a3a; }")
+            "QListWidget::item { padding: 0px; }")
         self._list.model().rowsMoved.connect(self._on_rows_moved)
+        # Selection highlight is applied via item.setBackground() so grouped
+        # items can suppress it (keeping the accent tint instead).
+        self._list.itemSelectionChanged.connect(self._update_item_backgrounds)
         layout.addWidget(self._list)
 
         ctrl = QHBoxLayout()
@@ -474,6 +525,9 @@ class ChannelPanel(QWidget):
         hdr_widget.delete_group_requested.connect(self._delete_group)
         hdr_widget.delete_group_and_channels_requested.connect(
             self._delete_group_and_channels)
+        hdr_widget.set_accent_color(
+            self._pv.get("accent", "#1e88e5"),
+            self._pv.get("bg", "#0d0d0d"))
         item = QListWidgetItem()
         item.setData(_GROUP_HEADER_ROLE, group)       # marks it as a group header
         item.setSizeHint(QSize(0, 30))
@@ -501,11 +555,16 @@ class ChannelPanel(QWidget):
             f"background: {bg}; color: {fg}; padding: 5px 8px; "
             f"font-size: 10px; font-weight: bold; letter-spacing: 1px;")
         self._apply_button_styles()
-        # Propagate accent colour to all existing rows so their group stripes
-        # update to the new theme's accent immediately.
+        # Propagate accent colour to all existing rows and group headers.
         accent = pv.get("accent", "#1e88e5")
         for row in self._rows.values():
             row.set_accent_color(accent)
+        for grp_item in self._group_items.values():
+            hdr = self._list.itemWidget(grp_item)
+            if hdr and hasattr(hdr, "set_accent_color"):
+                hdr.set_accent_color(accent, pv.get("bg", "#0d0d0d"))
+        self._update_item_backgrounds()
+        self._update_group_separators()
 
     def set_font_scale(self, scale: float):
         """Store scale and rebuild button styles."""
@@ -585,6 +644,9 @@ class ChannelPanel(QWidget):
 
         self._rows[trace.name] = row
         self._trace_order.append(trace.name)
+        # Defer visual update — coalesces rapid batch-add calls into one pass
+        from PyQt6.QtCore import QTimer as _QT
+        _QT.singleShot(0, self._update_group_visuals)
 
     def remove_trace(self, trace_name: str):
         if trace_name not in self._rows:
@@ -620,6 +682,7 @@ class ChannelPanel(QWidget):
         self._rows.pop(trace_name, None)
         if trace_name in self._trace_order:
             self._trace_order.remove(trace_name)
+        self._update_group_visuals()
 
     def _on_group_collapse(self, group: str, collapsed: bool):
         """Show/hide list items belonging to `group`."""
@@ -706,6 +769,7 @@ class ChannelPanel(QWidget):
                 if hdr_list is not None and row not in hdr_list:
                     hdr_list.append(row)
 
+        self._update_group_visuals()
         self.order_changed.emit(new_order)
 
     def _delete_group(self, group_name: str):
@@ -729,6 +793,7 @@ class ChannelPanel(QWidget):
         self._group_hdr_rows.pop(group_name, None)
 
         self._trace_order = self.get_ordered_names()
+        self._update_group_visuals()
         self.order_changed.emit(self._trace_order)
 
     def _delete_group_and_channels(self, group_name: str):
@@ -759,6 +824,9 @@ class ChannelPanel(QWidget):
         self._group_rows[name] = []
         self._group_hdr_rows[name] = []
         self._insert_group_header(name, 0)
+        # Paint the new header item's background immediately — without this the
+        # item has no brush set and the transparent widget makes text invisible.
+        self._update_item_backgrounds()
 
     def _set_all_visible(self, visible: bool):
         for row in self._rows.values():
@@ -810,6 +878,108 @@ class ChannelPanel(QWidget):
             self._group_rows[g] = []
             self._group_hdr_rows[g] = []
             self._insert_group_header(g, 0)
+
+        self._update_group_visuals()
+
+    def _update_group_visuals(self):
+        """Single call that refreshes both item backgrounds and floor separators."""
+        self._update_item_backgrounds()
+        self._update_group_separators()
+
+    def _update_item_backgrounds(self):
+        """Set QListWidgetItem background brush for every channel row and
+        group header.
+
+        Item-level background is painted by Qt before the item widget is
+        drawn.  The widget's own background is transparent, so the item
+        brush shows through — unlike widget-level palette/stylesheet
+        which QListWidget overpaints.
+
+        Group headers get a solid accent brush (full opacity).
+        Grouped channel rows get a lightly tinted accent brush (~20% alpha).
+        Ungrouped rows get the default (cleared) brush.
+        """
+        from PyQt6.QtGui import QBrush
+        accent = self._pv.get("accent", "#1e88e5")
+
+        # Group header: solid accent background
+        hdr_brush = QBrush(QColor(accent))
+        for grp_item in self._group_items.values():
+            grp_item.setBackground(hdr_brush)
+
+        # Channel rows: tinted accent for grouped, default for ungrouped.
+        # Selection: grouped items keep the tint (drop the grey highlight);
+        # ungrouped items show a stronger accent tint when selected — always
+        # theme-derived so it works regardless of light/dark theme.
+        c = QColor(accent)
+        c.setAlpha(32)
+        grouped_brush   = QBrush(c)
+        c_sel = QColor(accent)
+        c_sel.setAlpha(90)
+        sel_brush       = QBrush(c_sel)
+        ungrouped_brush = QBrush(Qt.GlobalColor.transparent)
+
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item is None:
+                continue
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if name is None:
+                continue                     # group header or separator item
+            row = self._rows.get(name)
+            if row and row.trace.col_group:
+                item.setBackground(grouped_brush)   # tint wins over selection
+            elif item.isSelected():
+                item.setBackground(sel_brush)
+            else:
+                item.setBackground(ungrouped_brush)
+
+    def _update_group_separators(self):
+        """Insert/refresh thin accent-coloured floor bars after each group's
+        last member.  Together with the header (lid) and the row rails (sides)
+        they form a closed box around each group — optically clear even to
+        someone unfamiliar with the UI.
+
+        Runs in one O(n) pass: remove all existing separators, scan for each
+        group's last member row, then re-insert separators bottom-to-top so
+        earlier indices stay valid.
+        """
+        from PyQt6.QtWidgets import QSizePolicy as _QSP
+        from PyQt6.QtGui import QBrush
+
+        # Remove all existing separator items
+        i = 0
+        while i < self._list.count():
+            item = self._list.item(i)
+            if item is not None and item.data(_GROUP_SEP_ROLE) is not None:
+                self._list.takeItem(i)
+            else:
+                i += 1
+
+        # Find the last list-row index belonging to each named group
+        last_row: Dict[str, int] = {}
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item is None:
+                continue
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if name is None:
+                continue
+            row = self._rows.get(name)
+            if row and row.trace.col_group:
+                last_row[row.trace.col_group] = i
+
+        # Insert separators bottom-to-top so earlier row indices stay valid
+        accent = self._pv.get("accent", "#1e88e5")
+        for grp, last in sorted(last_row.items(), key=lambda x: x[1], reverse=True):
+            sep = QListWidgetItem()
+            sep.setData(_GROUP_SEP_ROLE, grp)
+            sep.setSizeHint(QSize(0, 6))
+            sep.setFlags(Qt.ItemFlag.ItemIsEnabled)   # not draggable/selectable
+            c = QColor(accent)
+            c.setAlpha(160)
+            sep.setBackground(QBrush(c))
+            self._list.insertItem(last + 1, sep)
 
     def _move_group(self, group_name: str, direction: int):
         """Swap group_name with the adjacent group above (direction=-1) or below (+1).

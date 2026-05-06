@@ -200,7 +200,8 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
         best_idx = min(candidates, key=lambda i: abs(float(ta[i]) - t_val))
         if abs(float(ta[best_idx]) - t_val) > tol:
             return None
-        return float(ya[best_idx])
+        val = float(ya[best_idx])
+        return None if np.isnan(val) else val
 
     col_slices = []
     ref_parts = []
@@ -309,7 +310,8 @@ def _build_segmented_csv(traces, x0: float, x1: float):
         best_idx = min(candidates, key=lambda i: abs(float(ta[i]) - t_val))
         if abs(float(ta[best_idx]) - t_val) > tol:
             return None
-        return float(ya[best_idx])
+        val = float(ya[best_idx])
+        return None if np.isnan(val) else val
 
     header_comments = []
     col_order  = ["Time"]

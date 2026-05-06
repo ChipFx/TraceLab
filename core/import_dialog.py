@@ -1337,6 +1337,13 @@ class ImportDialog(QDialog):
                 else:
                     n = len(raw)
                     seg_time = (np.arange(n) - t0_sample) * _trace_dt if t0_sample > 0 else np.arange(n) * _trace_dt
+                # Drop rows where this trace has no data (NaN from empty CSV
+                # cells at timestamps belonging to other, faster traces).
+                # Keeps only the real samples so memory and rendering stay lean.
+                _finite = np.isfinite(raw)
+                if not _finite.all():
+                    raw      = raw[_finite]
+                    seg_time = seg_time[_finite]
                 _segments = [Segment(
                     data=raw,
                     time=seg_time,

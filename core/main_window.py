@@ -172,24 +172,64 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
             seg = trace.primary()
         return seg.time + trace.time_offset, trace.segment_processed(seg)
 
-    ref_ta, _ = _seg_slice(traces[0])
-    mask  = (ref_ta >= x0) & (ref_ta <= x1)
-    ref_t = ref_ta[mask]
+    def _time_tolerance(trace, ta):
+        if len(ta) >= 2:
+            dt = trace.dt if trace.dt > 0 else float(np.median(np.diff(ta)))
+            if dt > 0:
+                return dt * 0.5
+        return 1e-12
 
-    col_slices = [_seg_slice(t) for t in traces]
+    def _sample_match_tolerance(trace, ta):
+        if len(ta) >= 2:
+            dt = trace.dt if trace.dt > 0 else float(np.median(np.diff(ta)))
+            if dt > 0:
+                return max(1e-12, abs(dt) * 1e-6)
+        return 1e-12
+
+    def _value_at_export_time(ta, ya, t_val, tol):
+        if not len(ta):
+            return None
+        idx = int(np.searchsorted(ta, t_val))
+        candidates = []
+        if 0 <= idx < len(ta):
+            candidates.append(idx)
+        if idx > 0:
+            candidates.append(idx - 1)
+        if not candidates:
+            return None
+        best_idx = min(candidates, key=lambda i: abs(float(ta[i]) - t_val))
+        if abs(float(ta[best_idx]) - t_val) > tol:
+            return None
+        return float(ya[best_idx])
+
+    col_slices = []
+    ref_parts = []
+    for trace in traces:
+        ta, ya = _seg_slice(trace)
+        mask = (ta >= x0) & (ta <= x1)
+        ta = ta[mask]
+        ya = ya[mask]
+        col_slices.append((ta, ya))
+        if len(ta):
+            ref_parts.append(ta)
+
+    ref_t = np.unique(np.concatenate(ref_parts)) if ref_parts else np.array([])
 
     # Per-trace valid time window: half-sample tolerance at each end so that
     # the exact first/last sample still matches despite floating-point jitter.
     trace_lo = []
     trace_hi = []
+    trace_tol = []
     for (ta, _), trace in zip(col_slices, traces):
         if len(ta):
-            eps = trace.dt * 0.5 if trace.dt > 0 else 1e-12
+            eps = _time_tolerance(trace, ta)
             trace_lo.append(ta[0]  - eps)
             trace_hi.append(ta[-1] + eps)
+            trace_tol.append(eps)
         else:
             trace_lo.append(None)
             trace_hi.append(None)
+            trace_tol.append(1e-12)
 
     # Build data rows, recording the first and last row (1-based) that each
     # trace actually contributes a value — needed for #trace_data_range= headers.
@@ -204,15 +244,15 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
             if lo is None or t_val < lo or t_val > hi:
                 row.append("")        # empty cell — outside this trace's time range
             else:
-                if len(ta) < 2:
-                    row.append(f"{ya[0]:.10g}" if len(ya) else "")
+                value = _value_at_export_time(
+                    ta, ya, t_val, _sample_match_tolerance(trace, ta))
+                if value is None:
+                    row.append("")
                 else:
-                    idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
-                    idx = max(0, min(idx, len(ya) - 1))
-                    row.append(f"{ya[idx]:.10g}")
-                if first_row[i] is None:
-                    first_row[i] = row_idx
-                last_row[i] = row_idx
+                    row.append(f"{value:.10g}")
+                    if first_row[i] is None:
+                        first_row[i] = row_idx
+                    last_row[i] = row_idx
         data_lines.append(",".join(row))
 
     # Range headers for traces that don't cover the full exported window.
@@ -241,27 +281,40 @@ def _build_segmented_csv(traces, x0: float, x1: float):
     """
     import numpy as np
 
+    def _time_tolerance(trace, ta):
+        if len(ta) >= 2:
+            dt = trace.dt if trace.dt > 0 else float(np.median(np.diff(ta)))
+            if dt > 0:
+                return dt * 0.5
+        return 1e-12
+
+    def _sample_match_tolerance(trace, ta):
+        if len(ta) >= 2:
+            dt = trace.dt if trace.dt > 0 else float(np.median(np.diff(ta)))
+            if dt > 0:
+                return max(1e-12, abs(dt) * 1e-6)
+        return 1e-12
+
+    def _value_at_export_time(ta, ya, t_val, tol):
+        if not len(ta):
+            return None
+        idx = int(np.searchsorted(ta, t_val))
+        candidates = []
+        if 0 <= idx < len(ta):
+            candidates.append(idx)
+        if idx > 0:
+            candidates.append(idx - 1)
+        if not candidates:
+            return None
+        best_idx = min(candidates, key=lambda i: abs(float(ta[i]) - t_val))
+        if abs(float(ta[best_idx]) - t_val) > tol:
+            return None
+        return float(ya[best_idx])
+
     header_comments = []
     col_order  = ["Time"]
-    col_arrays = {}
-
-    # Reference time axis: first segment of the first segmented trace.
-    # All LeCroy-style segments share an identical trigger-relative time axis,
-    # so one copy is sufficient for the Time column.
-    # Reference time axis: first segment of the first multi-segment trace.
-    # All LeCroy-style segments share an identical trigger-relative time axis.
-    ref_time = None
-    for trace in traces:
-        if len(trace.segments) > 1:
-            ref_time = trace.segments[0].time + trace.time_offset
-            break
-    if ref_time is None:
-        seg = traces[0].primary()
-        ref_time = seg.time + traces[0].time_offset
-    ref_mask = (ref_time >= x0) & (ref_time <= x1)
-    ref_time = ref_time[ref_mask]
-    col_arrays["Time"] = ref_time
-    n_rows = len(ref_time)
+    col_slices = {}
+    ref_parts = []
 
     for trace in traces:
         if len(trace.segments) > 1:
@@ -279,12 +332,15 @@ def _build_segmented_csv(traces, x0: float, x1: float):
                 seg_data = trace.segment_processed(seg)
                 seg_time = seg.time + trace.time_offset
                 seg_mask = (seg_time >= x0) & (seg_time <= x1)
+                seg_time = seg_time[seg_mask]
                 seg_data = seg_data[seg_mask]
                 header_comments.append(
                     f'#segment_meta={{"{trace.label}",{i},1,'
                     f'{len(seg_data)},{seg.t0_absolute:.6f},{seg.t0_relative:.10g}}}')
                 col_order.append(seg_col_names[i])
-                col_arrays[seg_col_names[i]] = seg_data
+                col_slices[seg_col_names[i]] = (seg_time, seg_data, trace)
+                if len(seg_time):
+                    ref_parts.append(seg_time)
 
             # #trace_settings= header  (positional: name, primary_segment, viewmode)
             ps  = trace.primary_segment
@@ -298,18 +354,28 @@ def _build_segmented_csv(traces, x0: float, x1: float):
             seg = trace.primary()
             seg_time = seg.time + trace.time_offset
             seg_mask = (seg_time >= x0) & (seg_time <= x1)
-            col_arrays[trace.label] = trace.segment_processed(seg)[seg_mask]
+            seg_time = seg_time[seg_mask]
+            seg_data = trace.segment_processed(seg)[seg_mask]
+            col_slices[trace.label] = (seg_time, seg_data, trace)
+            if len(seg_time):
+                ref_parts.append(seg_time)
+
+    ref_time = np.unique(np.concatenate(ref_parts)) if ref_parts else np.array([])
+    n_rows = len(ref_time)
 
     lines = _meta_header_comments(traces) + header_comments
     lines.append(",".join(col_order))
     for row_idx in range(n_rows):
         row = [f"{ref_time[row_idx]:.10g}"]
         for col_name in col_order[1:]:
-            arr = col_arrays.get(col_name)
-            if arr is not None and row_idx < len(arr):
-                row.append(f"{arr[row_idx]:.10g}")
-            else:
+            col = col_slices.get(col_name)
+            if col is None:
                 row.append("")   # empty cell for shorter segments
+                continue
+            ta, ya, trace = col
+            value = _value_at_export_time(
+                ta, ya, ref_time[row_idx], _sample_match_tolerance(trace, ta))
+            row.append("" if value is None else f"{value:.10g}")
         lines.append(",".join(row))
     return lines
 

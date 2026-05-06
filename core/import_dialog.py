@@ -1237,11 +1237,18 @@ class ImportDialog(QDialog):
 
             raw = self.load_result.columns[col_name].copy()
             scaling = row.get_scaling()
+            _trace_name = row.edit_label.text().strip() or col_name
+            _trace_td = self.load_result.trace_time_arrays.get(col_name)
+            if _trace_td is None:
+                _trace_td = self.load_result.trace_time_arrays.get(_trace_name)
 
             # Build time axis with zero offset applied
             td = None
-            if time_data is not None:
+            if _trace_td is not None:
+                td = _trace_td.copy().astype(float)
+            elif time_data is not None:
                 td = time_data.copy().astype(float)
+            if td is not None:
                 if t0_sample > 0:
                     if 0 < t0_sample < len(td):
                         td = td - td[t0_sample]
@@ -1263,7 +1270,6 @@ class ImportDialog(QDialog):
                     td = td[r0_0:r1_0]
 
             col_info = self.load_result.column_infos.get(col_name)
-            _trace_name = row.edit_label.text().strip() or col_name
             _col_group = row.col_group
 
             # Per-trace sample rate from #trace_meta= takes precedence over

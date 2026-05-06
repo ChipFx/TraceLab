@@ -30,7 +30,7 @@ from PyQt6.QtGui import (
     QPainter, QColor, QFont, QPen, QBrush,
     QPainterPath, QFontMetrics, QCursor
 )
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 
 BLOCK_W = 120
 BLOCK_H = 110
@@ -140,13 +140,20 @@ class ChannelStatusBlock(QWidget):
             f"Interpolation: {mode_lbl}\n"
             f"{period_tip}\n"
             f"Click to toggle interpolation")
-        # Force tooltip to a readable dark-on-light or light-on-dark style
-        # regardless of OS/theme — Qt inherits the system palette by default,
-        # which can produce black text on near-black backgrounds in dark themes.
+        self._apply_tooltip_style()
+
+    def _apply_tooltip_style(self):
+        bg  = self._pal.get("info_bg",   "#141428")
+        fg  = self._pal.get("info_text", "#d0d0e8")
+        bdr = self._pal.get("sep",       "#1e1e38")
         self.setStyleSheet(
-            "QToolTip { color: #f0f0f0; background-color: #1e1e1e; "
-            "border: 1px solid #555555; padding: 3px 6px; }"
-        )
+            f"QToolTip {{ color: {fg}; background-color: {bg}; "
+            f"border: 1px solid {bdr}; padding: 3px 6px; }}")
+
+    def set_palette(self, palette: dict):
+        self._pal = dict(palette)
+        self._apply_tooltip_style()
+        self.update()
 
     def set_scale(self, scale: float):
         """Resize this block and trigger a repaint for the new scale."""

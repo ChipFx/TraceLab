@@ -1,0 +1,3 @@
+[submodule "pytraceview"]
+	path = pytraceview
+	url = https://github.com/ChipFX/pytraceview.git

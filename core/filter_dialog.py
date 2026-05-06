@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from typing import List, Optional
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 
 
 # ── SI frequency helpers ──────────────────────────────────────────────────────
@@ -400,7 +400,7 @@ class FilterDialog(QDialog):
         for trace in self.traces:
             if trace.name not in names:
                 continue
-            sps = trace.sample_rate
+            sps = trace.primary().sample_rate
             nyq = sps / 2.0
             try:
                 sos = None
@@ -465,11 +465,20 @@ class FilterDialog(QDialog):
                         sos = sp_signal.butter(order, wn, btype="bandstop", output='sos')
                         desc = f"BS {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
 
-                # sosfiltfilt is numerically stable at extreme frequency ratios.
-                # The old b,a form loses precision when wn << 1 (e.g. µHz-range
-                # cutoffs on a slow logger) and silently produces garbage output.
-                filtered = sp_signal.sosfiltfilt(sos, trace.processed_data)
-                trace.set_filter(filtered, desc)
+                # Apply filter independently to each segment so IIR state
+                # never bleeds across acquisition boundaries.
+                # Filtering raw data (not scaled) is correct: scaling is linear
+                # so scaling.apply(filter(x)) == filter(scaling.apply(x)).
+                results = []
+                for seg in trace.segments:
+                    if len(seg.data) < 4:
+                        results.append(None)   # too short for sosfiltfilt
+                        continue
+                    try:
+                        results.append(sp_signal.sosfiltfilt(sos, seg.data))
+                    except Exception:
+                        results.append(None)
+                trace.set_filter(results, desc)
                 modified.append(trace.name)
 
             except Exception as e:

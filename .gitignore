@@ -3,3 +3,6 @@ __pycache__
 *.csv
 *.swp
 settings.json
+CLAUDE.md
+.claude
+*.patch

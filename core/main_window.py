@@ -14,11 +14,12 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QIcon, QPixmap, QColor
 from typing import List, Optional
 
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 from core.theme_manager import ThemeManager
 from core.data_loader import load_csv
 from core.import_dialog import ImportDialog
-from core.scope_plot_widget import ScopePlotWidget, DEFAULT_LIMITS_CONFIG
+from pytraceview import TraceView
+from pytraceview.render_utils import DEFAULT_LIMITS_CONFIG
 from core.channel_panel import ChannelPanel
 from core.cursor_panel import CursorPanel
 from core.trigger_panel import TriggerPanel
@@ -27,7 +28,7 @@ from core.scope_status_bar import ScopeStatusBar
 from core.language_manager import get_language_manager
 from core.notice_manager import get_notice_manager
 from core.notice_bar_widget import NoticeBarWidget
-from core.draw_mode import (
+from pytraceview.draw_mode import (
     DEFAULT_DENSITY_PEN_MAPPING,
     DEFAULT_DRAW_MODE,
     DRAW_MODE_ADVANCED,
@@ -114,12 +115,19 @@ def _meta_header_comments(traces) -> list:
     lines = []
     for trace in traces:
         attrs = []
-        if trace.sample_rate and trace.sample_rate != 1.0:
-            attrs.append(f"sps={trace.sample_rate:.10g}")
-        if trace.dt and trace.dt != 1.0:
-            attrs.append(f"dt={trace.dt:.10g}")
-        if trace.t0_wall_clock:
-            attrs.append(f"t0_wall_clock={trace.t0_wall_clock}")
+        seg = trace.primary()
+        sps = seg.sample_rate
+        if sps and sps != 1.0:
+            attrs.append(f"sps={sps:.10g}")
+            dt = 1.0 / sps
+            attrs.append(f"dt={dt:.10g}")
+        t0_abs = seg.t0_absolute
+        if t0_abs > 0:
+            from datetime import datetime
+            try:
+                attrs.append(f"t0_wall_clock={datetime.fromtimestamp(t0_abs).isoformat()}")
+            except Exception:
+                pass
         if trace.unit and trace.unit not in ("", "raw"):
             attrs.append(f"unit={trace.unit}")
         if trace.coupling:
@@ -155,32 +163,74 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
     import numpy as np
 
     def _seg_slice(trace):
-        """Return (time_array, data_array) for the relevant segment slice."""
-        if primary_only and trace.segments:
+        """Return (time_array, data_array) for the relevant segment."""
+        if primary_only and len(trace.segments) > 1:
             si = trace.primary_segment if trace.primary_segment is not None else 0
             si = max(0, min(si, len(trace.segments) - 1))
-            s, e = trace.segments[si][0], trace.segments[si][1]
-            return trace.time_axis[s:e], trace.processed_data[s:e]
-        return trace.time_axis, trace.processed_data
+            seg = trace.segments[si]
+        else:
+            seg = trace.primary()
+        return seg.time + trace.time_offset, trace.segment_processed(seg)
 
-    ref_ta, _ = _seg_slice(traces[0])
-    mask  = (ref_ta >= x0) & (ref_ta <= x1)
-    ref_t = ref_ta[mask]
+    def _time_tolerance(trace, ta):
+        if len(ta) >= 2:
+            dt = trace.dt if trace.dt > 0 else float(np.median(np.diff(ta)))
+            if dt > 0:
+                return dt * 0.5
+        return 1e-12
 
-    col_slices = [_seg_slice(t) for t in traces]
+    def _sample_match_tolerance(trace, ta):
+        if len(ta) >= 2:
+            dt = trace.dt if trace.dt > 0 else float(np.median(np.diff(ta)))
+            if dt > 0:
+                return max(1e-12, abs(dt) * 1e-6)
+        return 1e-12
+
+    def _value_at_export_time(ta, ya, t_val, tol):
+        if not len(ta):
+            return None
+        idx = int(np.searchsorted(ta, t_val))
+        candidates = []
+        if 0 <= idx < len(ta):
+            candidates.append(idx)
+        if idx > 0:
+            candidates.append(idx - 1)
+        if not candidates:
+            return None
+        best_idx = min(candidates, key=lambda i: abs(float(ta[i]) - t_val))
+        if abs(float(ta[best_idx]) - t_val) > tol:
+            return None
+        val = float(ya[best_idx])
+        return None if np.isnan(val) else val
+
+    col_slices = []
+    ref_parts = []
+    for trace in traces:
+        ta, ya = _seg_slice(trace)
+        mask = (ta >= x0) & (ta <= x1)
+        ta = ta[mask]
+        ya = ya[mask]
+        col_slices.append((ta, ya))
+        if len(ta):
+            ref_parts.append(ta)
+
+    ref_t = np.unique(np.concatenate(ref_parts)) if ref_parts else np.array([])
 
     # Per-trace valid time window: half-sample tolerance at each end so that
     # the exact first/last sample still matches despite floating-point jitter.
     trace_lo = []
     trace_hi = []
+    trace_tol = []
     for (ta, _), trace in zip(col_slices, traces):
         if len(ta):
-            eps = trace.dt * 0.5 if trace.dt > 0 else 1e-12
+            eps = _time_tolerance(trace, ta)
             trace_lo.append(ta[0]  - eps)
             trace_hi.append(ta[-1] + eps)
+            trace_tol.append(eps)
         else:
             trace_lo.append(None)
             trace_hi.append(None)
+            trace_tol.append(1e-12)
 
     # Build data rows, recording the first and last row (1-based) that each
     # trace actually contributes a value — needed for #trace_data_range= headers.
@@ -195,15 +245,15 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
             if lo is None or t_val < lo or t_val > hi:
                 row.append("")        # empty cell — outside this trace's time range
             else:
-                if len(ta) < 2:
-                    row.append(f"{ya[0]:.10g}" if len(ya) else "")
+                value = _value_at_export_time(
+                    ta, ya, t_val, _sample_match_tolerance(trace, ta))
+                if value is None:
+                    row.append("")
                 else:
-                    idx = int(round((t_val - ta[0]) / trace.dt)) if trace.dt > 0 else 0
-                    idx = max(0, min(idx, len(ya) - 1))
-                    row.append(f"{ya[idx]:.10g}")
-                if first_row[i] is None:
-                    first_row[i] = row_idx
-                last_row[i] = row_idx
+                    row.append(f"{value:.10g}")
+                    if first_row[i] is None:
+                        first_row[i] = row_idx
+                    last_row[i] = row_idx
         data_lines.append(",".join(row))
 
     # Range headers for traces that don't cover the full exported window.
@@ -223,35 +273,53 @@ def _build_flat_csv(traces, x0: float, x1: float, primary_only: bool = False):
     return lines
 
 
-def _build_segmented_csv(traces):
+def _build_segmented_csv(traces, x0: float, x1: float):
     """
-    Full-data segmented TraceLab native export.
+    Viewport-clipped segmented TraceLab native export.
     Segmented traces expand into .SEG0, .SEG1, … columns with segment
     headers; non-segmented traces export as a single column.
-    All data is written without viewport clipping.
+    The exported rows are clipped to the current visible time window.
     """
     import numpy as np
 
+    def _time_tolerance(trace, ta):
+        if len(ta) >= 2:
+            dt = trace.dt if trace.dt > 0 else float(np.median(np.diff(ta)))
+            if dt > 0:
+                return dt * 0.5
+        return 1e-12
+
+    def _sample_match_tolerance(trace, ta):
+        if len(ta) >= 2:
+            dt = trace.dt if trace.dt > 0 else float(np.median(np.diff(ta)))
+            if dt > 0:
+                return max(1e-12, abs(dt) * 1e-6)
+        return 1e-12
+
+    def _value_at_export_time(ta, ya, t_val, tol):
+        if not len(ta):
+            return None
+        idx = int(np.searchsorted(ta, t_val))
+        candidates = []
+        if 0 <= idx < len(ta):
+            candidates.append(idx)
+        if idx > 0:
+            candidates.append(idx - 1)
+        if not candidates:
+            return None
+        best_idx = min(candidates, key=lambda i: abs(float(ta[i]) - t_val))
+        if abs(float(ta[best_idx]) - t_val) > tol:
+            return None
+        val = float(ya[best_idx])
+        return None if np.isnan(val) else val
+
     header_comments = []
     col_order  = ["Time"]
-    col_arrays = {}
-
-    # Reference time axis: first segment of the first segmented trace.
-    # All LeCroy-style segments share an identical trigger-relative time axis,
-    # so one copy is sufficient for the Time column.
-    ref_time = None
-    for trace in traces:
-        if trace.segments is not None:
-            s0, e0 = trace.segments[0][0], trace.segments[0][1]
-            ref_time = trace.time_axis[s0:e0]
-            break
-    if ref_time is None:
-        ref_time = traces[0].time_axis
-    col_arrays["Time"] = ref_time
-    n_rows = len(ref_time)
+    col_slices = {}
+    ref_parts = []
 
     for trace in traces:
-        if trace.segments is not None:
+        if len(trace.segments) > 1:
             seg_col_names = [f"{trace.label}.SEG{i}"
                              for i in range(len(trace.segments))]
 
@@ -262,13 +330,19 @@ def _build_segmented_csv(traces):
                     ",".join(f'"{n}"' for n in seg_col_names)))
 
             # #segment_meta= and per-segment column data
-            for i, (s, e, t0_abs, t0_rel) in enumerate(trace.segments):
-                seg_data = trace.processed_data[s:e]
+            for i, seg in enumerate(trace.segments):
+                seg_data = trace.segment_processed(seg)
+                seg_time = seg.time + trace.time_offset
+                seg_mask = (seg_time >= x0) & (seg_time <= x1)
+                seg_time = seg_time[seg_mask]
+                seg_data = seg_data[seg_mask]
                 header_comments.append(
                     f'#segment_meta={{"{trace.label}",{i},1,'
-                    f'{len(seg_data)},{t0_abs:.6f},{t0_rel:.10g}}}')
+                    f'{len(seg_data)},{seg.t0_absolute:.6f},{seg.t0_relative:.10g}}}')
                 col_order.append(seg_col_names[i])
-                col_arrays[seg_col_names[i]] = seg_data
+                col_slices[seg_col_names[i]] = (seg_time, seg_data, trace)
+                if len(seg_time):
+                    ref_parts.append(seg_time)
 
             # #trace_settings= header  (positional: name, primary_segment, viewmode)
             ps  = trace.primary_segment
@@ -279,18 +353,31 @@ def _build_segmented_csv(traces):
                 f'"{vm}"}}')
         else:
             col_order.append(trace.label)
-            col_arrays[trace.label] = trace.processed_data
+            seg = trace.primary()
+            seg_time = seg.time + trace.time_offset
+            seg_mask = (seg_time >= x0) & (seg_time <= x1)
+            seg_time = seg_time[seg_mask]
+            seg_data = trace.segment_processed(seg)[seg_mask]
+            col_slices[trace.label] = (seg_time, seg_data, trace)
+            if len(seg_time):
+                ref_parts.append(seg_time)
+
+    ref_time = np.unique(np.concatenate(ref_parts)) if ref_parts else np.array([])
+    n_rows = len(ref_time)
 
     lines = _meta_header_comments(traces) + header_comments
     lines.append(",".join(col_order))
     for row_idx in range(n_rows):
         row = [f"{ref_time[row_idx]:.10g}"]
         for col_name in col_order[1:]:
-            arr = col_arrays.get(col_name)
-            if arr is not None and row_idx < len(arr):
-                row.append(f"{arr[row_idx]:.10g}")
-            else:
+            col = col_slices.get(col_name)
+            if col is None:
                 row.append("")   # empty cell for shorter segments
+                continue
+            ta, ya, trace = col
+            value = _value_at_export_time(
+                ta, ya, ref_time[row_idx], _sample_match_tolerance(trace, ta))
+            row.append("" if value is None else f"{value:.10g}")
         lines.append(",".join(row))
     return lines
 
@@ -561,10 +648,13 @@ class MainWindow(QMainWindow):
                                                         DEFAULT_LIMITS_CONFIG["preset_max"])),
             }.items()},
         }
-        self._plot = ScopePlotWidget(
-            self.theme, self._y_lock_auto,
-            self._interp_mode, self._viewport_min_pts,
-            self._draw_mode, self._density_pen_mapping,
+        self._plot = TraceView(
+            theme=self.theme.active_theme.to_plot_theme(),
+            y_lock_auto=self._y_lock_auto,
+            interp_mode=self._interp_mode,
+            viewport_min_pts=self._viewport_min_pts,
+            draw_mode=self._draw_mode,
+            density_pen_mapping=self._density_pen_mapping,
             lane_label_size=self._lane_label_size,
             show_lane_labels=self._show_lane_labels,
             allow_theme_force_labels=self._allow_theme_force_labels,
@@ -606,10 +696,10 @@ class MainWindow(QMainWindow):
         # the status bar after _plot in the outer container so visually:
         # [plot+range_bar] [status_bar] -- but range_bar is inside _plot.
         # Better: hide range_bar from _plot and add it here after status bar.
-        self._plot._range_bar.setParent(None)  # detach from plot's layout
-        self._plot._range_bar.t0_date_requested.connect(self._show_t0_date_dialog)
+        range_bar = self._plot.take_range_bar()
+        range_bar.t0_date_requested.connect(self._show_t0_date_dialog)
         pcl.addWidget(self._scope_status)
-        pcl.addWidget(self._plot._range_bar)
+        pcl.addWidget(range_bar)
 
         # Propagate advanced-UI settings to plot and status bar
         self._plot.set_scroll_settings(self._adv_ui)
@@ -1445,8 +1535,7 @@ class MainWindow(QMainWindow):
                 n = len(self._traces)
                 trace.reset_color_to_theme(n)
                 trace.sync_theme_color(self.theme.active_theme)
-                if trace.original_time_zero is None and trace.time_axis is not None and len(trace.time_axis):
-                    trace.original_time_zero = float(trace.time_axis[0])
+                pass  # time_offset=0.0 (default) is the canonical unshifted state
                 self._traces.append(trace)
                 self._channel_panel.add_trace(trace)
         # Single plot rebuild for the whole batch
@@ -1542,11 +1631,11 @@ class MainWindow(QMainWindow):
         if not visible:
             return
 
-        any_segmented = any(t.segments is not None for t in visible)
+        any_segmented = any(len(t.segments) > 1 for t in visible)
         primary_only  = (self._export_segments_mode == "primary_only")
 
         if any_segmented and not primary_only:
-            lines = _build_segmented_csv(visible)
+            lines = _build_segmented_csv(visible, x0, x1)
         else:
             lines = _build_flat_csv(visible, x0, x1, primary_only=primary_only)
 
@@ -1576,10 +1665,7 @@ class MainWindow(QMainWindow):
 
         # Grab the plot widget (scroll/overlay + range bar excluded since
         # range_bar was re-parented out of _plot)
-        if self._plot._mode == "split":
-            plot_px = self._plot._scroll.grab()
-        else:
-            plot_px = self._plot._overlay_widget.grab()
+        plot_px = self._plot.grab_active_plot_area()
 
         # Grab the scope status bar
         status_px = self._scope_status.grab()
@@ -1702,11 +1788,29 @@ class MainWindow(QMainWindow):
             self._settings["display_mode"] = mode
 
     def _set_theme(self, file_id: str, save: bool = True):
-        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtWidgets import QApplication, QToolTip, QStyleFactory
+        from PyQt6.QtGui import QPalette, QColor
+        _app = QApplication.instance()
+        # Force Fusion style once — QTBUG-134497 on Windows 11 means the
+        # native style ignores hover/interactive stylesheet rules.  Do this
+        # only on the first call so subsequent theme switches don't reset the
+        # application font (which setStyle() does as a side-effect).
+        if not getattr(_app, '_fusion_applied', False):
+            if _fusion := QStyleFactory.create("Fusion"):
+                _app.setStyle(_fusion)
+            _app._fusion_applied = True
         self.theme.set_theme(file_id)
         scale = self._settings.get("font_scale", 1.0)
-        QApplication.instance().setStyleSheet(
+        _app.setStyleSheet(
             self.theme.get_stylesheet(font_scale=scale))
+        # Belt-and-suspenders: set the QToolTip palette explicitly after the
+        # app stylesheet, so platform-native overrides can't revert it.
+        _tp = QPalette()
+        _tp.setColor(QPalette.ColorRole.ToolTipBase,
+                     QColor(self.theme.pv("bg")))
+        _tp.setColor(QPalette.ColorRole.ToolTipText,
+                     QColor(self.theme.pv("text")))
+        QToolTip.setPalette(_tp)
         self._channel_panel.refresh_all()
         _pv = self.theme.plotview_palette()
         self._channel_panel.set_palette(_pv)
@@ -1722,6 +1826,14 @@ class MainWindow(QMainWindow):
             self._rebuild_theme_menu()
         # Re-evaluate force_labels in case the new theme has a different value
         if hasattr(self, '_plot'):
+            self._plot.apply_theme(self.theme.active_theme.to_plot_theme())
+            # apply_theme syncs colours only for visible/active traces (those
+            # with a lane or overlay visual).  Explicitly sync ALL traces so
+            # hidden and ungrouped/orphaned ones also get the new palette.
+            td = self.theme.active_theme
+            for trace in self._traces:
+                trace.sync_theme_color(td)
+            self._channel_panel.refresh_all()
             self._plot.apply_lane_label_settings(
                 self._lane_label_size,
                 self._show_lane_labels,
@@ -1862,16 +1974,31 @@ class MainWindow(QMainWindow):
         return {"enabled": enabled, "t0_wall_clock": t0_str, "accent_color": accent}
 
     def _get_active_t0_wall_clock(self) -> str:
-        """Return t0_wall_clock ISO string from the first trace that has one."""
+        """Return ISO-8601 string for the wall-clock moment at display t=0.
+
+        Derived from the first segment's t0_absolute (epoch of its first sample)
+        adjusted for any user-applied time_offset shift.
+        """
+        from datetime import datetime
         for trace in self._traces:
-            if getattr(trace, "t0_wall_clock", ""):
-                return trace.t0_wall_clock
+            if not trace.segments:
+                continue
+            seg = trace.segments[0]
+            if seg.t0_absolute <= 0:
+                continue
+            # t0_absolute = epoch at display t=0 (before any time_offset shift).
+            # With time_offset applied: epoch at display t=0 = t0_absolute - time_offset.
+            epoch_at_zero = seg.t0_absolute - trace.time_offset
+            try:
+                return datetime.fromtimestamp(epoch_at_zero).isoformat()
+            except Exception:
+                pass
         return ""
 
     def _refresh_t0_date_indicator(self):
         """Update the RangeBar button checked state to reflect whether a date is set."""
         has_date = bool(self._get_active_t0_wall_clock())
-        self._plot._range_bar.set_date_indicator(has_date)
+        self._plot.set_range_bar_date_indicator(has_date)
 
     def _show_t0_date_dialog(self):
         """Open the themed t=0 wall-clock date editor popup."""
@@ -1938,14 +2065,25 @@ class MainWindow(QMainWindow):
                 err_lbl.setText(str(exc))
                 return
             self._settings["import_epoch_local"] = epoch_local
+            # Parse ISO string to epoch float and store on each trace's
+            # first segment.  The effective t0_wall_clock at display t=0 is
+            # then derived dynamically by _get_active_t0_wall_clock().
+            from datetime import datetime
+            try:
+                epoch = datetime.fromisoformat(iso).timestamp()
+            except Exception:
+                epoch = 0.0
             for trace in self._traces:
-                trace.t0_wall_clock = iso
+                if trace.segments:
+                    # t0_absolute = epoch_at_display_t0 + time_offset
+                    trace.segments[0].t0_absolute = epoch + trace.time_offset
             dlg.accept()
             self._on_t0_date_applied()
 
         def _on_clear():
             for trace in self._traces:
-                trace.t0_wall_clock = ""
+                if trace.segments:
+                    trace.segments[0].t0_absolute = 0.0
             dlg.accept()
             self._on_t0_date_applied()
 
@@ -2090,16 +2228,18 @@ class MainWindow(QMainWindow):
         # Get actual major tick spacing for time axis and each Y lane
         x_major_div = self._get_x_major_tick()
         y_major_divs = {}
+        display_mode = self._plot.display_mode()
         overlay_y_major_div = None
-        if self._plot._mode == "overlay":
+        if display_mode == "overlay":
             overlay_y_major_div = self._get_overlay_y_major_tick()
         for trace in self._traces:
             if trace.visible:
-                lane = self._plot._lanes.get(trace.name)
+                if display_mode == "overlay" and overlay_y_major_div is not None:
+                    y_major_divs[trace.name] = overlay_y_major_div
+                    continue
+                lane = self._plot.get_lane(trace.name)
                 if lane:
                     y_major_divs[trace.name] = self._get_y_major_tick(lane)
-                elif overlay_y_major_div is not None:
-                    y_major_divs[trace.name] = overlay_y_major_div
 
         trig_info = getattr(self, '_last_trigger_info', "")
         sinc_active = self._plot.get_sinc_active()
@@ -2120,12 +2260,7 @@ class MainWindow(QMainWindow):
         always agrees with what was actually drawn (no size mismatch)."""
         subdiv_label = self._adv_ui.get("div_subdiv_label", False)
         try:
-            if self._plot._lanes:
-                ax = next(iter(self._plot._lanes.values())).getPlotItem().getAxis('bottom')
-            elif self._plot._mode == "overlay":
-                ax = self._plot._overlay_widget.getPlotItem().getAxis('bottom')
-            else:
-                ax = None
+            ax = self._plot.get_x_axis_item()
             if ax is not None:
                 cached = getattr(ax, '_last_tick_result', None)
                 if cached:
@@ -2144,8 +2279,7 @@ class MainWindow(QMainWindow):
         return self._get_plot_item_y_major_tick(lane.getPlotItem())
 
     def _get_overlay_y_major_tick(self) -> float:
-        return self._get_plot_item_y_major_tick(
-            self._plot._overlay_widget.getPlotItem())
+        return self._get_plot_item_y_major_tick(self._plot.overlay_plot_item())
 
     def _get_plot_item_y_major_tick(self, plot_item) -> float:
         """Return cached Y-axis spacing for any plot item in the UI."""
@@ -2180,33 +2314,34 @@ class MainWindow(QMainWindow):
         for trace in self._traces:
             if not trace.visible:
                 continue
-            t = trace.time_axis
-            y = trace.processed_data
-            if len(t):
-                t_finite = t[np.isfinite(t)]
-                if len(t_finite):
-                    t_mins.append(float(t_finite.min()))
-                    t_maxs.append(float(t_finite.max()))
-            if len(y):
-                y_finite = y[np.isfinite(y)]
-                if len(y_finite):
-                    y_mins.append(float(y_finite.min()))
-                    y_maxs.append(float(y_finite.max()))
+            for seg in trace.segments:
+                t = seg.time + trace.time_offset
+                y = trace.segment_processed(seg)
+                if len(t):
+                    t_finite = t[np.isfinite(t)]
+                    if len(t_finite):
+                        t_mins.append(float(t_finite.min()))
+                        t_maxs.append(float(t_finite.max()))
+                if len(y):
+                    y_finite = y[np.isfinite(y)]
+                    if len(y_finite):
+                        y_mins.append(float(y_finite.min()))
+                        y_maxs.append(float(y_finite.max()))
         if not t_mins:
             self._plot.zoom_full()
             return
         t0, t1 = min(t_mins), max(t_maxs)
         # Suppress per-lane redraws while setting ranges — one clean refresh at end
-        self._plot._set_lanes_suppress(True)
+        self._plot.set_split_redraw_suppressed(True)
         try:
-            if self._plot._mode == "split":
-                for lane in self._plot._lanes.values():
+            if self._plot.display_mode() == "split":
+                for lane in self._plot.lane_items():
                     pi = lane.getPlotItem()
                     pi.disableAutoRange()
                     pi.setXRange(t0, t1, padding=0.02)
                     # Per-lane Y range — avoids forcing mV-scale lanes to the
                     # global V-scale range, which would produce nonsense Y/div.
-                    y = lane.trace.processed_data
+                    y = lane.trace.segment_processed(lane.trace.primary())
                     y_finite = y[np.isfinite(y)] if len(y) else np.array([])
                     if len(y_finite):
                         y0 = float(y_finite.min())
@@ -2214,7 +2349,7 @@ class MainWindow(QMainWindow):
                         pad_y = (y1 - y0) * 0.05 or 0.1
                         pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
             else:
-                pi = self._plot._overlay_widget.getPlotItem()
+                pi = self._plot.overlay_plot_item()
                 pi.disableAutoRange()
                 pi.setXRange(t0, t1, padding=0.02)
                 if y_mins:
@@ -2222,7 +2357,7 @@ class MainWindow(QMainWindow):
                     pad_y = (y1 - y0) * 0.05 or 0.1
                     pi.setYRange(y0 - pad_y, y1 + pad_y, padding=0)
         finally:
-            self._plot._set_lanes_suppress(False)
+            self._plot.set_split_redraw_suppressed(False)
             self._plot.refresh_all()
         self._refresh_status_bar()
 
@@ -2243,18 +2378,11 @@ class MainWindow(QMainWindow):
 
     def _on_segment_changed(self, trace_name: str):
         """Refresh the lane/visual for a trace whose primary_segment or viewmode changed."""
-        if self._plot._mode == "split":
-            lane = self._plot._lanes.get(trace_name)
-            if lane:
-                lane.refresh_curve()
-        else:
-            visual = self._plot._overlay_visuals.get(trace_name)
-            if visual:
-                visual.refresh_curve(self._plot.get_current_view_range())
+        self._plot.refresh_trace_render(trace_name)
 
     def _on_unit_changed(self, trace_name: str, *_):
         """Refresh the y-axis label when a channel's unit is changed by the user."""
-        lane = self._plot._lanes.get(trace_name)
+        lane = self._plot.get_lane(trace_name)
         if lane:
             lane.refresh_curve()   # _add_trace_curve already calls _y_axis.set_unit
         else:
@@ -2367,9 +2495,9 @@ class MainWindow(QMainWindow):
                 for trace in self._traces:
                     if trace.name in name_map:
                         r = name_map[trace.name]
-                        trace.raw_data = r.raw_data
-                        trace.scaling.enabled = False
-                        trace._invalidate_cache()
+                        # Copy modified segments and scaling back from the deep-copy
+                        trace.segments = r.segments
+                        trace.scaling  = r.scaling
                 self._plot.refresh_all()
                 self._status_lbl.setText(f"Plugin '{plugin.name}' applied.")
         except Exception as e:
@@ -2454,7 +2582,7 @@ class MainWindow(QMainWindow):
 
     def _cursor_set_t0_at_a(self):
         """Called from cursor panel Set t=0 button — shift to cursor A."""
-        t_pos = self._plot._cursors.get(0)
+        t_pos = self._plot.get_cursor_position(0)
         if t_pos is None:
             return
         self._on_trigger_set_t0(t_pos)
@@ -2489,37 +2617,15 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
         self._apply_retrigger(t_pos)
 
-    @staticmethod
-    def _shift_trace_wall_clock(trace, delta_s: float):
-        """Shift trace.t0_wall_clock by *delta_s* seconds (in-place)."""
-        if not getattr(trace, "t0_wall_clock", ""):
-            return
-        from datetime import datetime, timedelta
-        try:
-            dt = datetime.fromisoformat(trace.t0_wall_clock)
-            dt = dt + timedelta(seconds=delta_s)
-            trace.t0_wall_clock = dt.isoformat()
-        except Exception:
-            pass
-
     def _on_trigger_set_t0(self, t_pos: float):
-        """Shift all trace time axes so t_pos becomes 0."""
+        """Shift all trace time axes so t_pos becomes display t=0."""
         x0, x1 = self._plot.get_current_view_range()
         shifted_x0 = x0 - t_pos
         shifted_x1 = x1 - t_pos
-        cursor_positions = dict(self._plot._cursors)
+        cursor_positions = self._plot.get_cursor_positions()
 
         for trace in self._traces:
-            # Shift the stored time data
-            if trace.time_data is not None:
-                trace.time_data = trace.time_data - t_pos
-            else:
-                # Convert to explicit time array shifted by t_pos
-                import numpy as np
-                trace.time_data = trace.time_axis - t_pos
-            trace._computed_time = None  # invalidate cache
-            # Keep wall-clock anchor in sync: new t=0 is the old t_pos instant
-            self._shift_trace_wall_clock(trace, t_pos)
+            trace.time_offset -= t_pos
 
         if self._last_trigger_t_pos is not None:
             self._last_trigger_t_pos -= t_pos
@@ -2531,10 +2637,9 @@ class MainWindow(QMainWindow):
                 self._plot.set_cursor(cid, pos - t_pos)
 
         self._plot.zoom_x_range(shifted_x0, shifted_x1)
-        self._plot._update_range_bar()
-        # Push updated wall-clock anchor into the axis and cursor panel so the
-        # real-time date display doesn't jump (the axis caches _t0_wall_clock_dt
-        # and won't pick up the new value from _refresh_status_bar alone).
+        self._plot.update_range_bar()
+        # _get_active_t0_wall_clock() derives the new wall-clock anchor
+        # from Segment.t0_absolute + time_offset automatically.
         self._apply_time_scale()
         self._refresh_status_bar()
         if self._retrigger_mode != MODE_OFF and self._last_trigger_t_pos is not None:
@@ -2542,35 +2647,18 @@ class MainWindow(QMainWindow):
         self._status_lbl.setText(f"t=0 set to trigger at {t_pos:.6g} s")
 
     def _on_restore_original_t0(self):
-        """Shift all traces back to their original time positions at import."""
-        ref = next(
-            (t for t in self._traces
-             if t.original_time_zero is not None
-             and t.time_axis is not None and len(t.time_axis)),
-            None)
-        if ref is None:
+        """Reset all traces to their original (import-time) time positions."""
+        if not any(t.time_offset != 0.0 for t in self._traces):
             return
-        # All traces shift together so compute the accumulated global shift
-        # from any one reference trace.
-        total_shift = float(ref.time_axis[0]) - ref.original_time_zero
-        if total_shift == 0.0:
-            return
+
+        total_shift = next(
+            (t.time_offset for t in self._traces if t.time_offset != 0.0), 0.0)
 
         x0, x1 = self._plot.get_current_view_range()
-        cursor_positions = dict(self._plot._cursors)
+        cursor_positions = self._plot.get_cursor_positions()
 
         for trace in self._traces:
-            if trace.time_data is not None:
-                trace.time_data = trace.time_data - total_shift
-            else:
-                trace.time_data = trace.time_axis - total_shift
-            trace._computed_time = None
-            # Wall-clock must shift by total_shift (which is negative when traces
-            # have been shifted forward), so that real times stay invariant.
-            # Note: NOT -total_shift — the time-data shift is (data - total_shift)
-            # which moves data forward by -total_shift; to compensate, t0_wall_clock
-            # moves backward by total_shift (i.e. += total_shift, which is negative).
-            self._shift_trace_wall_clock(trace, total_shift)
+            trace.time_offset = 0.0
 
         if self._last_trigger_t_pos is not None:
             self._last_trigger_t_pos -= total_shift
@@ -2582,7 +2670,7 @@ class MainWindow(QMainWindow):
                 self._plot.set_cursor(cid, pos - total_shift)
 
         self._plot.zoom_x_range(x0 - total_shift, x1 - total_shift)
-        self._plot._update_range_bar()
+        self._plot.update_range_bar()
         self._apply_time_scale()
         self._refresh_status_bar()
         if self._retrigger_mode != MODE_OFF and self._last_trigger_t_pos is not None:
@@ -2732,6 +2820,14 @@ class MainWindow(QMainWindow):
         app.setFont(f, "QMenuBar")
         # Re-apply stylesheet with scaled font-size
         app.setStyleSheet(self.theme.get_stylesheet(font_scale=scale))
+        from PyQt6.QtWidgets import QToolTip
+        from PyQt6.QtGui import QPalette, QColor
+        _tp = QPalette()
+        _tp.setColor(QPalette.ColorRole.ToolTipBase,
+                     QColor(self.theme.pv("bg")))
+        _tp.setColor(QPalette.ColorRole.ToolTipText,
+                     QColor(self.theme.pv("text")))
+        QToolTip.setPalette(_tp)
         # On Windows, QWindowsVistaStyle draws QMenuBar resting-state items via
         # GDI/uxtheme which ignores Qt font settings. Force Fusion style (fully
         # Qt-drawn) every scale change, then set both font and inline stylesheet
@@ -2821,7 +2917,8 @@ class MainWindow(QMainWindow):
               and meta.view_sample_stop is not None
               and self._traces):
             trace = self._traces[0]
-            ta = trace.time_axis
+            seg = trace.primary()
+            ta = seg.time + trace.time_offset
             n = len(ta)
             i0 = max(0, min(meta.view_sample_start, n-1))
             i1 = max(0, min(meta.view_sample_stop, n-1))
@@ -2862,10 +2959,11 @@ class MainWindow(QMainWindow):
         trace.period_estimation_attempted = True
         trace._period_timed_out           = False
 
+        seg = trace.primary()
         worker = _PeriodEstimateWorker(
             trace.name,
-            trace.processed_data.copy(),   # copy: numpy arrays are not thread-safe for writing
-            trace.dt,
+            trace.segment_processed(seg).copy(),  # copy: numpy arrays not thread-safe
+            1.0 / seg.sample_rate if seg.sample_rate > 0 else 1.0,
             self._periodicity_method,
             parent=self,
         )
@@ -3342,15 +3440,16 @@ class MainWindow(QMainWindow):
         is used so the tools operate on a single coherent window.  Falls back to
         the full arrays when segment processing is off or the trace is not segmented.
         """
-        segs = getattr(trace, 'segments', None)
-        if not self._process_segments or not segs or len(segs) < 2:
-            return trace.time_axis, trace.processed_data
+        segs = trace.segments
+        if not self._process_segments or len(segs) < 2:
+            seg = trace.primary()
+            return seg.time + trace.time_offset, trace.segment_processed(seg)
         primary = trace.primary_segment
         if primary is None:
             primary = 0
         primary = max(0, min(primary, len(segs) - 1))
-        s, e = segs[primary][0], segs[primary][1]
-        return trace.time_axis[s:e], trace.processed_data[s:e]
+        seg = segs[primary]
+        return seg.time + trace.time_offset, trace.segment_processed(seg)
 
     def _apply_retrigger(self, t_pos: float):
         """
@@ -3673,8 +3772,8 @@ class MainWindow(QMainWindow):
             Returns (abs_time, data, is_extrapolating)."""
             if trace_obj is None or len(abs_time) == 0:
                 return abs_time, data, False
-            t_lo = float(trace_obj.time_axis[0])
-            t_hi = float(trace_obj.time_axis[-1])
+            t_lo = float(trace_obj.segments[0].time[0]) + trace_obj.time_offset
+            t_hi = float(trace_obj.segments[-1].time[-1]) + trace_obj.time_offset
             is_extrap = (abs_time[0] < t_lo - 1e-12) or (abs_time[-1] > t_hi + 1e-12)
             if is_extrap and self._retrigger_extrap_mode == "clip":
                 mask = (abs_time >= t_lo) & (abs_time <= t_hi)
@@ -3685,8 +3784,8 @@ class MainWindow(QMainWindow):
 
         if mode in PERSIST_MODES:
             if result.layers and trace_obj is not None:
-                t_lo = float(trace_obj.time_axis[0])
-                t_hi = float(trace_obj.time_axis[-1])
+                t_lo = float(trace_obj.segments[0].time[0]) + trace_obj.time_offset
+                t_hi = float(trace_obj.segments[-1].time[-1]) + trace_obj.time_offset
                 is_extrap = any(
                     len(lyr.time) > 0 and (
                         (lyr.time[0]  + t_ref) < t_lo - 1e-12 or
@@ -3791,8 +3890,9 @@ class MainWindow(QMainWindow):
             return None
         level    = self._trigger_panel.edit_level.get_value(0.0)
         edge_idx = self._trigger_panel.combo_edge.currentIndex()
-        t_full = trig_trace.time_axis
-        y_full = trig_trace.processed_data
+        seg = trig_trace.primary()
+        t_full = seg.time + trig_trace.time_offset
+        y_full = trig_trace.segment_processed(seg)
         if len(t_full) < 2:
             return None
 
@@ -3995,7 +4095,7 @@ class MainWindow(QMainWindow):
         """Add a text label to one trace at the current Cursor A position."""
         if not self._traces:
             return
-        t_pos = self._plot._cursors.get(0)
+        t_pos = self._plot.get_cursor_position(0)
         if t_pos is None:
             QMessageBox.information(self, "Add Label",
                 "Place Cursor A first, then add a label.")
@@ -4086,11 +4186,9 @@ class MainWindow(QMainWindow):
             if key == Qt.Key.Key_Right:
                 self._plot.pan_x(0.1);  return True
             if key == Qt.Key.Key_Up:
-                sb = self._plot._scroll.verticalScrollBar()
-                sb.setValue(sb.value() - 80); return True
+                self._plot.scroll_trace_list(-80); return True
             if key == Qt.Key.Key_Down:
-                sb = self._plot._scroll.verticalScrollBar()
-                sb.setValue(sb.value() + 80); return True
+                self._plot.scroll_trace_list(80); return True
 
         elif mode == "scroll_statusbar":
             if key == Qt.Key.Key_Left:

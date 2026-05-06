@@ -15,7 +15,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QEvent
 from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QPixmap, QCursor
 from typing import List
 
-from core.trace_model import TraceModel
+from pytraceview.trace_model import TraceModel
 from core.channel_status_block import ChannelStatusBlock, BLOCK_H, BLOCK_W, _eng
 
 BAR_H  = BLOCK_H   # 110 px
@@ -255,6 +255,8 @@ class ScopeStatusBar(QWidget):
         if self._svg_path:
             self._logo.set_svg(self._svg_path)
         self._timetrig.set_palette(self._pal)
+        for block in self._ch_blocks:
+            block.set_palette(self._pal)
 
     # Keep old name for compatibility
     def set_theme(self, theme_name_ignored: str):

@@ -101,6 +101,25 @@ class ThemeData:
     def trace_colors(self) -> List[str]:
         return list(self._traces)
 
+    def to_plot_theme(self):
+        """Return a PlotTheme with the plotview colours for this theme.
+
+        Imported lazily so that pytraceview is not required at module level
+        (useful if theme_manager is ever loaded in a non-plotting context).
+        """
+        from pytraceview.plot_theme import PlotTheme
+        return PlotTheme(
+            background   = self.pv("scope_bg"),
+            grid         = self.pv("scope_grid"),
+            text         = self.pv("text"),
+            cursor_a     = self.pv("cursor_a"),
+            cursor_b     = self.pv("cursor_b"),
+            accent       = self.pv("accent"),
+            force_labels = self.force_labels,
+            theme_id     = self.file_id,
+            trace_colors = list(self._traces),
+        )
+
     def to_json(self) -> dict:
         return {
             "name":         self.name,
@@ -337,6 +356,11 @@ class ThemeManager(QObject):
             background-color: {c.get('bg','#0d0d0d')};
             color: {c.get('text','#e0e0e0')};
             gridline-color: {c.get('border','#2a2a2a')};
+        }}
+        QToolTip {{
+            color: {c.get('text','#e0e0e0')};
+            background-color: {c.get('bg','#0d0d0d')};
+            border: 1px solid {c.get('border','#2a2a2a')};
         }}
         QSplitter::handle {{ background: {c.get('border','#2a2a2a')}; }}
         QRadioButton {{ color: {c.get('text','#e0e0e0')}; }}

@@ -92,61 +92,11 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
 
             meta.columns.append(ci)
 
-    # ── Resolve #addgroup directives ─────────────────────────────────────
-    # Build lookup tables from the now-complete column list.
-    # name_to_idx: exact clean name → 0-based index (with case-insensitive fallback)
-    name_to_idx_exact = {ci.original_name: ci.index for ci in meta.columns}
-    name_to_idx_lower = {ci.original_name.lower(): ci.index for ci in meta.columns}
-
-    for group_name, members in csv_meta.groups:
-        resolved = []
-        for m in members:
-            if isinstance(m, int):
-                # 1-based column index → 0-based
-                idx = m - 1
-                if 0 <= idx < len(meta.columns):
-                    resolved.append(idx)
-            else:
-                # String: exact match first, then case-insensitive
-                clean_m = _clean_name(m)
-                if clean_m in name_to_idx_exact:
-                    resolved.append(name_to_idx_exact[clean_m])
-                elif clean_m.lower() in name_to_idx_lower:
-                    resolved.append(name_to_idx_lower[clean_m.lower()])
-                else:
-                    # Try matching as a logical segmented trace name.
-                    # The exporter writes the trace label (e.g. "Ampl"), but
-                    # the CSV columns are "Ampl.SEG0", "Ampl.SEG1", etc.
-                    # Resolve to all SEGn columns so the group gets stamped on
-                    # every segment column; the segment-merge step in
-                    # _apply_plugin_meta then copies it to the merged ColumnInfo.
-                    _seg_key = clean_m if clean_m in _seg_cols else next(
-                        (k for k in _seg_cols if k.lower() == clean_m.lower()),
-                        None)
-                    if _seg_key:
-                        for ref in _seg_cols[_seg_key]:
-                            if isinstance(ref, int):
-                                idx = ref - 1
-                                if 0 <= idx < len(meta.columns):
-                                    resolved.append(idx)
-                            else:
-                                ref_c = _clean_name(str(ref))
-                                if ref_c in name_to_idx_exact:
-                                    resolved.append(name_to_idx_exact[ref_c])
-                                elif ref_c.lower() in name_to_idx_lower:
-                                    resolved.append(
-                                        name_to_idx_lower[ref_c.lower()])
-                    # else: silently skip — column removed or renamed
-
-        if resolved:
-            # Also stamp the group name onto the matching ColumnInfo objects
-            # so the import dialog can use it for display.
-            for idx in resolved:
-                meta.columns[idx].group = group_name
-            meta.groups.append(ColumnGroup(group_name, resolved))
-
     # ── Resolve #segments= / #segment_meta= / #trace_settings= /
     #          #trace_meta= / #t0_wall_clock= directives ──────────────────────
+    # NOTE: #addgroup= is resolved AFTER this block so that _seg_cols is
+    # already populated when a member is a logical trace name like "Ampl"
+    # (whose columns in the CSV are "Ampl.SEG0", "Ampl.SEG1", etc.).
     # These are accumulated into dicts keyed by trace name, then assembled
     # into meta.segment_col_groups, meta.trace_segment_settings, etc.
     _seg_cols    = {}   # trace_name → list of col-name/index references
@@ -257,6 +207,63 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
             ci.sample_rate = _sps_val
         if tm.get("t0_wall_clock"):
             ci.t0_wall_clock = tm["t0_wall_clock"]
+
+    # ── Resolve #addgroup directives ─────────────────────────────────────
+    # Runs after segment parsing so _seg_cols is populated: when a member is
+    # a logical trace name ("Ampl") the code can expand it to its .SEGn columns.
+    name_to_idx_exact = {ci.original_name: ci.index for ci in meta.columns}
+    name_to_idx_lower = {ci.original_name.lower(): ci.index for ci in meta.columns}
+
+    for group_name, members in csv_meta.groups:
+        resolved = []
+        for m in members:
+            if isinstance(m, int):
+                # The member may be a quoted numeric column name (e.g. "101")
+                # that csv.reader returned as a string and _parse_addgroup_value
+                # then converted to int.  Prefer a column-name match first;
+                # only fall back to 1-based index semantics when no such column exists.
+                str_m = str(m)
+                if str_m in name_to_idx_exact:
+                    resolved.append(name_to_idx_exact[str_m])
+                elif str_m.lower() in name_to_idx_lower:
+                    resolved.append(name_to_idx_lower[str_m.lower()])
+                else:
+                    idx = m - 1
+                    if 0 <= idx < len(meta.columns):
+                        resolved.append(idx)
+            else:
+                clean_m = _clean_name(m)
+                if clean_m in name_to_idx_exact:
+                    resolved.append(name_to_idx_exact[clean_m])
+                elif clean_m.lower() in name_to_idx_lower:
+                    resolved.append(name_to_idx_lower[clean_m.lower()])
+                else:
+                    # Try matching as a logical segmented trace name.
+                    # Exporter writes the trace label ("Ampl"), but columns are
+                    # "Ampl.SEG0", "Ampl.SEG1", etc.  Expand to all SEGn columns
+                    # so the group is stamped on each; _apply_plugin_meta then
+                    # copies it to the merged ColumnInfo after segment merging.
+                    _seg_key = (clean_m if clean_m in _seg_cols
+                                else next((k for k in _seg_cols
+                                           if k.lower() == clean_m.lower()), None))
+                    if _seg_key:
+                        for ref in _seg_cols[_seg_key]:
+                            if isinstance(ref, int):
+                                idx = ref - 1
+                                if 0 <= idx < len(meta.columns):
+                                    resolved.append(idx)
+                            else:
+                                ref_c = _clean_name(str(ref))
+                                if ref_c in name_to_idx_exact:
+                                    resolved.append(name_to_idx_exact[ref_c])
+                                elif ref_c.lower() in name_to_idx_lower:
+                                    resolved.append(name_to_idx_lower[ref_c.lower()])
+                    # else: silently skip — column removed or renamed
+
+        if resolved:
+            for idx in resolved:
+                meta.columns[idx].group = group_name
+            meta.groups.append(ColumnGroup(group_name, resolved))
 
     return meta
 

@@ -232,6 +232,12 @@ class LoadResult:
         # Absent key = trace spans all rows.
         self.trace_data_ranges: dict = {}
 
+        # Per-trace time arrays reconstructed during segmented-column merges.
+        # {clean_trace_name: np.ndarray}
+        # Used when a mixed sparse export cannot be represented by one shared
+        # file-level Time column without losing alignment.
+        self.trace_time_arrays: dict = {}
+
     @property
     def column_names(self) -> List[str]:
         return list(self.columns.keys())
@@ -373,7 +379,7 @@ def load_csv(filepath: str, delimiter: str = None,
 
         # ── Apply plugin column metadata ──────────────────────────────
         if parsed_meta is not None:
-            _apply_plugin_meta(result, parsed_meta)
+            _apply_plugin_meta(result, parsed_meta, raw)
         else:
             # Original time-column detection
             meta_time = result.metadata.time_col
@@ -396,7 +402,7 @@ def load_csv(filepath: str, delimiter: str = None,
 
 # ── Plugin integration helpers ────────────────────────────────────────────────
 
-def _apply_plugin_meta(result: LoadResult, parsed_meta):
+def _apply_plugin_meta(result: LoadResult, parsed_meta, raw_columns: Optional[dict] = None):
     """
     Apply per-column metadata from a ParsedMetadata instance to result.
     Handles datetime / unix-epoch time column conversion.
@@ -484,7 +490,6 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
     seg_groups = getattr(parsed_meta, 'segment_col_groups', [])
     if seg_groups:
         time_arr  = result.columns.get(time_col_clean) if time_col_clean else None
-        time_merged = False  # merge the time column only once
 
         for group in seg_groups:
             trace_name   = _clean_name(group["trace_name"])
@@ -508,14 +513,36 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
                     continue
 
                 seg_arr = result.columns[col_name]
-                r1_clamped = min(r1, len(seg_arr))
-                seg_slice  = seg_arr[r0:r1_clamped]
-                # Drop trailing NaN rows (from empty cells in shorter segments)
-                if seg_slice.dtype.kind == "f":
-                    last_valid = len(seg_slice)
-                    while last_valid > 0 and np.isnan(seg_slice[last_valid - 1]):
-                        last_valid -= 1
-                    seg_slice = seg_slice[:last_valid]
+                seg_time_slice = None
+                raw_seg = None
+                if raw_columns is not None:
+                    raw_seg = raw_columns.get(col_name)
+
+                if raw_seg is not None:
+                    row_mask = np.array([v != "" for v in raw_seg], dtype=bool)
+                    time_source = time_arr
+                    if len(row_mask) != len(seg_arr):
+                        n_mask = min(len(row_mask), len(seg_arr))
+                        row_mask = row_mask[:n_mask]
+                        seg_arr = seg_arr[:n_mask]
+                        if time_source is not None:
+                            time_source = time_source[:n_mask]
+                    seg_slice = seg_arr[row_mask]
+                    if time_source is not None:
+                        seg_time_slice = time_source[row_mask]
+                else:
+                    r1_clamped = min(r1, len(seg_arr))
+                    seg_slice  = seg_arr[r0:r1_clamped]
+                    # Drop trailing NaN rows (from empty cells in shorter segments)
+                    if seg_slice.dtype.kind == "f":
+                        last_valid = len(seg_slice)
+                        while last_valid > 0 and np.isnan(seg_slice[last_valid - 1]):
+                            last_valid -= 1
+                        seg_slice = seg_slice[:last_valid]
+                    if time_arr is not None:
+                        t1c = min(r1, len(time_arr))
+                        t_slice = time_arr[r0:t1c]
+                        seg_time_slice = t_slice[:len(seg_slice)]
 
                 n = len(seg_slice)
                 merged_data_parts.append(seg_slice)
@@ -523,10 +550,8 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
                 flat_offset += n
 
                 # Time slice for this segment (same trigger-relative window)
-                if time_arr is not None:
-                    t1c = min(r1, len(time_arr))
-                    t_slice = time_arr[r0:t1c]
-                    merged_time_parts.append(t_slice[:n])
+                if seg_time_slice is not None:
+                    merged_time_parts.append(seg_time_slice[:n])
 
             if not merged_data_parts:
                 continue
@@ -535,6 +560,8 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
             merged_arr = np.concatenate(merged_data_parts)
             result.columns[trace_name] = merged_arr
             result.trace_segments[trace_name] = flat_segments
+            if merged_time_parts:
+                result.trace_time_arrays[trace_name] = np.concatenate(merged_time_parts)
 
             # Before removing SEGn columns, capture any group assignment that
             # was stamped on them (from #addgroup= using the logical trace name).
@@ -559,14 +586,6 @@ def _apply_plugin_meta(result: LoadResult, parsed_meta):
                     display_name=group["trace_name"],
                     group=_seg_group,
                 )
-
-            # Extend the time column once (all traces share the same time axis)
-            if not time_merged and merged_time_parts and time_col_clean:
-                merged_time = np.concatenate(merged_time_parts)
-                result.columns[time_col_clean] = merged_time
-                result.n_rows = len(merged_time)
-                time_arr     = merged_time   # keep in sync for subsequent groups
-                time_merged  = True
 
 
 def _csv_meta_from_parsed(parsed_meta) -> CsvMetadata:

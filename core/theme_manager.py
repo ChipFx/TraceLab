@@ -68,6 +68,7 @@ class ThemeData:
         self._plotview    = dict(_FALLBACK_PLOTVIEW)
         self._statusbar   = dict(_FALLBACK_STATUSBAR)
         self._traces      = list(_FALLBACK_TRACES)
+        self._maths       = []                        # empty = fall back to _traces
         self._load(path)
 
     def _load(self, path: str):
@@ -83,6 +84,8 @@ class ThemeData:
                 self._statusbar.update(data["statusbar"])
             if "trace_colors" in data and data["trace_colors"]:
                 self._traces = [str(c) for c in data["trace_colors"]]
+            if "maths_colors" in data and data["maths_colors"]:
+                self._maths = [str(c) for c in data["maths_colors"]]
         except Exception as e:
             print(f"[ThemeManager] Warning: could not load {path}: {e}")
 
@@ -100,6 +103,18 @@ class ThemeData:
     @property
     def trace_colors(self) -> List[str]:
         return list(self._traces)
+
+    def maths_color(self, index: int) -> str:
+        """Return the maths trace colour for index (wraps with modulo).
+        Falls back to trace_colors if the theme has no maths_colors defined."""
+        palette = self._maths if self._maths else self._traces
+        if not palette:
+            return "#ffffff"
+        return palette[index % len(palette)]
+
+    @property
+    def maths_colors(self) -> List[str]:
+        return list(self._maths) if self._maths else list(self._traces)
 
     def to_plot_theme(self):
         """Return a PlotTheme with the plotview colours for this theme.
@@ -121,13 +136,16 @@ class ThemeData:
         )
 
     def to_json(self) -> dict:
-        return {
+        d = {
             "name":         self.name,
             "tooltip":      self.tooltip,
             "plotview":     dict(self._plotview),
             "statusbar":    dict(self._statusbar),
             "trace_colors": list(self._traces),
         }
+        if self._maths:
+            d["maths_colors"] = list(self._maths)
+        return d
 
     def save(self):
         with open(self.path, "w", encoding="utf-8") as f:
@@ -154,6 +172,7 @@ class ThemeManager(QObject):
         self._active._plotview    = dict(_FALLBACK_PLOTVIEW)
         self._active._statusbar   = dict(_FALLBACK_STATUSBAR)
         self._active._traces      = list(_FALLBACK_TRACES)
+        self._active._maths       = []
 
         self.discover()
         self.set_theme(active_id)
@@ -236,6 +255,14 @@ class ThemeManager(QObject):
     @property
     def trace_colors(self) -> List[str]:
         return self._active.trace_colors
+
+    def maths_color(self, index: int) -> str:
+        """Get the maths trace colour for a given index (wraps with modulo)."""
+        return self._active.maths_color(index)
+
+    @property
+    def maths_colors(self) -> List[str]:
+        return self._active.maths_colors
 
     # Legacy accessor for code that still calls theme_manager.get(key)
     def get(self, key: str, default: str = "#ffffff") -> str:

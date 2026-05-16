@@ -37,8 +37,18 @@
     "ch_bg": "#001800",
     "ch_text": "#00ee44",
     "ch_bar": "#00ee44",
-    "filt_text": "#aaee00"
+    "filt_text": "#aaee00",
+    "badge_maths_bg": "#336600",
+    "badge_maths_fg": "#ccffaa",
+    "badge_filt_bg":  "#224400",
+    "badge_filt_fg":  "#aaffcc"
   },
+  "maths_colors": [
+    "#AAFFEE",
+    "#FFFF80",
+    "#88FFCC",
+    "#DDFF88"
+  ],
   "trace_colors": [
     "#00ee44",
     "#00cc33",

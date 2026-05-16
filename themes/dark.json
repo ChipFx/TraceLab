@@ -32,8 +32,18 @@
     "badge_sinc_bg": "#cc2222",
     "badge_sinc_fg": "#ffffff",
     "badge_cub_bg":  "#8822cc",
-    "badge_cub_fg":  "#ffffff"
+    "badge_cub_fg":  "#ffffff",
+    "badge_maths_bg": "#886600",
+    "badge_maths_fg": "#ffffff",
+    "badge_filt_bg":  "#1a6622",
+    "badge_filt_fg":  "#aaffaa"
   },
+  "maths_colors": [
+    "#FF6B6B",
+    "#C778FF",
+    "#00FFCC",
+    "#FFE566"
+  ],
   "trace_colors": [
     "#F0C040",
     "#40C0F0",

@@ -401,6 +401,7 @@ class MainWindow(QMainWindow):
 
         self.theme = ThemeManager()
         self._traces: List[TraceModel] = []
+        self._maths_recipes: dict = {}   # trace_name → MathsRecipe
         self._plugins = PluginManager()
         self._plugins.discover()
         self._settings: dict = self._load_settings_dict()
@@ -691,6 +692,8 @@ class MainWindow(QMainWindow):
             self._on_status_bar_toggle_interp)
         self._scope_status.trace_context_menu_requested.connect(
             self._show_channel_context_menu)
+        self._scope_status.maths_edit_requested.connect(
+            self._on_maths_edit_requested)
         # Insert status bar BEFORE the range bar — achieved by the fact
         # that _plot already has its range_bar at its bottom. We just add
         # the status bar after _plot in the outer container so visually:
@@ -940,6 +943,10 @@ class MainWindow(QMainWindow):
         a.triggered.connect(self._show_filter)
         a = analysis_menu.addAction("Clear All Filters")
         a.triggered.connect(self._clear_all_filters)
+        analysis_menu.addSeparator()
+        a = analysis_menu.addAction("Maths...")
+        a.setShortcut(QKeySequence("Ctrl+M"))
+        a.triggered.connect(self._show_apply_maths)
         analysis_menu.addSeparator()
         interp_trace_menu = analysis_menu.addMenu("Interpolation per Channel")
         self._per_trace_interp_menu = interp_trace_menu
@@ -1388,6 +1395,7 @@ class MainWindow(QMainWindow):
 
         add("FFT", self._show_fft)
         add("Filter", self._show_filter)
+        add("Maths", self._show_apply_maths)
         tb.addSeparator()
         add("Screenshot", self._save_screenshot)
 
@@ -1586,6 +1594,7 @@ class MainWindow(QMainWindow):
 
     def _remove_trace(self, trace_name: str):
         self._traces = [t for t in self._traces if t.name != trace_name]
+        self._maths_recipes.pop(trace_name, None)
         self._channel_panel.remove_trace(trace_name)
         self._plot.remove_trace(trace_name)
         self._refresh_trigger_channels()
@@ -1606,6 +1615,7 @@ class MainWindow(QMainWindow):
         for t in list(self._traces):
             self._channel_panel.remove_trace(t.name)
         self._traces.clear()
+        self._maths_recipes.clear()
         self._plot.clear_all()          # also clears persist/retrigger state in plot
         self._last_retrigger_results.clear()
         self._last_trigger_t_pos  = None
@@ -2250,6 +2260,7 @@ class MainWindow(QMainWindow):
                                        self._interp_mode)
                       for t in self._traces}
         self._scope_status.set_trace_interp_modes(interp_map)
+        self._scope_status.set_maths_recipes(self._maths_recipes)
         self._scope_status.update(
             self._traces, x_major_div, trig_info, y_major_divs,
             sinc_active, settings=self._settings)
@@ -2415,12 +2426,122 @@ class MainWindow(QMainWindow):
     def _clear_all_filters(self):
         for trace in self._traces:
             trace.clear_filter()
+        self._reevaluate_maths_traces()
         self._plot.refresh_all()
         self._status_lbl.setText("All filters cleared.")
 
     def _on_filters_applied(self, names):
+        self._reevaluate_maths_traces()
         self._plot.refresh_all()
         self._status_lbl.setText(f"Filter applied: {', '.join(names)}")
+
+    # ── Maths ──────────────────────────────────────────────────────────
+
+    def _next_maths_name(self) -> str:
+        """Return the next available "Maths_NNN" name."""
+        existing = {t.name for t in self._traces}
+        i = 0
+        while True:
+            name = f"Maths_{i:03d}"
+            if name not in existing:
+                return name
+            i += 1
+
+    def _show_apply_maths(self):
+        if not self._traces:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, self.tr("Apply Maths"),
+                self.tr("Load at least one trace before applying maths."))
+            return
+        from core.apply_maths_dialog import ApplyMathsDialog
+        dlg = ApplyMathsDialog(
+            traces           = self._traces,
+            existing_recipes = self._maths_recipes,
+            next_name        = self._next_maths_name(),
+            parent           = self,
+        )
+        dlg.maths_applied.connect(self._on_maths_applied)
+        dlg.exec()
+
+    def _on_maths_edit_requested(self, trace_name: str):
+        """Re-open the maths dialog to edit an existing maths trace."""
+        recipe = self._maths_recipes.get(trace_name)
+        if recipe is None:
+            return
+        from core.apply_maths_dialog import ApplyMathsDialog
+        dlg = ApplyMathsDialog(
+            traces           = self._traces,
+            existing_recipes = self._maths_recipes,
+            next_name        = trace_name,
+            existing_recipe  = recipe,
+            parent           = self,
+        )
+        dlg.maths_applied.connect(self._on_maths_applied)
+        dlg.exec()
+
+    def _on_maths_applied(self, recipe, result_trace):
+        """Receive a freshly-evaluated maths trace from the dialog."""
+        from pytraceview.maths_engine import MathsRecipe
+        # Assign maths colour from theme
+        maths_count = sum(
+            1 for n in self._maths_recipes if n != result_trace.name)
+        result_trace.set_user_color(self.theme.maths_color(maths_count))
+
+        self._maths_recipes[result_trace.name] = recipe
+
+        existing_names = [t.name for t in self._traces]
+        if result_trace.name in existing_names:
+            # Update in-place (edit mode)
+            idx = existing_names.index(result_trace.name)
+            old = self._traces[idx]
+            result_trace.color             = old.color
+            result_trace.use_theme_color   = old.use_theme_color
+            result_trace.theme_color_index = old.theme_color_index
+            self._traces[idx] = result_trace
+            self._channel_panel.refresh_all()
+            self._plot.add_trace(result_trace)
+        else:
+            self._traces.append(result_trace)
+            self._channel_panel.add_trace(result_trace)
+            self._plot.add_trace(result_trace)
+
+        self._refresh_trigger_channels()
+        self._refresh_status_bar()
+        self._cursor_panel.set_trace_order(
+            self._channel_panel.get_ordered_names())
+        self._status_lbl.setText(
+            self.tr(f"Maths trace created: {result_trace.label}"))
+
+    def _reevaluate_maths_traces(self):
+        """Re-run all maths recipes whose inputs use post-filter data.
+
+        Called after filters are applied or cleared so maths traces stay
+        consistent with the current filtered state of their source signals.
+        """
+        if not self._maths_recipes:
+            return
+        from pytraceview.maths_engine import evaluate_maths, MathsEvalError
+        traces_by_name = {t.name: t for t in self._traces}
+        for tname, recipe in list(self._maths_recipes.items()):
+            # Only re-evaluate if any input is in "filtered" mode
+            if not any(v == "filtered" for v in recipe.filter_mode.values()):
+                continue
+            try:
+                new_trace = evaluate_maths(recipe, traces_by_name)
+            except MathsEvalError:
+                continue   # source missing or broken — leave old data in place
+
+            existing_names = [t.name for t in self._traces]
+            if tname in existing_names:
+                idx = existing_names.index(tname)
+                old = self._traces[idx]
+                new_trace.color             = old.color
+                new_trace.use_theme_color   = old.use_theme_color
+                new_trace.theme_color_index = old.theme_color_index
+                new_trace.visible           = old.visible
+                self._traces[idx] = new_trace
+                self._plot.add_trace(new_trace)
 
     # ── Plugins ───────────────────────────────────────────────────────
 

@@ -1,12 +1,17 @@
 """
 core/filter_dialog.py
-Non-destructive filters: raw_data is never modified.
-Filtered result is stored in trace._filter_data; clearing restores original.
+UI for configuring a single filter recipe and pushing it onto one or more
+traces' filter stacks.
+
+This module is UI-only: signal-processing lives in core/filter_engine.py.
+On Apply, the dialog emits filter_recipe_added(recipe, trace_names);
+main_window receives, appends to each trace's stack, and triggers a
+re-apply + downstream re-evaluation.
+
+"Clear Filters on Selected" emits clear_requested(trace_names) so main_window
+can pop the affected stacks and refresh.
 """
 
-import re
-import numpy as np
-from scipy import signal as sp_signal
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QDoubleSpinBox, QLineEdit, QPushButton,
@@ -14,61 +19,16 @@ from PyQt6.QtWidgets import (
     QGroupBox, QGridLayout, QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from typing import List, Optional
+from typing import List
 from pytraceview.trace_model import TraceModel
-
-
-# ── SI frequency helpers ──────────────────────────────────────────────────────
-
-_SI_PREFIXES = {
-    'T': 1e12, 'G': 1e9, 'M': 1e6,
-    'k': 1e3,  'K': 1e3,
-    '':  1.0,
-    'm': 1e-3,
-    'u': 1e-6, 'µ': 1e-6, 'μ': 1e-6,
-    'n': 1e-9, 'p': 1e-12, 'f': 1e-15,
-}
-
-_SI_PARSE_RE = re.compile(
-    r'^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)'
-    r'\s*(T|G|M|k|K|m|u|µ|μ|n|p|f)?'
-    r'\s*(?:[Hh][Zz])?\s*$'
+from core.filter_engine import (
+    FilterRecipe, parse_si_freq, format_si_freq, describe_recipe,
 )
 
 
-def _parse_si_freq(text: str) -> Optional[float]:
-    """Parse a frequency string with optional SI prefix / Hz suffix.
-    Returns Hz as float, or None if unparseable.
-    Accepts: '200u'  '200uHz'  '1.5kHz'  '0.0002'  '2M'  '500nHz'  '1.2THz'
-    """
-    text = text.strip()
-    if not text:
-        return None
-    m = _SI_PARSE_RE.match(text)
-    if m:
-        value = float(m.group(1))
-        prefix = m.group(2) or ''
-        return value * _SI_PREFIXES.get(prefix, 1.0)
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _format_si_freq(hz: float) -> str:
-    """Format a frequency in Hz using the most readable SI prefix."""
-    if hz <= 0:
-        return f"{hz:g} Hz"
-    for scale, prefix in [
-        (1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'k'),
-        (1.0,  ''),  (1e-3, 'm'), (1e-6, 'µ'), (1e-9, 'n'),
-        (1e-12, 'p'), (1e-15, 'f'),
-    ]:
-        if hz >= scale * 0.9995:
-            val = hz / scale
-            unit = f"{prefix}Hz" if prefix else "Hz"
-            return f"{val:.4g} {unit}"
-    return f"{hz:.4g} Hz"
+# Local thin aliases so the rest of the file (UI helpers) keeps the old names
+_parse_si_freq  = parse_si_freq
+_format_si_freq = format_si_freq
 
 
 def _format_duration(seconds: float) -> str:
@@ -93,17 +53,32 @@ _FAMILY = ["butterworth", "bessel"]
 
 
 class FilterDialog(QDialog):
-    filters_applied = pyqtSignal(list)
+    # main_window appends `recipe` to each of `trace_names`' stacks then
+    # re-applies and re-evaluates downstream maths.
+    filter_recipe_added = pyqtSignal(object, list)   # (FilterRecipe, [trace_names])
 
-    def __init__(self, traces: List[TraceModel], parent=None):
+    # main_window pops the entire stack for each name and refreshes.
+    clear_requested     = pyqtSignal(list)            # [trace_names]
+
+    # Used by EditFilterStackDialog when it asks for one filter targeted
+    # at a single trace.  When set, "Apply" emits and closes immediately;
+    # the trace-selection list is hidden.
+    def __init__(self, traces: List[TraceModel], parent=None,
+                 single_trace_name: str = ""):
         super().__init__(parent)
-        self.traces = [t for t in traces if t.visible]
+        self.traces = [t for t in traces if t.visible or t.name == single_trace_name]
+        self._single_trace = single_trace_name
         self.setWindowTitle(self.tr("Signal Filters"))
         self.resize(560, 480)
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+
+        # In single-trace mode (called from EditFilterStackDialog), narrow the
+        # working list to just that trace and skip the multi-select UI noise.
+        if self._single_trace:
+            self.traces = [t for t in self.traces if t.name == self._single_trace]
 
         # Active filter overview
         active = [t for t in self.traces if t.has_filter]
@@ -366,23 +341,18 @@ class FilterDialog(QDialog):
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def _clear_filters(self):
-        names = self._selected_names()
-        cleared = []
-        for trace in self.traces:
-            if trace.name in names and trace.has_filter:
-                trace.clear_filter()
-                cleared.append(trace.name)
-        if cleared:
-            self.filters_applied.emit(cleared)
+        """Clear the filter stack on every selected trace.  Main_window
+        handles the actual removal and re-evaluation."""
+        names = list(self._selected_names())
+        if names:
+            self.clear_requested.emit(names)
             self.accept()
 
-    def _apply(self):
-        names = self._selected_names()
+    def _build_recipe(self) -> "FilterRecipe | None":
+        """Read the UI and return a FilterRecipe, or None on invalid input
+        (in which case a message box was already shown)."""
         ftype = _FTYPE[self.combo_type.currentIndex()]
         is_iir_simple = ftype in ("notch", "peak", "comb")
-        order = int(self.spin_order.value())
-        family = _FAMILY[self.combo_family.currentIndex()]
-        Q = self.spin_q.value()
 
         fc1 = _parse_si_freq(self.edit_fc1.text())
         fc2 = _parse_si_freq(self.edit_fc2.text())
@@ -390,101 +360,42 @@ class FilterDialog(QDialog):
         if fc1 is None or fc1 <= 0:
             QMessageBox.warning(self, self.tr("Invalid Input"),
                 self.tr("Please enter a valid cutoff frequency."))
-            return
+            return None
         if ftype in ("bandpass", "bandstop") and (fc2 is None or fc2 <= fc1):
             QMessageBox.warning(self, self.tr("Invalid Input"),
                 self.tr("High cutoff must be greater than low cutoff."))
+            return None
+
+        if is_iir_simple:
+            # notch / peak / comb: center freq + Q only
+            params = {"center_hz": fc1, "q": float(self.spin_q.value())}
+        elif ftype in ("bandpass", "bandstop"):
+            params = {
+                "low_hz":  fc1,
+                "high_hz": fc2,
+                "order":   int(self.spin_order.value()),
+                "family":  _FAMILY[self.combo_family.currentIndex()],
+            }
+        else:   # lowpass, highpass
+            params = {
+                "cutoff_hz": fc1,
+                "order":     int(self.spin_order.value()),
+                "family":    _FAMILY[self.combo_family.currentIndex()],
+            }
+        recipe = FilterRecipe(filter_type=ftype, params=params)
+        recipe.ensure_description()
+        return recipe
+
+    def _apply(self):
+        names = list(self._selected_names())
+        if not names:
+            QMessageBox.warning(self, self.tr("No Traces Selected"),
+                self.tr("Select one or more traces to filter."))
             return
 
-        modified = []
-        for trace in self.traces:
-            if trace.name not in names:
-                continue
-            sps = trace.primary().sample_rate
-            nyq = sps / 2.0
-            try:
-                sos = None
+        recipe = self._build_recipe()
+        if recipe is None:
+            return
 
-                if is_iir_simple:
-                    # iirnotch / iirpeak / iircomb return b, a directly.
-                    # tf2sos / zpk2sos give the numerically stable SOS form.
-                    if ftype == "notch":
-                        b, a = sp_signal.iirnotch(fc1, Q, fs=sps)
-                        sos = sp_signal.tf2sos(b, a)
-                        desc = f"Notch {_format_si_freq(fc1)} Q{Q:.3g}"
-                    elif ftype == "peak":
-                        b, a = sp_signal.iirpeak(fc1, Q, fs=sps)
-                        sos = sp_signal.tf2sos(b, a)
-                        desc = f"Peak {_format_si_freq(fc1)} Q{Q:.3g}"
-                    else:  # comb
-                        # iircomb is higher-order; zpk route avoids tf2sos precision loss.
-                        b, a = sp_signal.iircomb(fc1, Q, ftype='notch', fs=sps)
-                        z, p, k = sp_signal.tf2zpk(b, a)
-                        sos = sp_signal.zpk2sos(z, p, k)
-                        desc = f"Comb {_format_si_freq(fc1)} Q{Q:.3g}"
-
-                elif family == "bessel":
-                    # Bessel with norm='mag' gives a consistent −3 dB cutoff
-                    # at the specified frequency, matching Butterworth convention.
-                    if ftype == "lowpass":
-                        wn = min(fc1 / nyq, 0.9999)
-                        sos = sp_signal.bessel(order, wn, btype="low",
-                                               output='sos', norm='mag')
-                        desc = f"BsLP {_format_si_freq(fc1)}"
-                    elif ftype == "highpass":
-                        wn = min(fc1 / nyq, 0.9999)
-                        sos = sp_signal.bessel(order, wn, btype="high",
-                                               output='sos', norm='mag')
-                        desc = f"BsHP {_format_si_freq(fc1)}"
-                    elif ftype == "bandpass":
-                        wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
-                        sos = sp_signal.bessel(order, wn, btype="band",
-                                               output='sos', norm='mag')
-                        desc = f"BsBP {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
-                    else:  # bandstop
-                        wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
-                        sos = sp_signal.bessel(order, wn, btype="bandstop",
-                                               output='sos', norm='mag')
-                        desc = f"BsBS {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
-
-                else:  # butterworth
-                    if ftype == "lowpass":
-                        wn = min(fc1 / nyq, 0.9999)
-                        sos = sp_signal.butter(order, wn, btype="low", output='sos')
-                        desc = f"LP {_format_si_freq(fc1)}"
-                    elif ftype == "highpass":
-                        wn = min(fc1 / nyq, 0.9999)
-                        sos = sp_signal.butter(order, wn, btype="high", output='sos')
-                        desc = f"HP {_format_si_freq(fc1)}"
-                    elif ftype == "bandpass":
-                        wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
-                        sos = sp_signal.butter(order, wn, btype="band", output='sos')
-                        desc = f"BP {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
-                    else:  # bandstop
-                        wn = [min(fc1 / nyq, 0.499), min(fc2 / nyq, 0.9999)]
-                        sos = sp_signal.butter(order, wn, btype="bandstop", output='sos')
-                        desc = f"BS {_format_si_freq(fc1)}–{_format_si_freq(fc2)}"
-
-                # Apply filter independently to each segment so IIR state
-                # never bleeds across acquisition boundaries.
-                # Filtering raw data (not scaled) is correct: scaling is linear
-                # so scaling.apply(filter(x)) == filter(scaling.apply(x)).
-                results = []
-                for seg in trace.segments:
-                    if len(seg.data) < 4:
-                        results.append(None)   # too short for sosfiltfilt
-                        continue
-                    try:
-                        results.append(sp_signal.sosfiltfilt(sos, seg.data))
-                    except Exception:
-                        results.append(None)
-                trace.set_filter(results, desc)
-                modified.append(trace.name)
-
-            except Exception as e:
-                QMessageBox.warning(self, self.tr("Filter Error"),
-                    f"Failed to filter {trace.label}: {e}")
-
-        if modified:
-            self.filters_applied.emit(modified)
-            self.accept()
+        self.filter_recipe_added.emit(recipe, names)
+        self.accept()

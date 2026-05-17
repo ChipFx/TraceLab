@@ -17,6 +17,8 @@
     "statusbar_bg": "#d8d8d8",
     "scope_bg": "#ffffff",
     "scope_grid": "#ccddcc",
+    "maths_id_badge_bg": "#886600",
+    "maths_id_badge_fg": "#ffffff",
     "interp_sinc_color": "#cc0000",
     "interp_cub_color":  "#8800cc"
   },
@@ -34,8 +36,18 @@
     "badge_sinc_bg": "#cc2222",
     "badge_sinc_fg": "#ffffff",
     "badge_cub_bg":  "#7711bb",
-    "badge_cub_fg":  "#ffffff"
+    "badge_cub_fg":  "#ffffff",
+    "badge_maths_bg": "#886600",
+    "badge_maths_fg": "#ffffff",
+    "badge_filt_bg":  "#115522",
+    "badge_filt_fg":  "#ffffff"
   },
+  "maths_colors": [
+    "#CC2200",
+    "#770088",
+    "#006644",
+    "#886600"
+  ],
   "trace_colors": [
     "#C07000",
     "#0055CC",

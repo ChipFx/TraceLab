@@ -18,7 +18,9 @@
     "scope_bg": "#000800",
     "scope_grid": "#003300",
     "interp_sinc_color": "#aaff66",
-    "interp_cub_color":  "#00ffcc"
+    "interp_cub_color":  "#00ffcc",
+    "maths_id_badge_bg": "#336600",
+    "maths_id_badge_fg": "#ccffaa"
   },
   "statusbar": {
     "bar_bg": "#000800",
@@ -37,8 +39,18 @@
     "ch_bg": "#001800",
     "ch_text": "#00ee44",
     "ch_bar": "#00ee44",
-    "filt_text": "#aaee00"
+    "filt_text": "#aaee00",
+    "badge_maths_bg": "#336600",
+    "badge_maths_fg": "#ccffaa",
+    "badge_filt_bg":  "#224400",
+    "badge_filt_fg":  "#aaffcc"
   },
+  "maths_colors": [
+    "#AAFFEE",
+    "#FFFF80",
+    "#88FFCC",
+    "#DDFF88"
+  ],
   "trace_colors": [
     "#00ee44",
     "#00cc33",

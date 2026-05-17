@@ -18,7 +18,14 @@ from pytraceview.channel_panel import ChannelRow, _ChannelGroupHeader  # noqa: F
 
 
 class ChannelPanel(_ChannelPanelBase):
-    """TraceLab ChannelPanel: base panel + "All Lin / All Cub / All Sinc" row."""
+    """TraceLab ChannelPanel: base panel + "All Lin / All Cub / All Sinc" row.
+
+    Maths IDs are enabled by default so the channel panel always shows the
+    letter-badge column and allows assigning/clearing IDs via click.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent, enable_maths_ids=True)
 
     def _setup_extra_button_rows(self, layout: QVBoxLayout):
         """Add the interpolation button row above the group controls."""

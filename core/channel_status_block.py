@@ -135,10 +135,21 @@ class ChannelStatusBlock(QWidget):
             period_tip = "Period: Not detected"
         else:
             period_tip = "Period: Not estimated"
+        # Filter stack line: full chain if known, else compact desc, else none.
+        filter_full = getattr(trace, '_filter_stack_summary', '') or ''
+        filter_one  = getattr(trace, '_filter_desc',          '') or ''
+        if filter_full and " > " in filter_full:
+            filter_line = f"\nFilter stack: {filter_full}"
+        elif filter_full or filter_one:
+            filter_line = f"\nFilter: {filter_full or filter_one}"
+        else:
+            filter_line = ""
+
         self.setToolTip(
             f"Channel: {trace.label}\n"
             f"Interpolation: {mode_lbl}\n"
-            f"{period_tip}\n"
+            f"{period_tip}"
+            f"{filter_line}\n"
             f"Click to toggle interpolation")
         self._apply_tooltip_style()
 

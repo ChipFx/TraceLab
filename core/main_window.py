@@ -401,6 +401,8 @@ class MainWindow(QMainWindow):
 
         self.theme = ThemeManager()
         self._traces: List[TraceModel] = []
+        self._maths_recipes: dict = {}   # trace_name → MathsRecipe
+        self._filter_stacks: dict = {}   # trace_name → list[FilterRecipe]
         self._plugins = PluginManager()
         self._plugins.discover()
         self._settings: dict = self._load_settings_dict()
@@ -620,6 +622,13 @@ class MainWindow(QMainWindow):
         self._channel_panel.trace_renamed.connect(self._on_trace_renamed)
         self._channel_panel.segment_changed.connect(self._on_segment_changed)
         self._channel_panel.unit_changed.connect(self._on_unit_changed)
+        # maths_id is purely a UI alias — recipes bind by trace.name, so
+        # toggling a badge never changes any recipe's output.  No re-eval
+        # hook needed here.  Renumber/Reset paths rewrite recipes explicitly
+        # via _apply_maths_id_remap and then call _reevaluate_maths_traces
+        # once at the end.
+        self._channel_panel.maths_id_reset_requested.connect(
+            self._reset_or_renumber_maths_ids)
         self._channel_panel.trace_context_menu_requested.connect(
             self._show_channel_context_menu)
         self._channel_panel.set_scroll_primaries(self._scroll_primaries)
@@ -627,6 +636,8 @@ class MainWindow(QMainWindow):
 
         self._interp_mode = self._settings.get("interp_mode", "linear")
         self._lane_label_size: int = int(self._settings.get("lane_label_size", 8))
+        self._filter_auto_recalc: bool = bool(
+            self._settings.get("filter_auto_recalc", True))
         self._show_lane_labels: bool = bool(self._settings.get("show_lane_labels", True))
         self._allow_theme_force_labels: bool = bool(
             self._settings.get("allow_theme_force_labels", False))
@@ -691,6 +702,8 @@ class MainWindow(QMainWindow):
             self._on_status_bar_toggle_interp)
         self._scope_status.trace_context_menu_requested.connect(
             self._show_channel_context_menu)
+        self._scope_status.maths_edit_requested.connect(
+            self._on_maths_edit_requested)
         # Insert status bar BEFORE the range bar — achieved by the fact
         # that _plot already has its range_bar at its bottom. We just add
         # the status bar after _plot in the outer container so visually:
@@ -941,6 +954,22 @@ class MainWindow(QMainWindow):
         a = analysis_menu.addAction("Clear All Filters")
         a.triggered.connect(self._clear_all_filters)
         analysis_menu.addSeparator()
+        a = analysis_menu.addAction("Maths...")
+        a.setShortcut(QKeySequence("Ctrl+M"))
+        a.triggered.connect(self._show_apply_maths)
+        a = analysis_menu.addAction("Reset Maths IDs")
+        a.setToolTip(
+            "If no maths IDs are assigned: assign A, B, C... to every visible "
+            "trace in panel order.\n"
+            "If some are assigned: renumber them sequentially and rewrite "
+            "existing maths recipes to match.")
+        a.triggered.connect(self._reset_or_renumber_maths_ids)
+        a = analysis_menu.addAction("Cleanup Maths Traces")
+        a.setToolTip(
+            "Remove maths traces whose source signals are gone, then renumber.\n"
+            "Hidden traces are kept (only fully-removed sources count as orphans).")
+        a.triggered.connect(self._cleanup_maths_traces)
+        analysis_menu.addSeparator()
         interp_trace_menu = analysis_menu.addMenu("Interpolation per Channel")
         self._per_trace_interp_menu = interp_trace_menu
         # Populated dynamically in _update_per_trace_interp_menu()
@@ -1099,6 +1128,21 @@ class MainWindow(QMainWindow):
             self._dlg_dimmed_opacity)
         settings_menu.addAction("Dashed Line Config…").triggered.connect(
             self._dlg_dashed_line_config)
+
+        settings_menu.addSeparator()
+        filter_menu = settings_menu.addMenu("Filtering")
+        filter_menu.setToolTipsVisible(True)
+        self._act_filter_auto_recalc = filter_menu.addAction("Auto re-evaluate")
+        self._act_filter_auto_recalc.setCheckable(True)
+        self._act_filter_auto_recalc.setChecked(self._filter_auto_recalc)
+        self._act_filter_auto_recalc.setToolTip(
+            "When enabled, applying or editing a filter automatically\n"
+            "re-evaluates downstream maths traces that use this trace as a\n"
+            "filtered input.\n"
+            "When disabled, use right-click → Recalculate Filters for a manual\n"
+            "refresh of a single trace and its dependency chain.")
+        self._act_filter_auto_recalc.triggered.connect(
+            self._toggle_filter_auto_recalc)
 
         settings_menu.addSeparator()
         per_menu = settings_menu.addMenu("Periodicity Estimation")
@@ -1388,6 +1432,7 @@ class MainWindow(QMainWindow):
 
         add("FFT", self._show_fft)
         add("Filter", self._show_filter)
+        add("Maths", self._show_apply_maths)
         tb.addSeparator()
         add("Screenshot", self._save_screenshot)
 
@@ -1586,6 +1631,8 @@ class MainWindow(QMainWindow):
 
     def _remove_trace(self, trace_name: str):
         self._traces = [t for t in self._traces if t.name != trace_name]
+        self._maths_recipes.pop(trace_name, None)
+        self._filter_stacks.pop(trace_name, None)
         self._channel_panel.remove_trace(trace_name)
         self._plot.remove_trace(trace_name)
         self._refresh_trigger_channels()
@@ -1606,6 +1653,8 @@ class MainWindow(QMainWindow):
         for t in list(self._traces):
             self._channel_panel.remove_trace(t.name)
         self._traces.clear()
+        self._maths_recipes.clear()
+        self._filter_stacks.clear()
         self._plot.clear_all()          # also clears persist/retrigger state in plot
         self._last_retrigger_results.clear()
         self._last_trigger_t_pos  = None
@@ -2250,6 +2299,7 @@ class MainWindow(QMainWindow):
                                        self._interp_mode)
                       for t in self._traces}
         self._scope_status.set_trace_interp_modes(interp_map)
+        self._scope_status.set_maths_recipes(self._maths_recipes)
         self._scope_status.update(
             self._traces, x_major_div, trig_info, y_major_divs,
             sinc_active, settings=self._settings)
@@ -2409,18 +2459,442 @@ class MainWindow(QMainWindow):
             return
         from core.filter_dialog import FilterDialog
         dlg = FilterDialog(self._traces, parent=self)
-        dlg.filters_applied.connect(self._on_filters_applied)
+        dlg.filter_recipe_added.connect(self._push_filter_recipe)
+        dlg.clear_requested.connect(self._clear_filter_stacks)
         dlg.exec()
 
     def _clear_all_filters(self):
+        """Wipe every trace's filter stack and re-apply (empty = unfilter)."""
+        for name in list(self._filter_stacks.keys()):
+            self._filter_stacks.pop(name)
         for trace in self._traces:
-            trace.clear_filter()
+            trace._filter_stack_summary = ""
+            self._apply_filter_stack(trace)
+        self._reevaluate_maths_traces()
         self._plot.refresh_all()
+        self._refresh_status_bar()
         self._status_lbl.setText("All filters cleared.")
 
-    def _on_filters_applied(self, names):
+    # ── Maths ──────────────────────────────────────────────────────────
+
+    def _next_maths_name(self) -> str:
+        """Return the next available "Maths_NNN" name."""
+        existing = {t.name for t in self._traces}
+        i = 0
+        while True:
+            name = f"Maths_{i:03d}"
+            if name not in existing:
+                return name
+            i += 1
+
+    def _show_apply_maths(self):
+        if not self._traces:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, self.tr("Apply Maths"),
+                self.tr("Load at least one trace before applying maths."))
+            return
+        from core.apply_maths_dialog import ApplyMathsDialog
+        dlg = ApplyMathsDialog(
+            traces           = self._traces,
+            existing_recipes = self._maths_recipes,
+            next_name        = self._next_maths_name(),
+            parent           = self,
+        )
+        dlg.maths_applied.connect(self._on_maths_applied)
+        dlg.exec()
+
+    def _on_maths_edit_requested(self, trace_name: str):
+        """Re-open the maths dialog to edit an existing maths trace."""
+        recipe = self._maths_recipes.get(trace_name)
+        if recipe is None:
+            return
+        from core.apply_maths_dialog import ApplyMathsDialog
+        dlg = ApplyMathsDialog(
+            traces           = self._traces,
+            existing_recipes = self._maths_recipes,
+            next_name        = trace_name,
+            existing_recipe  = recipe,
+            parent           = self,
+        )
+        dlg.maths_applied.connect(self._on_maths_applied)
+        dlg.exec()
+
+    def _on_maths_applied(self, recipe, result_trace):
+        """Receive a freshly-evaluated maths trace from the dialog."""
+        self._maths_recipes[result_trace.name] = recipe
+
+        existing = next(
+            (t for t in self._traces if t.name == result_trace.name), None)
+        if existing is not None:
+            # Edit mode: mutate the existing trace in place so that identity,
+            # colour, maths_id, visibility and channel panel references are
+            # all preserved.  Only segments and user-editable fields change.
+            existing.segments = result_trace.segments
+            existing.label    = result_trace.label
+            existing.unit     = result_trace.unit
+            self._channel_panel.refresh_all()
+            self._plot.add_trace(existing)
+        else:
+            # New maths trace: assign colour from theme and add everywhere
+            maths_count = sum(1 for n in self._maths_recipes
+                              if n != result_trace.name)
+            result_trace.set_user_color(self.theme.maths_color(maths_count))
+            self._traces.append(result_trace)
+            self._channel_panel.add_trace(result_trace)
+            self._plot.add_trace(result_trace)
+
+        self._refresh_trigger_channels()
+        self._channel_panel.refresh_all()   # picks up maths_id badge changes
+        self._refresh_status_bar()
+        self._cursor_panel.set_trace_order(
+            self._channel_panel.get_ordered_names())
+        self._status_lbl.setText(
+            self.tr(f"Maths trace created: {result_trace.label}"))
+
+    def _reevaluate_maths_traces(self):
+        """Re-run all maths recipes whose inputs use post-filter data.
+
+        Iterates in topological order (sources first) so consumers always
+        read freshly-computed sources.  Each re-evaluated trace gets its
+        filter stack re-applied against the new data so a maths trace's
+        own filters stay visible and downstream consumers reading via
+        'filtered' mode pick up the current filter result.
+        """
+        if not self._maths_recipes:
+            return
+        from pytraceview.maths_engine import evaluate_maths, MathsEvalError
+
+        for tname in self._topo_sort_maths():
+            recipe = self._maths_recipes.get(tname)
+            if recipe is None:
+                continue
+            if not any(v == "filtered" for v in recipe.filter_mode.values()):
+                continue
+            traces_by_name = {t.name: t for t in self._traces}
+            try:
+                new_trace = evaluate_maths(recipe, traces_by_name)
+            except MathsEvalError:
+                continue   # source missing or broken — leave old data in place
+
+            existing = next((t for t in self._traces if t.name == tname), None)
+            if existing is not None:
+                existing.segments = new_trace.segments
+                # Re-apply this trace's stack against the fresh raw data.
+                # Replaces the old carry-over-stale-filtered_data approach.
+                self._apply_filter_stack(existing)
+                self._plot.add_trace(existing)
+
+    # ── Maths ID management ────────────────────────────────────────────
+
+    @staticmethod
+    def _maths_id_for_index(idx: int) -> str:
+        """0 -> 'A', 25 -> 'Z', 26 -> 'AA', 51 -> 'AZ', 52 -> 'BA', ..."""
+        if idx < 26:
+            return chr(ord('A') + idx)
+        idx -= 26
+        return chr(ord('A') + idx // 26) + chr(ord('A') + idx % 26)
+
+    def _apply_maths_id_remap(self, remap: dict):
+        """Apply a maths-ID remap to every trace and every recipe at once.
+
+        remap: {old_id: new_id}.  Updates trace.maths_id, recipe.source_map,
+        recipe.filter_mode, and recipe.expression with collision-safe substitution.
+        """
+        from pytraceview.maths_engine import remap_expression
+        if not remap:
+            return
+        # Update trace.maths_id values (no iteration-while-mutating risk
+        # because each trace has a unique key and we read-then-write once)
+        for t in self._traces:
+            if t.maths_id in remap:
+                t.maths_id = remap[t.maths_id]
+        # Rewrite each recipe
+        for recipe in self._maths_recipes.values():
+            recipe.expression  = remap_expression(recipe.expression, remap)
+            recipe.source_map  = {remap.get(k, k): v
+                                  for k, v in recipe.source_map.items()}
+            recipe.filter_mode = {remap.get(k, k): v
+                                  for k, v in recipe.filter_mode.items()}
+
+    def _renumber_maths_ids(self):
+        """Reassign maths IDs A, B, C... sequentially in channel-panel order.
+
+        Traces with no maths_id are skipped.  Recipes are rewritten so existing
+        maths traces continue to evaluate correctly with the new letters.
+        """
+        ordered_names = self._channel_panel.get_ordered_names()
+        name_to_trace = {t.name: t for t in self._traces}
+
+        remap: dict = {}
+        next_idx = 0
+        for tname in ordered_names:
+            t = name_to_trace.get(tname)
+            if not t or not t.maths_id:
+                continue
+            new_id = self._maths_id_for_index(next_idx)
+            next_idx += 1
+            if t.maths_id != new_id:
+                remap[t.maths_id] = new_id
+
+        if not remap:
+            self._status_lbl.setText("Maths IDs already sequential.")
+            return
+
+        self._apply_maths_id_remap(remap)
+        self._channel_panel.refresh_all()
+        self._reevaluate_maths_traces()
+        self._refresh_status_bar()
+        self._status_lbl.setText(
+            f"Renumbered {len(remap)} maths ID(s).")
+
+    def _reset_or_renumber_maths_ids(self):
+        """Smart 'Reset Maths IDs' action.
+
+        - If NO trace currently has a maths_id: assign A, B, C... to every
+          visible trace in channel-panel display order.
+        - If some traces already have IDs: renumber the assigned ones
+          sequentially (existing behaviour) and rewrite all recipes.
+        """
+        if any(t.maths_id for t in self._traces):
+            self._renumber_maths_ids()
+            return
+
+        ordered_names = self._channel_panel.get_ordered_names()
+        name_to_trace = {t.name: t for t in self._traces}
+        count = 0
+        for tname in ordered_names:
+            t = name_to_trace.get(tname)
+            if t and t.visible:
+                t.maths_id = self._maths_id_for_index(count)
+                count += 1
+
+        if count == 0:
+            self._status_lbl.setText(
+                "No visible traces to assign maths IDs to.")
+            return
+
+        self._channel_panel.refresh_all()
+        self._refresh_status_bar()
+        self._status_lbl.setText(
+            f"Assigned maths IDs A..{self._maths_id_for_index(count - 1)} "
+            f"to {count} visible trace(s).")
+
+    # ── Filter stack management ────────────────────────────────────────
+
+    def _apply_filter_stack(self, trace):
+        """Compute filtered_data for every segment by running this trace's
+        stack against seg.data, and update the two trace-level description
+        fields the status block reads.  No-op (clears the filter) when the
+        stack is empty.
+        """
+        from core.filter_engine import (
+            apply_filter_stack, describe_recipe, stack_summary,
+        )
+        stack = self._filter_stacks.get(trace.name, [])
+        if not stack:
+            trace.clear_filter()
+            trace._filter_stack_summary = ""
+            return
+
+        sps = trace.sample_rate
+        skipped = []
+
+        def _note_skip(recipe, exc):
+            skipped.append((recipe.ensure_description(), str(exc)))
+
+        results = []
+        for seg in trace.segments:
+            if len(seg.data) < 4:
+                results.append(None)
+                continue
+            try:
+                results.append(apply_filter_stack(
+                    stack, seg.data, sps, on_error=_note_skip))
+            except Exception:
+                results.append(None)
+
+        # Row-3 of the status block shows the last filter (compact form);
+        # tooltip shows the whole chain.
+        last_desc = describe_recipe(stack[-1])
+        full_desc = stack_summary(stack)
+        trace.set_filter(results, last_desc)
+        trace._filter_stack_summary = full_desc
+
+        # Surface skipped filters once per call so the user knows their
+        # Nyquist-violating filter didn't silently disappear.
+        if skipped:
+            seen = set()
+            unique = [(d, e) for (d, e) in skipped
+                      if not (d in seen or seen.add(d))]
+            self._status_lbl.setText(
+                f"Filter skipped on {trace.label}: "
+                + "; ".join(f"{d} ({e})" for d, e in unique))
+
+    def _push_filter_recipe(self, recipe, trace_names):
+        """Append `recipe` to each named trace's stack, re-apply, and
+        re-evaluate downstream maths if auto-recalc is on.  Connected to
+        FilterDialog.filter_recipe_added.
+        """
+        affected = []
+        for name in trace_names:
+            trace = next((t for t in self._traces if t.name == name), None)
+            if trace is None:
+                continue
+            self._filter_stacks.setdefault(name, []).append(recipe)
+            self._apply_filter_stack(trace)
+            affected.append(trace.label)
+        if self._filter_auto_recalc:
+            self._reevaluate_maths_traces()
         self._plot.refresh_all()
-        self._status_lbl.setText(f"Filter applied: {', '.join(names)}")
+        self._refresh_status_bar()
+        if affected:
+            self._status_lbl.setText(
+                f"Filter '{recipe.ensure_description()}' applied to: "
+                + ", ".join(affected))
+
+    def _clear_filter_stacks(self, trace_names):
+        """Pop the entire stack for each name.  Connected to
+        FilterDialog.clear_requested."""
+        cleared = []
+        for name in trace_names:
+            if name in self._filter_stacks:
+                self._filter_stacks.pop(name)
+            trace = next((t for t in self._traces if t.name == name), None)
+            if trace is not None:
+                self._apply_filter_stack(trace)   # empties filtered_data
+                cleared.append(trace.label)
+        if self._filter_auto_recalc:
+            self._reevaluate_maths_traces()
+        self._plot.refresh_all()
+        self._refresh_status_bar()
+        if cleared:
+            self._status_lbl.setText(
+                f"Filters cleared on: " + ", ".join(cleared))
+
+    def _set_filter_stack(self, trace_name: str, new_stack: list):
+        """Replace one trace's stack wholesale.  Connected to
+        EditFilterStackDialog.stack_changed."""
+        if new_stack:
+            self._filter_stacks[trace_name] = list(new_stack)
+        else:
+            self._filter_stacks.pop(trace_name, None)
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is not None:
+            self._apply_filter_stack(trace)
+        if self._filter_auto_recalc:
+            self._reevaluate_maths_traces()
+        self._plot.refresh_all()
+        self._refresh_status_bar()
+
+    def _recalc_filters_for_trace(self, trace_name: str):
+        """Manual recalc.  For a maths trace, walk dependencies first
+        (re-applying their stacks) then re-evaluate this one.  For a regular
+        trace, just re-apply its own stack.  Used by the right-click
+        'Recalculate Filters' action."""
+        visited = set()
+
+        def visit(name):
+            if name in visited:
+                return
+            visited.add(name)
+            recipe = self._maths_recipes.get(name)
+            if recipe is not None:
+                for src in recipe.source_map.values():
+                    visit(src)
+            trace = next((t for t in self._traces if t.name == name), None)
+            if trace is None:
+                return
+            self._apply_filter_stack(trace)
+
+        visit(trace_name)
+        # Re-evaluate downstream chain so consumers see refreshed data
+        self._reevaluate_maths_traces()
+        self._plot.refresh_all()
+        self._refresh_status_bar()
+        self._status_lbl.setText(f"Filters recalculated for {trace_name}")
+
+    def _topo_sort_maths(self) -> list:
+        """Return maths trace names in dependency order (sources first).
+        DFS over recipe.source_map.  Cycles are defended against by an
+        in-progress set: if a node is revisited mid-traversal, skip it."""
+        result   = []
+        visited  = set()
+        in_prog  = set()
+
+        def visit(name):
+            if name in visited or name in in_prog:
+                return
+            in_prog.add(name)
+            recipe = self._maths_recipes.get(name)
+            if recipe is not None:
+                for src in recipe.source_map.values():
+                    if src in self._maths_recipes:
+                        visit(src)
+            in_prog.discard(name)
+            visited.add(name)
+            result.append(name)
+
+        for name in self._maths_recipes:
+            visit(name)
+        return result
+
+    def _toggle_filter_auto_recalc(self, on: bool):
+        self._filter_auto_recalc = bool(on)
+        self._settings["filter_auto_recalc"] = self._filter_auto_recalc
+
+    def _show_edit_filter_stack(self, trace_name: str):
+        """Open the per-trace stack editor.  Hooks the editor's signals so
+        reorder/delete are applied live, and so [+ Add Filter…] spawns the
+        main FilterDialog pre-targeted at this one trace."""
+        trace = next((t for t in self._traces if t.name == trace_name), None)
+        if trace is None:
+            return
+        from core.edit_filter_stack_dialog import EditFilterStackDialog
+        from core.filter_dialog import FilterDialog
+
+        stack = list(self._filter_stacks.get(trace_name, []))
+        dlg = EditFilterStackDialog(trace.label, stack, parent=self)
+
+        def _on_stack_changed(new_stack):
+            self._set_filter_stack(trace_name, new_stack)
+
+        def _on_add_filter():
+            sub = FilterDialog(self._traces, parent=dlg,
+                               single_trace_name=trace_name)
+            def _on_recipe(recipe, names):
+                # Append to this trace's stack and refresh the editor view
+                self._push_filter_recipe(recipe, names)
+                dlg.refresh_from_external(
+                    list(self._filter_stacks.get(trace_name, [])))
+            sub.filter_recipe_added.connect(_on_recipe)
+            sub.exec()
+
+        dlg.stack_changed.connect(_on_stack_changed)
+        dlg.add_filter_requested.connect(_on_add_filter)
+        dlg.exec()
+
+    def _cleanup_maths_traces(self):
+        """Remove maths traces whose source signals are gone, then renumber.
+
+        A maths trace is considered orphaned when at least one trace.name in
+        its recipe.source_map no longer exists in self._traces.  Hidden traces
+        are NOT considered missing — only fully removed ones.
+        """
+        existing_names = {t.name for t in self._traces}
+        orphans = [
+            name for name, recipe in self._maths_recipes.items()
+            if any(tname not in existing_names
+                   for tname in recipe.source_map.values())
+        ]
+
+        for name in orphans:
+            self._remove_trace(name)   # also pops from _maths_recipes
+
+        self._renumber_maths_ids()
+        if orphans:
+            self._status_lbl.setText(
+                f"Removed {len(orphans)} orphan maths trace(s); IDs renumbered.")
 
     # ── Plugins ───────────────────────────────────────────────────────
 
@@ -3288,6 +3762,37 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             menu.addAction("Bring to Front").triggered.connect(
                 lambda: self._plot.bring_trace_to_front(trace_name))
+
+        menu.addSeparator()
+
+        # ── Filter stack ──────────────────────────────────────────────
+        stack = self._filter_stacks.get(trace_name, [])
+        edit_lbl = (f"Edit Filter Stack…  [{len(stack)}]" if stack
+                    else "Edit Filter Stack…")
+        menu.addAction(edit_lbl).triggered.connect(
+            lambda: self._show_edit_filter_stack(trace_name))
+        recalc_act = menu.addAction("Recalculate Filters")
+        recalc_act.setEnabled(bool(stack) or trace_name in self._maths_recipes)
+        recalc_act.setToolTip(
+            "Re-apply this trace's filter stack (and, for maths traces, "
+            "re-apply source stacks first) against current data.")
+        recalc_act.triggered.connect(
+            lambda: self._recalc_filters_for_trace(trace_name))
+
+        menu.addSeparator()
+
+        # ── Maths ID ──────────────────────────────────────────────────
+        mid = getattr(trace, "maths_id", "")
+        if mid:
+            menu.addAction(f"Clear Maths ID  [{mid}]").triggered.connect(
+                lambda: self._channel_panel.set_maths_id(trace_name, ""))
+        else:
+            nxt = self._channel_panel.next_available_id()
+            lbl = f"Assign Maths ID  [{nxt}]" if nxt else "Assign Maths ID"
+            menu.addAction(lbl).triggered.connect(
+                lambda: self._channel_panel.set_maths_id(
+                    trace_name,
+                    self._channel_panel.next_available_id()))
 
         menu.addSeparator()
 

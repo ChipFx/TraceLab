@@ -17,6 +17,7 @@ from typing import List
 
 from pytraceview.trace_model import TraceModel
 from core.channel_status_block import ChannelStatusBlock, BLOCK_H, BLOCK_W, _eng
+from core.maths_status_block   import MathsStatusBlock
 
 BAR_H  = BLOCK_H   # 110 px
 SEP_W  = 2
@@ -178,11 +179,13 @@ class TimeTrigBlock(QWidget):
 class ScopeStatusBar(QWidget):
     toggle_trace_interp          = pyqtSignal(str)
     trace_context_menu_requested = pyqtSignal(str, object)  # (trace_name, QPoint global)
+    maths_edit_requested         = pyqtSignal(str)           # trace_name
 
     def __init__(self, palette: dict, parent=None):
         super().__init__(parent)
         self._pal = dict(palette)
         self._trace_interp_modes: dict = {}
+        self._maths_recipes:      dict = {}   # trace_name → MathsRecipe
         self._svg_path: str = ""
         self._ch_blocks: list = []
         self._current_scale: float = 1.0
@@ -319,6 +322,10 @@ class ScopeStatusBar(QWidget):
     def set_trace_interp_modes(self, modes: dict):
         self._trace_interp_modes = dict(modes)
 
+    def set_maths_recipes(self, recipes: dict):
+        """Update the maths recipe lookup (trace_name → MathsRecipe)."""
+        self._maths_recipes = dict(recipes)
+
     def update(self, traces: List[TraceModel],
                x_span: float,
                trigger_info: str = "",
@@ -343,14 +350,26 @@ class ScopeStatusBar(QWidget):
         scaled_bh = max(55, int(BLOCK_H * s))
 
         for trace in visible:
-            y_div = y_major_divs.get(trace.name, 0.0)
-            mode  = self._trace_interp_modes.get(trace.name, "linear")
-            block = ChannelStatusBlock(
-                trace, y_div, mode, self._pal,
-                parent=self._ch_container)
-            block.set_scale(s)
-            block.toggle_interp.connect(self.toggle_trace_interp)
-            block.context_menu_requested.connect(self.trace_context_menu_requested)
+            recipe = self._maths_recipes.get(trace.name)
+            if recipe is not None:
+                y_div = y_major_divs.get(trace.name, 0.0)
+                block = MathsStatusBlock(
+                    trace, recipe, y_div, self._pal,
+                    parent=self._ch_container)
+                block.set_scale(s)
+                block.context_menu_requested.connect(
+                    self.trace_context_menu_requested)
+                block.edit_requested.connect(self.maths_edit_requested)
+            else:
+                y_div = y_major_divs.get(trace.name, 0.0)
+                mode  = self._trace_interp_modes.get(trace.name, "linear")
+                block = ChannelStatusBlock(
+                    trace, y_div, mode, self._pal,
+                    parent=self._ch_container)
+                block.set_scale(s)
+                block.toggle_interp.connect(self.toggle_trace_interp)
+                block.context_menu_requested.connect(
+                    self.trace_context_menu_requested)
             self._ch_blocks.append(block)
             self._ch_layout.addWidget(block)
             block.show()

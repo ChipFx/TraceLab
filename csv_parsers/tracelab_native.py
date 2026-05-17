@@ -207,6 +207,8 @@ def parse(filepath: str, all_lines: list) -> ParsedMetadata:
             ci.sample_rate = _sps_val
         if tm.get("t0_wall_clock"):
             ci.t0_wall_clock = tm["t0_wall_clock"]
+        if tm.get("maths_id"):
+            ci.maths_id = tm["maths_id"].strip()
 
     # ── Resolve #addgroup directives ─────────────────────────────────────
     # Runs after segment parsing so _seg_cols is populated: when a member is

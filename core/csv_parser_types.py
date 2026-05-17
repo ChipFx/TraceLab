@@ -34,6 +34,7 @@ class ColumnInfo:
     bwlimit: str = ""                 # bandwidth limit: "200M", "full", …
     sample_rate: Optional[float] = None  # Hz; None → use file-level default
     t0_wall_clock: str = ""           # ISO 8601 trigger/anchor time; "" → use file-level default
+    maths_id: str = ""                # pre-assigned maths identifier ("A", "B", …); "" = none
     time_format: str = ""             # per-column override for ParsedMetadata.time_format:
                                       #   ""                  → use file-level time_format
                                       #   "seconds_relative"  → column already has float seconds

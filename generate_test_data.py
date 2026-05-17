@@ -66,89 +66,117 @@ def generate_general():
 # ── Mode: maths demo ───────────────────────────────────────────────────────────
 
 def generate_maths():
-    """Four traces that together demonstrate every Maths operation clearly.
+    """Five traces that together demonstrate every Maths operation clearly.
 
     Trace design
     ------------
-    Sine_1Hz   — 1 Hz sine, ±1 V.
-                 Used as primary input for abs(), add, subtract, multiply,
-                 divide, and complex chains.
+    Sine_1Hz   — 1 Hz sine, +/-1 V.
+                 Primary signal — good for abs(), add, subtract, multiply,
+                 divide, integ(), diff(), and complex chains.
 
-    Sine_3Hz   — 3 Hz sine, ±0.35 V.
-                 A harmonic — when added to Sine_1Hz the compound waveform
-                 is instantly recognisable as a sum-of-frequencies shape.
+    Sine_3Hz   — 3 Hz sine, +/-0.35 V.
+                 Harmonic component.  When added to Sine_1Hz the compound
+                 waveform is immediately recognisable.
 
-    Envelope   — 0.5 Hz slow positive oscillation, range 0.2 … 1.0 V.
-                 Never reaches zero, so it is always safe as a divisor.
-                 Multiplying by it produces visible amplitude modulation;
-                 dividing by it normalises amplitude back out.
+    Cos_3Hz    — 3 Hz cosine, +/-0.35 V  (alias C).
+                 Same frequency as Sine_3Hz but 90 degrees out of phase.
+                 arcsin(B / 0.35) recovers instantaneous phase;
+                 B**2 + C**2 = 0.1225 (flat line — sin^2+cos^2 identity).
 
-    Gate_1Hz   — 1 Hz square wave, ±1.
-                 Multiplying any signal by the gate half-wave-rectifies it
-                 (passes positive half-cycles, inverts negative ones) which
-                 is one of the most visual results in the maths set.
+    Envelope   — 0.5 Hz slow positive oscillation, range 0.2 ... 1.0 V  (alias D).
+                 Never reaches zero so it is always safe as a divisor.
+                 Multiplying gives amplitude modulation; dividing normalises.
 
-    Suggested operations to try in ApplyMaths
-    ------------------------------------------
+    Gate_2Hz   — 2 Hz square wave, +/-1  (alias E).
+                 Double the frequency of Sine_1Hz.
+
+    Maths ID assignments A-E are embedded in the file as #trace_meta= headers
+    so they load automatically in TraceLab.
+
+    Suggested expressions (open Analysis -> Maths... after import):
     abs(A)              full-wave rectify Sine_1Hz
     A + B               compound 1 Hz + 3 Hz waveform
-    A - B               same but 3 Hz component is subtracted (phase flip)
+    A - B               same, 3 Hz component subtracted
     A * B               intermodulation / ring-mod of the two sines
-    A * C               amplitude modulation: Sine_1Hz × Envelope
-    A / C               normalised Sine_1Hz (amplitude lifted by 1/Envelope)
-    A * D               half-wave polarity switch (gate flips every half cycle)
-    (A + B) / C         compound waveform normalised by the envelope
-    abs(A * D)          equivalent to abs(A) — two ways to full-wave rectify
+    A * D               amplitude modulation: Sine_1Hz x Envelope
+    A / D               normalised Sine_1Hz
+    A * E               Sine_1Hz chopped at 2 Hz
+    integ(A * D)        integral of AM signal
+    diff(A)             rate of change of Sine_1Hz (leads by 90 deg)
+    (A + B) / D         compound waveform normalised by Envelope
+    arcsin(B / 0.35)    instantaneous phase of Sine_3Hz (radians)
+    B**2 + C**2         sin^2 + cos^2 = 0.1225 (flat line)
     """
     N   = 10_000
-    SPS = 5_000.0          # 5 kSa/s → 2 s of data
+    SPS = 5_000.0          # 5 kSa/s -> 2 s of data
     t   = np.arange(N) / SPS
 
-    # A: 1 Hz sine ±1 V
+    # A: 1 Hz sine +/-1 V
     sine_1hz = np.sin(2 * np.pi * 1.0 * t)
 
-    # B: 3 Hz sine ±0.35 V  (clear harmonic, won't overpower A)
+    # B: 3 Hz sine +/-0.35 V  (clear harmonic, won't overpower A)
     sine_3hz = np.sin(2 * np.pi * 3.0 * t) * 0.35
 
-    # C: slow positive envelope 0.5 Hz, range 0.2 … 1.0 V
-    #    sin goes −1 … 1, so (sin + 1) / 2 → 0 … 1; scale to 0.2 … 1.0
+    # C: 3 Hz cosine +/-0.35 V  (same amplitude as B, 90 deg out of phase)
+    cos_3hz  = np.cos(2 * np.pi * 3.0 * t) * 0.35
+
+    # D: slow positive envelope 0.5 Hz, range 0.2 ... 1.0 V
+    #    (sin+1)/2 maps to 0..1; scale to 0.2..1.0 so it never reaches zero
     envelope = 0.2 + 0.8 * (np.sin(2 * np.pi * 0.5 * t) + 1.0) / 2.0
 
-    # D: 1 Hz square wave ±1 (same period as Sine_1Hz — the relationship is obvious)
-    gate_1hz = np.sign(np.sin(2 * np.pi * 1.0 * t)).astype(float)
-    # np.sign returns 0 at zero-crossings; snap those to +1 for a clean square
-    gate_1hz[gate_1hz == 0.0] = 1.0
+    # E: 2 Hz square wave +/-1  (double frequency of Sine_1Hz)
+    gate_2hz = np.sign(np.sin(2 * np.pi * 2.0 * t)).astype(float)
+    gate_2hz[gate_2hz == 0.0] = 1.0   # snap zero-crossings to +1
 
     path = "maths_demo.csv"
     with open(path, "w", newline="") as f:
+        # TraceLab native metadata header: maths IDs are pre-assigned so the
+        # channel panel shows A-E badges as soon as the file is imported.
+        f.write(f"#samplerate={SPS:.0f}\n")
+        f.write('#trace_meta={"Sine_1Hz","maths_id=A"}\n')
+        f.write('#trace_meta={"Sine_3Hz","maths_id=B"}\n')
+        f.write('#trace_meta={"Cos_3Hz","maths_id=C"}\n')
+        f.write('#trace_meta={"Envelope","maths_id=D"}\n')
+        f.write('#trace_meta={"Gate_2Hz","maths_id=E"}\n')
         writer = csv.writer(f)
-        writer.writerow(["time", "Sine_1Hz", "Sine_3Hz", "Envelope", "Gate_1Hz"])
+        writer.writerow(["time", "Sine_1Hz", "Sine_3Hz", "Cos_3Hz",
+                         "Envelope", "Gate_2Hz"])
         for i in range(N):
             writer.writerow([
                 f"{t[i]:.8f}",
                 f"{sine_1hz[i]:.6f}",
                 f"{sine_3hz[i]:.6f}",
+                f"{cos_3hz[i]:.6f}",
                 f"{envelope[i]:.6f}",
-                f"{gate_1hz[i]:.6f}",
+                f"{gate_2hz[i]:.6f}",
             ])
 
     print(f"Generated {path}: {N} samples, {SPS:.0f} Sa/s, {N/SPS:.2f}s")
     print()
-    print("  Sine_1Hz  - 1 Hz sine, +/-1 V                         (alias A)")
-    print("  Sine_3Hz  - 3 Hz sine, +/-0.35 V                      (alias B)")
-    print("  Envelope  - 0.5 Hz slow positive wave, 0.2 ... 1.0 V  (alias C)")
-    print("  Gate_1Hz  - 1 Hz square wave, +/-1                     (alias D)")
+    print("  A  Sine_1Hz  - 1 Hz sine, +/-1 V")
+    print("  B  Sine_3Hz  - 3 Hz sine, +/-0.35 V")
+    print("  C  Cos_3Hz   - 3 Hz cosine, +/-0.35 V")
+    print("  D  Envelope  - 0.5 Hz slow positive wave, 0.2...1.0 V")
+    print("  E  Gate_2Hz  - 2 Hz square wave, +/-1")
     print()
-    print("Open in TraceLab, then Analysis -> Maths... and try:")
-    print("  abs(A)          full-wave rectify Sine_1Hz")
-    print("  A + B           compound waveform (1 Hz + 3 Hz)")
-    print("  A - B           same, 3 Hz component phase-flipped")
-    print("  A * B           intermodulation / ring-mod")
-    print("  A * C           amplitude modulation (Envelope modulates Sine_1Hz)")
-    print("  A / C           normalised Sine_1Hz (Envelope divides it back out)")
-    print("  A * D           half-wave polarity switch via square gate")
-    print("  (A + B) / C     compound waveform normalised by Envelope")
-    print("  abs(A * D)      full-wave rectify via gate (same result as abs(A))")
+    print("Identifiers A-E are embedded in the file. Import into TraceLab and")
+    print("open Analysis -> Maths... -- identifiers are already set up.")
+    print()
+    print("sin/cos/arcsin/arccos all use RADIANS. To convert degrees: multiply by pi/180.")
+    print()
+    print("Suggested expressions:")
+    print("  abs(A)              full-wave rectify Sine_1Hz")
+    print("  A + B               compound 1 Hz + 3 Hz waveform")
+    print("  A - B               same, 3 Hz component subtracted")
+    print("  A * B               intermodulation / ring-mod")
+    print("  A * D               amplitude modulation (Sine_1Hz x Envelope)")
+    print("  A / D               normalised Sine_1Hz")
+    print("  A * E               Sine_1Hz chopped at 2 Hz")
+    print("  integ(A * D)        integral of AM signal")
+    print("  diff(A)             rate of change of Sine_1Hz")
+    print("  (A + B) / D         compound waveform normalised by Envelope")
+    print("  arcsin(B / 0.35)    instantaneous phase of Sine_3Hz (radians)")
+    print("  B**2 + C**2         sin^2 + cos^2 = 0.1225 (flat line)")
 
 
 # ── Mode stubs (future) ────────────────────────────────────────────────────────

@@ -352,8 +352,9 @@ class ScopeStatusBar(QWidget):
         for trace in visible:
             recipe = self._maths_recipes.get(trace.name)
             if recipe is not None:
+                y_div = y_major_divs.get(trace.name, 0.0)
                 block = MathsStatusBlock(
-                    trace, recipe, self._pal,
+                    trace, recipe, y_div, self._pal,
                     parent=self._ch_container)
                 block.set_scale(s)
                 block.context_menu_requested.connect(

@@ -2,19 +2,16 @@
 core/maths_status_block.py
 Painted status block for Maths traces in the scope status bar.
 
-Shows maths-specific information instead of instrument metadata:
-  Row 1  : trace label ("Maths 000")
-  Row 2  : expression (truncated to fit)
-  Row 3  : source aliases and filter-mode summary
+Layout mirrors ChannelStatusBlock so the two types sit together cleanly:
+  Row 1 (y=28)  : trace label  ("Maths 000")  — bold 13, outline 1.2
+  Row 2 (y=58)  : unit/div     ("{unit}/div")  — bold 11, outline 1.0
+  Row 3 (y=84)  : expression   (truncated)     — bold 10, outline 0.8
 
-  Badge top-right  : "MATHS"  — fixed identifier colour
-  Badge bottom-left: "FILT"   — shown when any input uses post-filter data
+  Badge top-right  : "MATHS"
+  Badge bottom-left: "FILT"  when any input uses post-filter data
 
-Left colour bar and bottom border follow the trace colour, same as
-ChannelStatusBlock.  All colours come from the theme palette.
-
-Right-click emits context_menu_requested (same API as ChannelStatusBlock).
-Left-click emits edit_requested so the main window can re-open the dialog.
+Left colour bar and bottom border follow the trace colour.
+All colours come from the theme palette — no hardcoded hex values.
 """
 
 from PyQt6.QtWidgets import QWidget
@@ -25,7 +22,7 @@ from PyQt6.QtGui import (
 
 from pytraceview.trace_model import TraceModel
 from core.channel_status_block import (
-    BLOCK_W, BLOCK_H, _outlined_text, _contrast_colors,
+    BLOCK_W, BLOCK_H, _outlined_text, _contrast_colors, _eng,
 )
 
 
@@ -37,16 +34,18 @@ class MathsStatusBlock(QWidget):
 
     def __init__(
         self,
-        trace:   TraceModel,
-        recipe,                   # MathsRecipe — imported lazily to avoid cycles
-        palette: dict = None,
+        trace:       TraceModel,
+        recipe,                        # MathsRecipe
+        y_major_div: float = 0.0,
+        palette:     dict  = None,
         parent=None,
     ):
         super().__init__(parent)
-        self._trace   = trace
-        self._recipe  = recipe
-        self._pal     = palette or {}
-        self._scale   = 1.0
+        self._trace       = trace
+        self._recipe      = recipe
+        self._y_major_div = y_major_div
+        self._pal         = palette or {}
+        self._scale       = 1.0
         self.setFixedSize(BLOCK_W, BLOCK_H)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._build_tooltip()
@@ -71,12 +70,8 @@ class MathsStatusBlock(QWidget):
 
     def _build_tooltip(self):
         r = self._recipe
-        sources = ", ".join(
-            f"{a}={n}" for a, n in r.source_map.items()
-        )
-        fmodes = ", ".join(
-            f"{a}:{m}" for a, m in r.filter_mode.items()
-        )
+        sources = ", ".join(f"{a}={n}" for a, n in r.source_map.items())
+        fmodes  = ", ".join(f"{a}:{m}" for a, m in r.filter_mode.items())
         self.setToolTip(
             f"Maths: {self._trace.label}\n"
             f"Expression: {r.expression}\n"
@@ -92,6 +87,22 @@ class MathsStatusBlock(QWidget):
         self.setStyleSheet(
             f"QToolTip {{ color: {fg}; background-color: {bg}; "
             f"border: 1px solid {bdr}; padding: 3px 6px; }}")
+
+    def _unit_div_text(self) -> str:
+        unit = getattr(self._trace, "unit", "") or ""
+        if self._y_major_div > 0 and unit and unit != "raw":
+            return _eng(self._y_major_div, unit) + "/div"
+        return "---/div"
+
+    def _truncate(self, text: str, font: QFont, max_px: int) -> str:
+        from PyQt6.QtGui import QFontMetrics
+        fm = QFontMetrics(font)
+        if fm.horizontalAdvance(text) <= max_px:
+            return text
+        ellipsis = "..."
+        while text and fm.horizontalAdvance(text + ellipsis) > max_px:
+            text = text[:-1]
+        return text + ellipsis
 
     # ── Events ─────────────────────────────────────────────────────────────────
 
@@ -132,8 +143,8 @@ class MathsStatusBlock(QWidget):
         fg_b = QColor(self._pal.get("badge_maths_fg", "#ffffff"))
         f_b  = QFont("Courier New", max(5, int(7 * s)))
         f_b.setBold(True)
-        fm = QFontMetrics(f_b)
-        bw = fm.horizontalAdvance(badge_txt) + int(8 * s)
+        fm_b = QFontMetrics(f_b)
+        bw = fm_b.horizontalAdvance(badge_txt) + int(8 * s)
         bh = int(14 * s)
         bx = w - bw - int(4 * s)
         by = int(4 * s)
@@ -144,35 +155,26 @@ class MathsStatusBlock(QWidget):
         p.setPen(QPen(fg_b))
         p.drawText(bx + int(4 * s), by + bh - 2, badge_txt)
 
-        # ── Row 2: expression (truncated) ─────────────────────────────────
-        expr     = self._recipe.expression
-        f_expr   = QFont("Courier New", max(6, int(10 * s)))
-        f_expr.setBold(False)
-        fm_e     = QFontMetrics(f_expr)
-        max_w    = w - int(10 * s)
-        ellipsis = "…"
-        if fm_e.horizontalAdvance(expr) > max_w:
-            while expr and fm_e.horizontalAdvance(expr + ellipsis) > max_w:
-                expr = expr[:-1]
-            expr += ellipsis
-        _outlined_text(p, int(5 * s), int(56 * s), expr,
-                       f_expr, fill_c, outline_c, 1.0)
+        # ── Row 2: unit/div — same style as ChannelStatusBlock row 2 ─────
+        f_vdiv = QFont("Courier New", max(6, int(11 * s)))
+        f_vdiv.setBold(True)
+        _outlined_text(p, int(5 * s), int(58 * s), self._unit_div_text(),
+                       f_vdiv, fill_c, outline_c, 1.0)
 
-        # ── Row 3: sources + filter summary ──────────────────────────────
-        aliases     = list(self._recipe.source_map.keys())
-        any_filt    = any(
+        # ── Row 3: expression — same style as ChannelStatusBlock row 3 ───
+        f_expr  = QFont("Courier New", max(6, int(10 * s)))
+        f_expr.setBold(True)
+        max_px  = w - int(10 * s)
+        expr    = self._truncate(self._recipe.expression, f_expr, max_px)
+        _outlined_text(p, int(5 * s), int(84 * s), expr,
+                       f_expr, fill_c, outline_c, 0.8)
+
+        # ── FILT badge (bottom-left): any input uses post-filter data ─────
+        aliases  = list(self._recipe.source_map.keys())
+        any_filt = any(
             self._recipe.filter_mode.get(a, "filtered") == "filtered"
             for a in aliases
         )
-        row3 = "+".join(aliases) if aliases else "?"
-        if self._trace.has_filter:
-            row3 += "  ⊛"             # filtered result
-        f_r3 = QFont("Courier New", max(6, int(10 * s)))
-        f_r3.setBold(True)
-        _outlined_text(p, int(5 * s), int(82 * s), row3,
-                       f_r3, fill_c, outline_c, 0.8)
-
-        # ── FILT badge (bottom-left): input data was post-filter ──────────
         if any_filt:
             ft_txt = "FILT"
             f_ft   = QFont("Courier New", max(5, int(7 * s)))

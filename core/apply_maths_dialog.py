@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore    import Qt, pyqtSignal
+from PyQt6.QtCore    import Qt, QObject, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QComboBox, QPushButton, QLineEdit,
@@ -134,33 +134,54 @@ class ApplyMathsDialog(QDialog):
         alias_row.addStretch()
         expr_layout.addLayout(alias_row)
 
-        # Operator buttons row
-        op_row = QHBoxLayout()
-        op_row.setSpacing(4)
-        op_row.addWidget(QLabel(self.tr("Ops:")))
+        # Row 1: arithmetic operators (compact fixed-width — single characters)
+        ops_row = QHBoxLayout()
+        ops_row.setSpacing(4)
+        ops_row.addWidget(QLabel(self.tr("Ops:")))
         for label, text in [
-            ("+", "+"), ("−", "-"), ("×", "*"), ("÷", "/"),
-            ("(", "("), (")", ")"), ("**", "**"), ("abs()", "abs("),
-            ("sqrt()", "sqrt("), ("sin()", "sin("), ("cos()", "cos("),
+            ("+", "+"), ("-", "-"), ("*", "*"), ("/", "/"),
+            ("(", "("), (")", ")"), ("**", "**"),
         ]:
             b = QPushButton(label)
-            b.setFixedWidth(44)
+            b.setFixedWidth(36)
             b.clicked.connect(lambda _=False, t=text: self._insert_text(t))
-            op_row.addWidget(b)
-        op_row.addStretch()
-        expr_layout.addLayout(op_row)
+            ops_row.addWidget(b)
+        ops_row.addStretch()
+        expr_layout.addLayout(ops_row)
+
+        # Row 2: math functions — no fixed width so they scale with font
+        fns_row = QHBoxLayout()
+        fns_row.setSpacing(4)
+        fns_row.addWidget(QLabel(self.tr("Fns:")))
+        # Trig/inverse take radians
+        for label, text, tip in [
+            ("abs()",    "abs(",    "Absolute value"),
+            ("sqrt()",   "sqrt(",   "Square root"),
+            ("sin()",    "sin(",    "Sine  (radians input)"),
+            ("cos()",    "cos(",    "Cosine  (radians input)"),
+            ("arcsin()", "arcsin(", "Inverse sine  (output: radians, input: -1..1)"),
+            ("arccos()", "arccos(", "Inverse cosine  (output: 0..pi, input: -1..1)"),
+            ("arctan()", "arctan(", "Inverse tangent  (output: radians)"),
+            ("integ()",  "integ(",  "Cumulative integral  (output unit: input*s)"),
+            ("diff()",   "diff(",   "Numerical derivative  (output unit: input/s)"),
+        ]:
+            b = QPushButton(label)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, t=text: self._insert_text(t))
+            fns_row.addWidget(b)
+        fns_row.addStretch()
+        expr_layout.addLayout(fns_row)
 
         # Expression text field
         self._expr_edit = QLineEdit()
-        self._expr_edit.setPlaceholderText(
-            self.tr("e.g.  (A + B) / C"))
+        self._expr_edit.setPlaceholderText(self.tr("e.g.  (A + B) / C"))
         expr_layout.addWidget(self._expr_edit)
 
         # Clear / Backspace
         clear_row = QHBoxLayout()
         clear_btn = QPushButton(self.tr("Clear"))
         clear_btn.clicked.connect(lambda: self._expr_edit.clear())
-        back_btn  = QPushButton("⌫")
+        back_btn  = QPushButton("<-")
         back_btn.setToolTip(self.tr("Delete last character"))
         back_btn.clicked.connect(self._backspace)
         clear_row.addWidget(clear_btn)
@@ -172,15 +193,18 @@ class ApplyMathsDialog(QDialog):
         # ── Output ────────────────────────────────────────────────────────
         out_group  = QGroupBox(self.tr("Output"))
         out_layout = QHBoxLayout(out_group)
-        out_layout.addWidget(QLabel(self.tr("Display name:")))
-        self._name_lbl = QLabel(self._next_name.replace("_", " "))
-        self._name_lbl.setStyleSheet("font-weight: bold;")
-        out_layout.addWidget(self._name_lbl)
-        out_layout.addSpacing(24)
+        out_layout.addWidget(QLabel(self.tr("Name:")))
+        self._name_edit = QLineEdit(self._next_name.replace("_", " "))
+        self._name_edit.setMinimumWidth(120)
+        self._name_edit.setToolTip(
+            self.tr("Display name for this maths trace.  "
+                    "Auto-numbered names are only a suggestion."))
+        out_layout.addWidget(self._name_edit)
+        out_layout.addSpacing(16)
         out_layout.addWidget(QLabel(self.tr("Unit:")))
         self._unit_edit = QLineEdit()
         self._unit_edit.setFixedWidth(80)
-        self._unit_edit.setPlaceholderText(self.tr("V, A, …"))
+        self._unit_edit.setPlaceholderText(self.tr("V, A, W, ..."))
         out_layout.addWidget(self._unit_edit)
         out_layout.addStretch()
         root.addWidget(out_group)
@@ -277,7 +301,7 @@ class ApplyMathsDialog(QDialog):
             return
 
         # Edit mode: fill from existing recipe
-        self._name_lbl.setText(recipe.result_label or recipe.result_name)
+        self._name_edit.setText(recipe.result_label or recipe.result_name)
         self._unit_edit.setText(recipe.result_unit)
         self._expr_edit.setText(recipe.expression)
 
@@ -353,13 +377,15 @@ class ApplyMathsDialog(QDialog):
             else:
                 align_ref = "fastest"
 
-        # Result name
+        # Result name — label is user-editable; internal name is derived from it
+        user_label = self._name_edit.text().strip() or self._next_name.replace("_", " ")
         if self._edit_recipe:
-            result_name  = self._edit_recipe.result_name
-            result_label = self._edit_recipe.result_label
+            result_name  = self._edit_recipe.result_name   # internal key never changes on edit
+            result_label = user_label
         else:
-            result_name  = self._next_name
-            result_label = self._next_name.replace("_", " ")
+            # Derive a Python-identifier-safe internal name from the display label
+            result_label = user_label
+            result_name  = user_label.replace(" ", "_")
 
         recipe = MathsRecipe(
             expression    = expr,
@@ -387,10 +413,15 @@ class ApplyMathsDialog(QDialog):
 
 # ── Input row helper ───────────────────────────────────────────────────────────
 
-class _InputRow(QWidget):
-    """One row in the Inputs section: alias label, trace combo, filter combo, remove btn."""
+class _InputRow(QObject):
+    """Logical row in the Inputs section (not a visual widget itself).
 
-    remove_clicked   = pyqtSignal()
+    Owns the four individual widgets that get placed into the grid layout by
+    the dialog.  Using QObject rather than QWidget avoids the row appearing as
+    a floating, invisible widget drawn over the dialog.
+    """
+
+    remove_clicked    = pyqtSignal()
     selection_changed = pyqtSignal()
 
     def __init__(
@@ -412,13 +443,13 @@ class _InputRow(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self.filter_combo = QComboBox()
-        self.filter_combo.addItem(self.tr("Filtered"), "filtered")
-        self.filter_combo.addItem(self.tr("Raw"),      "raw")
+        self.filter_combo.addItem("Filtered", "filtered")
+        self.filter_combo.addItem("Raw",      "raw")
         self.filter_combo.setFixedWidth(90)
 
-        self.remove_btn   = QPushButton("−")
+        self.remove_btn   = QPushButton("-")
         self.remove_btn.setFixedWidth(28)
-        self.remove_btn.setToolTip(self.tr("Remove this input"))
+        self.remove_btn.setToolTip("Remove this input")
         self.remove_btn.clicked.connect(self.remove_clicked)
 
         # Populate trace combo

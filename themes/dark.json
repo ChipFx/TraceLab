@@ -16,7 +16,9 @@
     "toolbar_bg": "#181818",
     "statusbar_bg": "#0d0d0d",
     "scope_bg": "#050508",
-    "scope_grid": "#1a2a1a"
+    "scope_grid": "#1a2a1a",
+    "maths_id_badge_bg": "#886600",
+    "maths_id_badge_fg": "#ffffff"
   },
   "statusbar": {
     "bar_bg": "#0a0a14",

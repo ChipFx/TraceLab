@@ -1359,9 +1359,10 @@ class ImportDialog(QDialog):
                 unit=scaling.unit,
                 scaling=scaling,
                 # Instrument channel metadata (preserved from file headers)
-                coupling=col_info.coupling if col_info else "",
+                coupling=col_info.coupling  if col_info else "",
                 impedance=col_info.impedance if col_info else "",
-                bwlimit=col_info.bwlimit if col_info else "",
+                bwlimit=col_info.bwlimit    if col_info else "",
+                maths_id=col_info.maths_id  if col_info else "",
                 # Source provenance — available to trace-manipulation plugins
                 source_file=self.load_result.filename,
                 original_col_name=col_name,

@@ -18,7 +18,9 @@
     "scope_bg": "#000800",
     "scope_grid": "#003300",
     "interp_sinc_color": "#aaff66",
-    "interp_cub_color":  "#00ffcc"
+    "interp_cub_color":  "#00ffcc",
+    "maths_id_badge_bg": "#336600",
+    "maths_id_badge_fg": "#ccffaa"
   },
   "statusbar": {
     "bar_bg": "#000800",

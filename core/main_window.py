@@ -621,6 +621,8 @@ class MainWindow(QMainWindow):
         self._channel_panel.trace_renamed.connect(self._on_trace_renamed)
         self._channel_panel.segment_changed.connect(self._on_segment_changed)
         self._channel_panel.unit_changed.connect(self._on_unit_changed)
+        self._channel_panel.maths_id_changed.connect(
+            lambda *_: self._reevaluate_maths_traces())
         self._channel_panel.trace_context_menu_requested.connect(
             self._show_channel_context_menu)
         self._channel_panel.set_scroll_primaries(self._scroll_primaries)
@@ -2507,6 +2509,7 @@ class MainWindow(QMainWindow):
             self._plot.add_trace(result_trace)
 
         self._refresh_trigger_channels()
+        self._channel_panel.refresh_all()   # picks up maths_id badge changes
         self._refresh_status_bar()
         self._cursor_panel.set_trace_order(
             self._channel_panel.get_ordered_names())
@@ -3409,6 +3412,21 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             menu.addAction("Bring to Front").triggered.connect(
                 lambda: self._plot.bring_trace_to_front(trace_name))
+
+        menu.addSeparator()
+
+        # ── Maths ID ──────────────────────────────────────────────────
+        mid = getattr(trace, "maths_id", "")
+        if mid:
+            menu.addAction(f"Clear Maths ID  [{mid}]").triggered.connect(
+                lambda: self._channel_panel.set_maths_id(trace_name, ""))
+        else:
+            nxt = self._channel_panel.next_available_id()
+            lbl = f"Assign Maths ID  [{nxt}]" if nxt else "Assign Maths ID"
+            menu.addAction(lbl).triggered.connect(
+                lambda: self._channel_panel.set_maths_id(
+                    trace_name,
+                    self._channel_panel.next_available_id()))
 
         menu.addSeparator()
 

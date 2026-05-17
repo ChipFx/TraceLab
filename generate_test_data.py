@@ -90,22 +90,28 @@ def generate_maths():
     Gate_2Hz   — 2 Hz square wave, +/-1  (alias E).
                  Double the frequency of Sine_1Hz.
 
-    Maths ID assignments A-E are embedded in the file as #trace_meta= headers
-    so they load automatically in TraceLab.
+    I_3Hz_0deg  — 3 Hz current, 0.035 A peak, in-phase with Sine_3Hz  (alias F).
+                  B/F = 10 Ohm exactly (flat line — Ohm's law demo).
+                  B*F = real power, always positive (unit infers to W).
+
+    I_3Hz_45lag — 3 Hz current, 0.035 A peak, lagging Sine_3Hz by 45 deg  (alias G).
+                  cos-phi = 0.707; B*G shows the reactive power pattern.
+
+    Maths IDs A-G and physical units are embedded as #trace_meta= headers,
+    so badges and unit inference are active as soon as the file is imported.
 
     Suggested expressions (open Analysis -> Maths... after import):
+    B * F               real power, resistive load  (infers W)
+    B / F               resistance = 10 Ohm flat line  (infers Ohm)
+    integ(B * F)        energy over time  (infers J)
+    B * G               instantaneous power, inductive load
     abs(A)              full-wave rectify Sine_1Hz
     A + B               compound 1 Hz + 3 Hz waveform
-    A - B               same, 3 Hz component subtracted
-    A * B               intermodulation / ring-mod of the two sines
-    A * D               amplitude modulation: Sine_1Hz x Envelope
+    A * D               amplitude modulation
     A / D               normalised Sine_1Hz
-    A * E               Sine_1Hz chopped at 2 Hz
-    integ(A * D)        integral of AM signal
-    diff(A)             rate of change of Sine_1Hz (leads by 90 deg)
-    (A + B) / D         compound waveform normalised by Envelope
+    diff(A)             rate of change of Sine_1Hz
     arcsin(B / 0.35)    instantaneous phase of Sine_3Hz (radians)
-    B**2 + C**2         sin^2 + cos^2 = 0.1225 (flat line)
+    B^2 + C^2           sin^2+cos^2 = 0.1225 (constant, float noise ~fV)
     """
     N   = 10_000
     SPS = 5_000.0          # 5 kSa/s -> 2 s of data
@@ -114,10 +120,10 @@ def generate_maths():
     # A: 1 Hz sine +/-1 V
     sine_1hz = np.sin(2 * np.pi * 1.0 * t)
 
-    # B: 3 Hz sine +/-0.35 V  (clear harmonic, won't overpower A)
+    # B: 3 Hz voltage sine +/-0.35 V  (clear harmonic, won't overpower A)
     sine_3hz = np.sin(2 * np.pi * 3.0 * t) * 0.35
 
-    # C: 3 Hz cosine +/-0.35 V  (same amplitude as B, 90 deg out of phase)
+    # C: 3 Hz voltage cosine +/-0.35 V  (90 deg ahead of B, same amplitude)
     cos_3hz  = np.cos(2 * np.pi * 3.0 * t) * 0.35
 
     # D: slow positive envelope 0.5 Hz, range 0.2 ... 1.0 V
@@ -128,19 +134,31 @@ def generate_maths():
     gate_2hz = np.sign(np.sin(2 * np.pi * 2.0 * t)).astype(float)
     gate_2hz[gate_2hz == 0.0] = 1.0   # snap zero-crossings to +1
 
+    # F: 3 Hz current, 0-degree phase, 0.035 A peak  (B/F = 10 Ohm exactly)
+    # With B as voltage (0.35 V peak) and F as current (0.035 A peak):
+    # peak resistance = 0.35/0.035 = 10 Ohm; power = B*F is always positive.
+    i_0deg   = np.sin(2 * np.pi * 3.0 * t) * 0.035
+
+    # G: 3 Hz current, 45-degree lag, 0.035 A peak  (inductive-like load)
+    # cos-phi = cos(45 deg) = 0.707; reactive component visible in B*G trace.
+    i_45lag  = np.sin(2 * np.pi * 3.0 * t - np.pi / 4) * 0.035
+
     path = "maths_demo.csv"
     with open(path, "w", newline="") as f:
-        # TraceLab native metadata header: maths IDs are pre-assigned so the
-        # channel panel shows A-E badges as soon as the file is imported.
+        # TraceLab native metadata: IDs and physical units pre-assigned.
+        # The channel panel shows badges A-G as soon as the file is imported,
+        # and unit inference in the Maths dialog uses the units automatically.
         f.write(f"#samplerate={SPS:.0f}\n")
-        f.write('#trace_meta={"Sine_1Hz","maths_id=A"}\n')
-        f.write('#trace_meta={"Sine_3Hz","maths_id=B"}\n')
-        f.write('#trace_meta={"Cos_3Hz","maths_id=C"}\n')
-        f.write('#trace_meta={"Envelope","maths_id=D"}\n')
+        f.write('#trace_meta={"Sine_1Hz","maths_id=A","unit=V"}\n')
+        f.write('#trace_meta={"Sine_3Hz","maths_id=B","unit=V"}\n')
+        f.write('#trace_meta={"Cos_3Hz","maths_id=C","unit=V"}\n')
+        f.write('#trace_meta={"Envelope","maths_id=D","unit=V"}\n')
         f.write('#trace_meta={"Gate_2Hz","maths_id=E"}\n')
+        f.write('#trace_meta={"I_3Hz_0deg","maths_id=F","unit=A"}\n')
+        f.write('#trace_meta={"I_3Hz_45lag","maths_id=G","unit=A"}\n')
         writer = csv.writer(f)
         writer.writerow(["time", "Sine_1Hz", "Sine_3Hz", "Cos_3Hz",
-                         "Envelope", "Gate_2Hz"])
+                         "Envelope", "Gate_2Hz", "I_3Hz_0deg", "I_3Hz_45lag"])
         for i in range(N):
             writer.writerow([
                 f"{t[i]:.8f}",
@@ -149,34 +167,41 @@ def generate_maths():
                 f"{cos_3hz[i]:.6f}",
                 f"{envelope[i]:.6f}",
                 f"{gate_2hz[i]:.6f}",
+                f"{i_0deg[i]:.8f}",
+                f"{i_45lag[i]:.8f}",
             ])
 
     print(f"Generated {path}: {N} samples, {SPS:.0f} Sa/s, {N/SPS:.2f}s")
     print()
-    print("  A  Sine_1Hz  - 1 Hz sine, +/-1 V")
-    print("  B  Sine_3Hz  - 3 Hz sine, +/-0.35 V")
-    print("  C  Cos_3Hz   - 3 Hz cosine, +/-0.35 V")
-    print("  D  Envelope  - 0.5 Hz slow positive wave, 0.2...1.0 V")
-    print("  E  Gate_2Hz  - 2 Hz square wave, +/-1")
+    print("  A  Sine_1Hz   - 1 Hz sine, +/-1 V")
+    print("  B  Sine_3Hz   - 3 Hz sine, +/-0.35 V")
+    print("  C  Cos_3Hz    - 3 Hz cosine, +/-0.35 V  (90 deg ahead of B)")
+    print("  D  Envelope   - 0.5 Hz positive wave, 0.2...1.0 V")
+    print("  E  Gate_2Hz   - 2 Hz square wave, +/-1")
+    print("  F  I_3Hz_0deg - 3 Hz current, 0.035 A peak, in-phase with B")
+    print("  G  I_3Hz_45lag- 3 Hz current, 0.035 A peak, 45 deg lagging B")
     print()
-    print("Identifiers A-E are embedded in the file. Import into TraceLab and")
-    print("open Analysis -> Maths... -- identifiers are already set up.")
+    print("Identifiers A-G and units are embedded. Import into TraceLab and")
+    print("open Analysis -> Maths... -- everything is ready.")
     print()
     print("sin/cos/arcsin/arccos all use RADIANS. To convert degrees: multiply by pi/180.")
     print()
     print("Suggested expressions:")
-    print("  abs(A)              full-wave rectify Sine_1Hz")
-    print("  A + B               compound 1 Hz + 3 Hz waveform")
-    print("  A - B               same, 3 Hz component subtracted")
-    print("  A * B               intermodulation / ring-mod")
-    print("  A * D               amplitude modulation (Sine_1Hz x Envelope)")
-    print("  A / D               normalised Sine_1Hz")
-    print("  A * E               Sine_1Hz chopped at 2 Hz")
-    print("  integ(A * D)        integral of AM signal")
-    print("  diff(A)             rate of change of Sine_1Hz")
-    print("  (A + B) / D         compound waveform normalised by Envelope")
-    print("  arcsin(B / 0.35)    instantaneous phase of Sine_3Hz (radians)")
-    print("  B**2 + C**2         sin^2 + cos^2 = 0.1225 (flat line)")
+    print("  Arithmetic:")
+    print("    abs(A)            full-wave rectify Sine_1Hz")
+    print("    A + B             compound 1 Hz + 3 Hz waveform")
+    print("    A * D             amplitude modulation (Sine_1Hz x Envelope)")
+    print("    A / D             normalised Sine_1Hz")
+    print("    A * E             Sine_1Hz chopped at 2 Hz")
+    print("    diff(A)           rate of change of Sine_1Hz")
+    print("  Electrical (unit inference fills in W, Ohm, J automatically):")
+    print("    B * F             real power, 3 Hz resistive load (W)")
+    print("    B / F             resistance = 10 Ohm (flat line)")
+    print("    integ(B * F)      energy over time (J)")
+    print("    B * G             instantaneous power, inductive load")
+    print("  Trig:")
+    print("    arcsin(B / 0.35)  instantaneous phase of B (radians)")
+    print("    B^2 + C^2         sin^2+cos^2 = 0.1225 (constant, float noise ~fV)")
 
 
 # ── Mode stubs (future) ────────────────────────────────────────────────────────

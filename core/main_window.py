@@ -623,6 +623,8 @@ class MainWindow(QMainWindow):
         self._channel_panel.unit_changed.connect(self._on_unit_changed)
         self._channel_panel.maths_id_changed.connect(
             lambda *_: self._reevaluate_maths_traces())
+        self._channel_panel.maths_id_reset_requested.connect(
+            self._reset_or_renumber_maths_ids)
         self._channel_panel.trace_context_menu_requested.connect(
             self._show_channel_context_menu)
         self._channel_panel.set_scroll_primaries(self._scroll_primaries)
@@ -949,6 +951,18 @@ class MainWindow(QMainWindow):
         a = analysis_menu.addAction("Maths...")
         a.setShortcut(QKeySequence("Ctrl+M"))
         a.triggered.connect(self._show_apply_maths)
+        a = analysis_menu.addAction("Reset Maths IDs")
+        a.setToolTip(
+            "If no maths IDs are assigned: assign A, B, C... to every visible "
+            "trace in panel order.\n"
+            "If some are assigned: renumber them sequentially and rewrite "
+            "existing maths recipes to match.")
+        a.triggered.connect(self._reset_or_renumber_maths_ids)
+        a = analysis_menu.addAction("Cleanup Maths Traces")
+        a.setToolTip(
+            "Remove maths traces whose source signals are gone, then renumber.\n"
+            "Hidden traces are kept (only fully-removed sources count as orphans).")
+        a.triggered.connect(self._cleanup_maths_traces)
         analysis_menu.addSeparator()
         interp_trace_menu = analysis_menu.addMenu("Interpolation per Channel")
         self._per_trace_interp_menu = interp_trace_menu
@@ -2484,26 +2498,24 @@ class MainWindow(QMainWindow):
 
     def _on_maths_applied(self, recipe, result_trace):
         """Receive a freshly-evaluated maths trace from the dialog."""
-        from pytraceview.maths_engine import MathsRecipe
-        # Assign maths colour from theme
-        maths_count = sum(
-            1 for n in self._maths_recipes if n != result_trace.name)
-        result_trace.set_user_color(self.theme.maths_color(maths_count))
-
         self._maths_recipes[result_trace.name] = recipe
 
-        existing_names = [t.name for t in self._traces]
-        if result_trace.name in existing_names:
-            # Update in-place (edit mode)
-            idx = existing_names.index(result_trace.name)
-            old = self._traces[idx]
-            result_trace.color             = old.color
-            result_trace.use_theme_color   = old.use_theme_color
-            result_trace.theme_color_index = old.theme_color_index
-            self._traces[idx] = result_trace
+        existing = next(
+            (t for t in self._traces if t.name == result_trace.name), None)
+        if existing is not None:
+            # Edit mode: mutate the existing trace in place so that identity,
+            # colour, maths_id, visibility and channel panel references are
+            # all preserved.  Only segments and user-editable fields change.
+            existing.segments = result_trace.segments
+            existing.label    = result_trace.label
+            existing.unit     = result_trace.unit
             self._channel_panel.refresh_all()
-            self._plot.add_trace(result_trace)
+            self._plot.add_trace(existing)
         else:
+            # New maths trace: assign colour from theme and add everywhere
+            maths_count = sum(1 for n in self._maths_recipes
+                              if n != result_trace.name)
+            result_trace.set_user_color(self.theme.maths_color(maths_count))
             self._traces.append(result_trace)
             self._channel_panel.add_trace(result_trace)
             self._plot.add_trace(result_trace)
@@ -2519,15 +2531,20 @@ class MainWindow(QMainWindow):
     def _reevaluate_maths_traces(self):
         """Re-run all maths recipes whose inputs use post-filter data.
 
-        Called after filters are applied or cleared so maths traces stay
-        consistent with the current filtered state of their source signals.
+        Mutates each maths trace's segments in-place so identity, maths_id,
+        colour, and channel-panel references stay intact.
+
+        Per-segment filtered_data is carried over so a filter applied directly
+        to a maths trace stays visible after re-evaluation, and downstream
+        maths reading this trace via "filtered" mode keep seeing the filter
+        result.  If sample count no longer matches, the old filter result is
+        stale and gets dropped silently.
         """
         if not self._maths_recipes:
             return
         from pytraceview.maths_engine import evaluate_maths, MathsEvalError
         traces_by_name = {t.name: t for t in self._traces}
         for tname, recipe in list(self._maths_recipes.items()):
-            # Only re-evaluate if any input is in "filtered" mode
             if not any(v == "filtered" for v in recipe.filter_mode.values()):
                 continue
             try:
@@ -2535,16 +2552,133 @@ class MainWindow(QMainWindow):
             except MathsEvalError:
                 continue   # source missing or broken — leave old data in place
 
-            existing_names = [t.name for t in self._traces]
-            if tname in existing_names:
-                idx = existing_names.index(tname)
-                old = self._traces[idx]
-                new_trace.color             = old.color
-                new_trace.use_theme_color   = old.use_theme_color
-                new_trace.theme_color_index = old.theme_color_index
-                new_trace.visible           = old.visible
-                self._traces[idx] = new_trace
-                self._plot.add_trace(new_trace)
+            existing = next((t for t in self._traces if t.name == tname), None)
+            if existing is not None:
+                # Carry over each segment's filtered_data where the shape still
+                # matches, so an existing filter on this maths trace survives.
+                for new_seg, old_seg in zip(new_trace.segments, existing.segments):
+                    if (old_seg.filtered_data is not None
+                        and old_seg.filtered_data.shape == new_seg.data.shape):
+                        new_seg.filtered_data = old_seg.filtered_data
+                existing.segments = new_trace.segments
+                self._plot.add_trace(existing)
+
+    # ── Maths ID management ────────────────────────────────────────────
+
+    @staticmethod
+    def _maths_id_for_index(idx: int) -> str:
+        """0 -> 'A', 25 -> 'Z', 26 -> 'AA', 51 -> 'AZ', 52 -> 'BA', ..."""
+        if idx < 26:
+            return chr(ord('A') + idx)
+        idx -= 26
+        return chr(ord('A') + idx // 26) + chr(ord('A') + idx % 26)
+
+    def _apply_maths_id_remap(self, remap: dict):
+        """Apply a maths-ID remap to every trace and every recipe at once.
+
+        remap: {old_id: new_id}.  Updates trace.maths_id, recipe.source_map,
+        recipe.filter_mode, and recipe.expression with collision-safe substitution.
+        """
+        from pytraceview.maths_engine import remap_expression
+        if not remap:
+            return
+        # Update trace.maths_id values (no iteration-while-mutating risk
+        # because each trace has a unique key and we read-then-write once)
+        for t in self._traces:
+            if t.maths_id in remap:
+                t.maths_id = remap[t.maths_id]
+        # Rewrite each recipe
+        for recipe in self._maths_recipes.values():
+            recipe.expression  = remap_expression(recipe.expression, remap)
+            recipe.source_map  = {remap.get(k, k): v
+                                  for k, v in recipe.source_map.items()}
+            recipe.filter_mode = {remap.get(k, k): v
+                                  for k, v in recipe.filter_mode.items()}
+
+    def _renumber_maths_ids(self):
+        """Reassign maths IDs A, B, C... sequentially in channel-panel order.
+
+        Traces with no maths_id are skipped.  Recipes are rewritten so existing
+        maths traces continue to evaluate correctly with the new letters.
+        """
+        ordered_names = self._channel_panel.get_ordered_names()
+        name_to_trace = {t.name: t for t in self._traces}
+
+        remap: dict = {}
+        next_idx = 0
+        for tname in ordered_names:
+            t = name_to_trace.get(tname)
+            if not t or not t.maths_id:
+                continue
+            new_id = self._maths_id_for_index(next_idx)
+            next_idx += 1
+            if t.maths_id != new_id:
+                remap[t.maths_id] = new_id
+
+        if not remap:
+            self._status_lbl.setText("Maths IDs already sequential.")
+            return
+
+        self._apply_maths_id_remap(remap)
+        self._channel_panel.refresh_all()
+        self._reevaluate_maths_traces()
+        self._refresh_status_bar()
+        self._status_lbl.setText(
+            f"Renumbered {len(remap)} maths ID(s).")
+
+    def _reset_or_renumber_maths_ids(self):
+        """Smart 'Reset Maths IDs' action.
+
+        - If NO trace currently has a maths_id: assign A, B, C... to every
+          visible trace in channel-panel display order.
+        - If some traces already have IDs: renumber the assigned ones
+          sequentially (existing behaviour) and rewrite all recipes.
+        """
+        if any(t.maths_id for t in self._traces):
+            self._renumber_maths_ids()
+            return
+
+        ordered_names = self._channel_panel.get_ordered_names()
+        name_to_trace = {t.name: t for t in self._traces}
+        count = 0
+        for tname in ordered_names:
+            t = name_to_trace.get(tname)
+            if t and t.visible:
+                t.maths_id = self._maths_id_for_index(count)
+                count += 1
+
+        if count == 0:
+            self._status_lbl.setText(
+                "No visible traces to assign maths IDs to.")
+            return
+
+        self._channel_panel.refresh_all()
+        self._refresh_status_bar()
+        self._status_lbl.setText(
+            f"Assigned maths IDs A..{self._maths_id_for_index(count - 1)} "
+            f"to {count} visible trace(s).")
+
+    def _cleanup_maths_traces(self):
+        """Remove maths traces whose source signals are gone, then renumber.
+
+        A maths trace is considered orphaned when at least one trace.name in
+        its recipe.source_map no longer exists in self._traces.  Hidden traces
+        are NOT considered missing — only fully removed ones.
+        """
+        existing_names = {t.name for t in self._traces}
+        orphans = [
+            name for name, recipe in self._maths_recipes.items()
+            if any(tname not in existing_names
+                   for tname in recipe.source_map.values())
+        ]
+
+        for name in orphans:
+            self._remove_trace(name)   # also pops from _maths_recipes
+
+        self._renumber_maths_ids()
+        if orphans:
+            self._status_lbl.setText(
+                f"Removed {len(orphans)} orphan maths trace(s); IDs renumbered.")
 
     # ── Plugins ───────────────────────────────────────────────────────
 

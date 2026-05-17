@@ -98,8 +98,7 @@ class ApplyMathsDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self._traces           = traces          # main window's list — do NOT append here
-        self._session_traces:  List[TraceModel] = []  # added during this dialog session
+        self._traces           = traces          # same list object as main_window._traces
         self._existing_recipes = existing_recipes
         self._next_name        = next_name
         self._edit_recipe      = existing_recipe
@@ -117,8 +116,13 @@ class ApplyMathsDialog(QDialog):
         self._build_ui()
 
     def _all_traces(self) -> List[TraceModel]:
-        """All traces available in this dialog: original + added this session."""
-        return self._traces + self._session_traces
+        """All traces available in this dialog.
+
+        maths_applied fires synchronously, so by the time the dialog refreshes
+        its dropdowns after each Add, main_window has already appended the new
+        trace to self._traces.  No separate session list is needed.
+        """
+        return self._traces
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -546,10 +550,10 @@ class ApplyMathsDialog(QDialog):
             QMessageBox.critical(self, self.tr("Maths Error"), str(exc))
             return
 
-        # Track in session list (NOT in self._traces) so the main window's
-        # _on_maths_applied takes the "new trace" path and calls add_trace()
-        # properly — which creates the Maths group and adds the channel row.
-        self._session_traces.append(result_trace)
+        # Emit before any local refresh: maths_applied fires synchronously,
+        # so _on_maths_applied in main_window runs now and appends result_trace
+        # to self._traces via add_trace().  After this line the trace is already
+        # in _all_traces() — no separate session tracking needed.
         self.maths_applied.emit(recipe, result_trace)
 
         if close_after:
